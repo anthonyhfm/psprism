@@ -1,0 +1,41 @@
+# Local build trees and generated output
+/build/
+/build-*/
+/out/
+/dist/
+CMakeUserPresets.json
+compile_commands.json
+
+# PSP toolchain output
+*.o
+*.a
+*.elf
+*.prx
+*.pbp
+*.PBP
+PARAM.SFO
+
+# Game dumps, extracted discs and reverse-engineering projects
+/daxter/
+/PSP_GAME/
+/UMD_DATA.BIN
+*.iso
+*.cso
+*.chd
+*.gpr
+*.rep/
+*.map
+
+# Generated recompiler payloads and diagnostics
+guest_image.bin
+relocations.bin
+imports.tsv
+generated_sources.cmake
+*.log
+
+# Editor and operating-system noise
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~
