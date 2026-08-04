@@ -323,6 +323,7 @@ struct Runtime::Implementation {
   Configuration configuration;
   std::unordered_set<std::string> warned;
   std::unordered_map<int, int> files;
+  std::unordered_map<int, std::int64_t> async_results;
   std::unordered_map<int, Directory> directories;
   std::filesystem::path current_directory;
   std::mutex objects_mutex;
@@ -862,6 +863,10 @@ void Runtime::dispatch(psprecomp::State& state, std::string_view name) {
                  "sceCtrlSetSamplingCycle", "sceCtrlSetIdleCancelThreshold",
                  "sceDisplaySetMode", "sceMpegAvcDecodeFlush"})) {
     state.gpr[2] = 0;
+    return;
+  }
+  if (is_one_of(name, {"sceKernelCheckCallback", "sceIoChangeAsyncPriority"})) {
+    state.gpr[2] = 0U;
     return;
   }
   if (name == "sceDisplaySetFrameBuf") {
@@ -1552,16 +1557,26 @@ void Runtime::dispatch(psprecomp::State& state, std::string_view name) {
     implementation_->files.erase(found);
     return;
   }
-  if (is_one_of(name, {"sceIoRead", "sceIoReadAsync", "sceIoWrite"})) {
+  if (is_one_of(name, {"sceIoRead", "sceIoReadAsync", "sceIoWrite",
+                       "sceIoWriteAsync"})) {
     const auto descriptor =
         implementation_->descriptor(static_cast<int>(state.gpr[4]));
     const auto size = static_cast<std::size_t>(state.gpr[6]);
     if (descriptor < 0 || !psprecomp::address_ok(state, state.gpr[5], size))
       return;
     auto* buffer = psprecomp::mapped_address(state, state.gpr[5], size);
-    const auto result = name == "sceIoWrite" ? ::write(descriptor, buffer, size)
-                                             : ::read(descriptor, buffer, size);
-    state.gpr[2] = result < 0 ? io_error : static_cast<std::uint32_t>(result);
+    const auto writing = name == "sceIoWrite" || name == "sceIoWriteAsync";
+    const auto result = writing ? ::write(descriptor, buffer, size)
+                                : ::read(descriptor, buffer, size);
+    if (name.ends_with("Async")) {
+      implementation_->async_results[static_cast<int>(state.gpr[4])] =
+          result < 0
+              ? static_cast<std::int64_t>(static_cast<std::int32_t>(io_error))
+              : result;
+      state.gpr[2] = 0U;
+    } else {
+      state.gpr[2] = result < 0 ? io_error : static_cast<std::uint32_t>(result);
+    }
     return;
   }
   if (is_one_of(name, {"sceIoLseek", "sceIoLseekAsync"})) {
@@ -1573,7 +1588,14 @@ void Runtime::dispatch(psprecomp::State& state, std::string_view name) {
                       static_cast<std::uint64_t>(state.gpr[6]) << 32U;
     const auto result = ::lseek(descriptor, static_cast<std::int64_t>(bits),
                                 static_cast<int>(state.gpr[7]));
-    if (result < 0) {
+    if (name == "sceIoLseekAsync") {
+      implementation_->async_results[static_cast<int>(state.gpr[4])] =
+          result < 0
+              ? static_cast<std::int64_t>(static_cast<std::int32_t>(io_error))
+              : result;
+      state.gpr[2] = 0U;
+      state.gpr[3] = 0U;
+    } else if (result < 0) {
       state.gpr[2] = io_error;
       state.gpr[3] = 0xffffffffU;
     } else {
@@ -1581,6 +1603,21 @@ void Runtime::dispatch(psprecomp::State& state, std::string_view name) {
       state.gpr[3] =
           static_cast<std::uint32_t>(static_cast<std::uint64_t>(result) >> 32U);
     }
+    return;
+  }
+  if (is_one_of(name, {"sceIoPollAsync", "sceIoWaitAsync", "sceIoWaitAsyncCB",
+                       "sceIoGetAsyncStat"})) {
+    const auto descriptor = static_cast<int>(state.gpr[4]);
+    const auto found = implementation_->async_results.find(descriptor);
+    if (found == implementation_->async_results.end()) {
+      state.gpr[2] = name == "sceIoPollAsync" ? 1U : io_error;
+      return;
+    }
+    if (auto* output = psprecomp::mapped_address(state, state.gpr[5],
+                                                 sizeof(std::int64_t)))
+      std::memcpy(output, &found->second, sizeof(found->second));
+    implementation_->async_results.erase(found);
+    state.gpr[2] = 0U;
     return;
   }
 
