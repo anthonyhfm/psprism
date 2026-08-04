@@ -45,6 +45,12 @@ int main() {
     CHECK(memory[2] == 0x11 && memory[3] == 0x22);
     CHECK(memory[4] == 0x33 && memory[5] == 0x44);
 
+    psprecomp::store32(state, 0x1008, 0x44332211U);
+    CHECK(psprecomp::load_word_left(state, 0x1009, 0xaabbccddU) ==
+          0x2211ccddU);
+    CHECK(psprecomp::load_word_right(state, 0x100a, 0xaabbccddU) ==
+          0xaabb4433U);
+
     state.vfpu[psprecomp::vfpu_index(0, 1)] =
         std::bit_cast<std::uint32_t>(2.0F);
     state.vfpu[psprecomp::vfpu_index(1, 1)] =
