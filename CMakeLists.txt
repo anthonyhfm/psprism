@@ -14,7 +14,8 @@ add_executable(psprecomp
     src/project.cpp
 )
 target_compile_definitions(psprecomp PRIVATE
-    PSPRECOMP_SOURCE_INCLUDE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/include")
+    PSPRECOMP_SOURCE_INCLUDE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/include"
+    PSPRECOMP_PSPRISM_DIR="${CMAKE_CURRENT_SOURCE_DIR}/psprism")
 target_include_directories(psprecomp PRIVATE src include)
 target_compile_options(psprecomp PRIVATE -Wall -Wextra -Wpedantic -Werror)
 target_link_libraries(psprecomp PRIVATE ${CMAKE_DL_LIBS})

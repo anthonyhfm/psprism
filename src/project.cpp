@@ -144,7 +144,8 @@ std::string generated_readme(const ExportConfig &config, InputKind kind,
          "- `src/generated/`: platform-independent functions and dispatcher\n"
          "- `platform/platform.h`: complete imported-API contract\n"
          "- `platform/psp/`: PSP entry point, ABI bridge and real SCE calls\n"
-         "- `platform/macos/`: native entry point and replaceable host stubs\n"
+         "- `platform/macos/`: native entry point and psprism adapter\n"
+         "- `psprism/`: vendored, game-editable PSP-to-host runtime engine\n"
          "- `include/psprecomp/`: portable runtime used by generated code\n"
          "- `config/`: the optional code map used for this export\n"
          "- `disc/`: extracted original disc filesystem (ISO inputs only)\n"
@@ -191,7 +192,9 @@ std::string root_makefile(const ExportConfig &config, bool has_disc,
          "\t$(CMAKE) -S . -B build/macos -DCMAKE_BUILD_TYPE=Debug\n"
          "\t$(CMAKE) --build build/macos -j\n\n"
          "macos-run: macos\n"
-         "\t\"$(CURDIR)/build/macos/"
+         "\tPSPRISM_DISC_ROOT=\"$(CURDIR)/disc\" "
+         "PSPRISM_WRITABLE_ROOT=\"$(CURDIR)/.psprism/ms0\" "
+         "\"$(CURDIR)/build/macos/"
       << config.project_name << ".app/Contents/MacOS/" << config.project_name
       << "\"\n\n"
          "ppsspp: psp-run\n\n"
@@ -317,6 +320,7 @@ std::string macos_cmake(const ExportConfig &config) {
          "set(CMAKE_CXX_STANDARD_REQUIRED ON)\n"
          "set(CMAKE_CXX_EXTENSIONS OFF)\n"
          "include(src/generated/generated_sources.cmake)\n\n"
+         "add_subdirectory(psprism)\n\n"
          "add_executable("
       << config.project_name
       << " MACOSX_BUNDLE\n"
@@ -329,6 +333,9 @@ std::string macos_cmake(const ExportConfig &config) {
          "target_include_directories("
       << config.project_name
       << " PRIVATE . include src/generated)\n"
+         "target_link_libraries("
+      << config.project_name
+      << " PRIVATE psprism)\n"
          "target_compile_options("
       << config.project_name
       << " PRIVATE -Wno-tautological-compare)\n"
@@ -419,6 +426,10 @@ ExportSummary export_codebase(const ExportConfig &config) {
   if (!std::filesystem::is_directory(runtime_source)) {
     throw std::runtime_error("cannot find PSPRecomp runtime headers at: " +
                              runtime_source.string());
+  }
+  if (!std::filesystem::is_directory(config.psprism_directory)) {
+    throw std::runtime_error("cannot find psprism engine at: " +
+                             config.psprism_directory.string());
   }
 
   const auto info = inspect_source(config.input);
@@ -514,6 +525,8 @@ ExportSummary export_codebase(const ExportConfig &config) {
     std::filesystem::create_directories(staging / "include");
     std::filesystem::copy(runtime_source, staging / "include" / "psprecomp",
                           std::filesystem::copy_options::recursive);
+    std::filesystem::copy(config.psprism_directory, staging / "psprism",
+                          std::filesystem::copy_options::recursive);
     GeneratedProjectOptions emitter_options;
     emitter_options.display_name = config.display_name;
     emitter_options.module_name = config.project_name.substr(0, 27U);
@@ -542,7 +555,8 @@ ExportSummary export_codebase(const ExportConfig &config) {
                "src/generated/*.o\nsrc/generated/*.elf\n"
                "src/generated/*.prx\nsrc/generated/*.PBP\n"
                "src/generated/PARAM.SFO\nsrc/generated/SND0.AT3\n"
-               "disc/\noriginal/\ndist/\nbuild/\n.psprecomp/\n.DS_Store\n");
+               "disc/\noriginal/\ndist/\nbuild/\n.psprecomp/\n"
+               ".psprism/\n.DS_Store\n");
     write_text(
         staging / "README.md",
         generated_readme(

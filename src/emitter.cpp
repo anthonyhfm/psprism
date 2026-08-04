@@ -1976,68 +1976,28 @@ void emit_project(const ElfImage& image, const std::filesystem::path& directory,
                "as the port grows.\n"
                "#include \"generated.hpp\"\n"
                "#include <platform/platform.h>\n"
-               "#include <array>\n"
-               "#include <cstdio>\n\n"
+               "#include <psprism/psprism.hpp>\n\n"
                "namespace psprecomp::platform {\n"
                "namespace {\n"
-               "std::uint8_t* shared_memory;\n"
-               "std::size_t shared_memory_size;\n"
-               "std::uint32_t shared_memory_base;\n"
-               "std::array<bool, "
-            << std::max<std::size_t>(platform_imports.size(), 1U)
-            << "> warned{};\n\n"
                "[[maybe_unused]] void invoke(State& state, ImportId id) {\n"
-               "  const auto index = static_cast<std::size_t>(id);\n"
-               "  if (index < warned.size() && !warned[index]) {\n"
-               "    std::fprintf(stderr, \"[psprecomp:macos] stub: %s\\n\", "
+               "  psprism::Runtime::instance().dispatch(state, "
                "import_name(id));\n"
-               "    warned[index] = true;\n"
-               "  }\n"
-               "  state.gpr[2] = 0x8002013aU;\n"
-               "  switch (id) {\n";
-        for (const auto& import : platform_imports) {
-            if (import.symbol == "sceKernelGetModuleId" ||
-                import.symbol == "sceKernelSetCompilerVersion" ||
-                import.symbol == "sceKernelSetCompiledSdkVersion" ||
-                import.symbol == "sceMpegAvcDecodeFlush") {
-                stream << "  case ImportId::" << import.id
-                       << ": state.gpr[2] = 0; break;\n";
-            } else if (import.symbol == "sceKernelExitGame" ||
-                       import.symbol == "sceKernelExitThread" ||
-                       import.symbol == "sceKernelSleepThreadCB") {
-                stream << "  case ImportId::" << import.id
-                       << ": state.gpr[2] = 0; "
-                          "state.stop_reason = StopReason::returned; break;\n";
-            } else if (import.symbol == "sceKernelPrintf") {
-                stream << "  case ImportId::" << import.id
-                       << ": {\n"
-                          "    const auto address = state.gpr[4];\n"
-                          "    if (address >= shared_memory_base && "
-                          "address - shared_memory_base < shared_memory_size)\n"
-                          "      std::fprintf(stderr, \"[guest] %s\", "
-                          "reinterpret_cast<const char*>(shared_memory + "
-                          "address - shared_memory_base));\n"
-                          "    state.gpr[2] = 0; break;\n"
-                          "  }\n";
-            }
-        }
-        stream << "  default: break;\n"
-                  "  }\n"
-                  "}\n"
-                  "} // namespace\n\n"
-                  "void configure_runtime(std::uint8_t* memory, "
-                  "std::size_t size, std::uint32_t base) {\n"
-                  "  shared_memory = memory; shared_memory_size = size; "
-                  "shared_memory_base = base;\n"
-                  "}\n\n"
-                  "void log(const char* format, std::uint32_t first, "
-                  "std::uint32_t second) {\n"
-                  "  std::fprintf(stderr, format, first, second);\n"
-                  "}\n\n"
-                  "bool patch_imports(State&) { return true; }\n\n"
-                  "bool dispatch_import(State& state, "
-                  "std::uint32_t current_pc) {\n"
-                  "  switch (current_pc - state.memory_base) {\n";
+               "}\n"
+               "} // namespace\n\n"
+               "void configure_runtime(std::uint8_t* memory, "
+               "std::size_t size, std::uint32_t base) {\n"
+               "  psprism::Runtime::instance().configure(memory, size, "
+               "base);\n"
+               "}\n\n"
+               "void log(const char* format, std::uint32_t first, "
+               "std::uint32_t second) {\n"
+               "  psprism::Runtime::instance().log(format, first, "
+               "second);\n"
+               "}\n\n"
+               "bool patch_imports(State&) { return true; }\n\n"
+               "bool dispatch_import(State& state, "
+               "std::uint32_t current_pc) {\n"
+               "  switch (current_pc - state.memory_base) {\n";
         for (const auto& import : platform_imports) {
             stream << "  case " << hex(import.source->stub_address)
                    << ": invoke(state, ImportId::" << import.id

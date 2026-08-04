@@ -72,6 +72,7 @@ my_game/
 ├── project.toml             reproducible project metadata
 ├── config/code.map          optional copied function metadata
 ├── include/psprecomp/       vendored portable runtime
+├── psprism/                 vendored PSP-to-host syscall engine
 ├── platform/platform.h      imported PSP API contract
 ├── platform/psp/            PSP entry point and SCE implementations
 ├── platform/macos/          native entry point and host implementations
@@ -89,8 +90,11 @@ make psp-run
 
 Use `make psp` to produce the PSP PRX, EBOOT and rebuilt ISO without launching
 the emulator. `make macos` builds a native Debug `.app`; `make macos-run` builds
-and executes that app. Platform-specific replacements for imported PSP APIs
-live outside the generated CPU code under `platform/`.
+and executes that app. The PSP target calls the firmware through
+`platform/psp`. Native targets use the vendored `psprism/` engine;
+`platform/macos` is the generated adapter between the game's import table and
+psprism. Every export owns its copy, so title-specific syscall quirks stay
+local to that game.
 
 For scripts and automation, use the same workflow without prompts:
 
@@ -159,6 +163,7 @@ workflow.
 - Guided ISO/ELF project wizard with `PARAM.SFO` metadata discovery
 - Automatic retail `~PSP` executable decryption through local PPSSPP
 - Streaming ISO 9660 extraction and complete self-contained codebase exports
+- Vendored psprism engine with an initial macOS syscall and filesystem backend
 - Address-sharded and function-oriented project emitters
 - Runtime unit tests plus native and PSP roundtrip coverage
 
@@ -171,6 +176,7 @@ differential testing on PPSSPP and physical hardware.
 
 ```text
 include/psprecomp/   Portable CPU, relocation and VFPU runtime
+psprism/             PSP-to-host runtime template vendored into every export
 src/                 ISO/ELF loaders, wizard, CLI and C++ project emitter
 tests/               Synthetic fixtures and host/PSP roundtrip tests
 tools/               Optional reverse-engineering metadata exporters

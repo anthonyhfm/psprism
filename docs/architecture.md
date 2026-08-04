@@ -14,7 +14,7 @@ ISO 9660 or ELF/PRX
     -> address and function metadata
     -> portable C++ emitter
     -> CPU runtime and generated platform contract
-    -> platform/psp (PSPSDK PRX/ISO) or platform/macos (native Debug app)
+    -> platform/psp (PSPSDK PRX/ISO) or psprism + platform/macos (native app)
 ```
 
 ## Loader and relocated image
@@ -90,18 +90,25 @@ Generated dispatch code calls the small `configure_runtime`, `patch_imports`,
 function directly.
 
 `platform/psp` owns module metadata, the MIPS ABI bridge, native thread
-trampolines and bindings for every resolved SCE import. `platform/macos` owns a
-native `.app` entry point and the parallel host implementation. Imports that do
-not yet have desktop behavior are explicit logging stubs returning a PSP-style
-unsupported-operation result, making missing platform work visible without
-leaking PSP SDK dependencies back into translated CPU code.
+trampolines and bindings for every resolved SCE import. On native targets,
+`platform/macos` is deliberately thin: the generated switch maps the game's
+import addresses to names, then delegates behavior to `psprism`.
+
+`psprism` is the PSP-to-host syscall engine. Its common runtime owns guest
+pointer validation, PSP path translation, file handles and fallback reporting;
+the first host module supplies macOS clocks and sleeping. Every exported
+codebase receives the complete engine source in its root and links it as a
+static library. This is an intentional compatibility boundary: a game may
+carry local quirks while the repository copy remains the default for future
+exports. Unimplemented calls are logged once and return a PSP error. Linux and
+Windows host modules can later implement the same small host interface.
 
 ## Export boundary
 
 The low-level emitter creates translated sources plus PSP and macOS platform
 glue.
 The project exporter wraps that output in a stable, beginner-facing codebase:
-it vendors the portable headers, records inputs and choices in `project.toml`,
+it vendors the portable headers and psprism source, records inputs and choices in `project.toml`,
 copies the optional code map, writes build documentation, and includes the disc
 filesystem when requested. Generation happens in a sibling staging directory
 and is renamed into place only after every step succeeds, so failed translation

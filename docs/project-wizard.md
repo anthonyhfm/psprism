@@ -76,16 +76,19 @@ Set `PPSSPP=/path/to/ppsspp` if the command is not in `PATH`.
 
 `platform/platform.h` is the generated contract for every imported PSP call.
 `platform/psp` satisfies it using the original SCE ABI and owns the PSP entry
-point. `platform/macos` owns the native entry point and contains explicit host
-implementations or visible fallback stubs for the same imports. The translated
+point. For `make macos-run`, the generated `platform/macos` adapter sends those
+imports to the statically linked `psprism/` engine. The Makefile also points
+psprism at `disc/` and a private `.psprism/ms0/` writable tree. The translated
 CPU code under `src/generated` therefore has no direct dependency on PSP SDK
 headers or SCE functions.
 
 Generated C++ lives in `src/generated`. With a code map, Guest functions are
 the semantic compilation units and groups of them are bundled into `unit_*.cpp`
 files. Without a map, address-based `shard_*.cpp` files are emitted. The
-portable runtime is copied into `include/psprecomp`, so moving or archiving the
-export does not break its include paths.
+portable runtime is copied into `include/psprecomp`, and the complete psprism
+source is copied into `psprism/`, so moving or archiving the export does not
+break its build. That psprism copy is meant to be edited when a game needs a
+host compatibility quirk.
 
 `disc/` and `original/` are deliberately ignored by the generated `.gitignore`
 to make accidental publication of copyrighted data less likely. Generated C++,
