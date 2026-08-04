@@ -439,6 +439,12 @@ std::string project_slug(std::string_view value) {
 }
 
 ExportSummary export_codebase(const ExportConfig& config) {
+  const auto throw_if_cancelled = [&]() {
+    if (config.is_cancel_requested && config.is_cancel_requested()) {
+      throw ExportCancelled();
+    }
+  };
+  throw_if_cancelled();
   if (config.display_name.empty() || config.project_name.empty()) {
     throw std::runtime_error("display name and project name cannot be empty");
   }
@@ -461,6 +467,7 @@ ExportSummary export_codebase(const ExportConfig& config) {
   std::filesystem::create_directories(config.output_directory.parent_path());
   std::filesystem::create_directories(staging);
   try {
+    throw_if_cancelled();
     std::filesystem::path executable;
     std::string decryption_backend;
     if (info.kind == InputKind::iso) {
@@ -484,6 +491,7 @@ ExportSummary export_codebase(const ExportConfig& config) {
             "encrypted executable");
       }
       if (config.extract_disc) {
+        throw_if_cancelled();
         std::uintmax_t extracted_size = 0;
         for (const auto& entry : iso.entries()) {
           if (!entry.directory) {
@@ -499,7 +507,14 @@ ExportSummary export_codebase(const ExportConfig& config) {
         if (config.progress) {
           config.progress("Extracting the disc filesystem");
         }
-        iso.extract_all(staging / "disc");
+        try {
+          iso.extract_all(staging / "disc", config.is_cancel_requested);
+        } catch (const std::runtime_error& error) {
+          if (std::string_view(error.what()) == "export cancelled") {
+            throw ExportCancelled();
+          }
+          throw;
+        }
         if (executable.empty()) {
           executable = staging / "disc" / iso_executable->path;
         }
@@ -524,6 +539,7 @@ ExportSummary export_codebase(const ExportConfig& config) {
       }
     }
 
+    throw_if_cancelled();
     if (config.progress) {
       config.progress("Loading and validating the PSP executable");
     }
@@ -537,6 +553,7 @@ ExportSummary export_codebase(const ExportConfig& config) {
     }
     std::optional<CodeMap> map;
     if (config.code_map) {
+      throw_if_cancelled();
       if (config.progress) {
         config.progress("Loading function metadata");
       }
@@ -547,6 +564,7 @@ ExportSummary export_codebase(const ExportConfig& config) {
     }
 
     std::filesystem::create_directories(staging / "include");
+    throw_if_cancelled();
     std::filesystem::copy(runtime_source, staging / "include" / "psprecomp",
                           std::filesystem::copy_options::recursive);
     std::filesystem::copy(config.psprism_directory, staging / "psprism",
@@ -557,12 +575,21 @@ ExportSummary export_codebase(const ExportConfig& config) {
     emitter_options.target_name = config.project_name;
     emitter_options.include_path = "../../include";
     emitter_options.platform_directory = staging / "platform";
+    emitter_options.is_cancel_requested = config.is_cancel_requested;
     if (config.progress) {
       config.progress("Translating Allegrex code to C++");
     }
-    emit_project(elf, staging / "src" / "generated", map ? &*map : nullptr,
-                 emitter_options);
+    try {
+      emit_project(elf, staging / "src" / "generated", map ? &*map : nullptr,
+                   emitter_options);
+    } catch (const std::runtime_error& error) {
+      if (std::string_view(error.what()) == "export cancelled") {
+        throw ExportCancelled();
+      }
+      throw;
+    }
 
+    throw_if_cancelled();
     if (config.progress) {
       config.progress("Writing project files");
     }
@@ -608,6 +635,7 @@ ExportSummary export_codebase(const ExportConfig& config) {
         ++translation_units;
       }
     }
+    throw_if_cancelled();
     if (config.progress) {
       config.progress("Publishing the completed project");
     }

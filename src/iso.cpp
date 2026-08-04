@@ -243,7 +243,9 @@ std::vector<std::uint8_t> IsoImage::read(std::string_view path) const {
   return read(*entry);
 }
 
-void IsoImage::extract_all(const std::filesystem::path &directory) const {
+void IsoImage::extract_all(
+    const std::filesystem::path &directory,
+    const std::function<bool()> &is_cancel_requested) const {
   std::ifstream source(path_, std::ios::binary | std::ios::ate);
   if (!source) {
     throw std::runtime_error("cannot open ISO image: " + path_.string());
@@ -254,6 +256,9 @@ void IsoImage::extract_all(const std::filesystem::path &directory) const {
   }
   std::vector<char> buffer(1024U * 1024U);
   for (const auto &entry : entries_) {
+    if (is_cancel_requested && is_cancel_requested()) {
+      throw std::runtime_error("export cancelled");
+    }
     const auto destination = directory / entry.path;
     if (entry.directory) {
       std::filesystem::create_directories(destination);
@@ -278,6 +283,9 @@ void IsoImage::extract_all(const std::filesystem::path &directory) const {
     }
     std::uint32_t remaining = entry.size;
     while (remaining != 0U) {
+      if (is_cancel_requested && is_cancel_requested()) {
+        throw std::runtime_error("export cancelled");
+      }
       const auto amount = std::min<std::size_t>(remaining, buffer.size());
       source.read(buffer.data(), static_cast<std::streamsize>(amount));
       if (!source) {

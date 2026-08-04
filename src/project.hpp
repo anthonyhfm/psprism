@@ -4,10 +4,16 @@
 #include <filesystem>
 #include <functional>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 
 namespace psprecomp {
+
+class ExportCancelled : public std::runtime_error {
+ public:
+  ExportCancelled() : std::runtime_error("export cancelled") {}
+};
 
 enum class InputKind { executable, iso };
 
@@ -31,6 +37,7 @@ struct ExportConfig {
   std::string disc_id;
   bool extract_disc{true};
   std::function<void(std::string_view)> progress;
+  std::function<bool()> is_cancel_requested;
 };
 
 struct ExportSummary {

@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -30,7 +31,8 @@ public:
   [[nodiscard]] std::optional<IsoEntry> find(std::string_view path) const;
   [[nodiscard]] std::vector<std::uint8_t> read(const IsoEntry &entry) const;
   [[nodiscard]] std::vector<std::uint8_t> read(std::string_view path) const;
-  void extract_all(const std::filesystem::path &directory) const;
+  void extract_all(const std::filesystem::path &directory,
+                   const std::function<bool()> &is_cancel_requested = {}) const;
 
 private:
   std::filesystem::path path_;

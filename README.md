@@ -169,6 +169,24 @@ The interactive wizard is the easiest path:
 ./build/psprecomp game.iso
 ```
 
+On an interactive terminal, PSPRecomp opens a fullscreen workspace with a
+PSP-inspired color theme, ASCII banner, local file browser, review screen and
+live export log. Use Tab to move between controls, arrow keys to browse files,
+Enter to select and Esc to go back. During export, Esc or Ctrl+C requests a
+safe cancellation. PSPRecomp removes its temporary export directory and never
+publishes a partially generated project.
+
+Use the classic line-based wizard when a terminal is not suited to fullscreen
+applications:
+
+```sh
+./build/psprecomp init game.iso --plain
+```
+
+`--plain` is also useful for screen readers and logging. Non-interactive
+streams automatically retain the existing plain behavior. Set `NO_COLOR=1` to
+keep the fullscreen layout without colored decoration.
+
 You can also start it without an argument:
 
 ```sh
