@@ -32,6 +32,12 @@ std::string hex(std::uint32_t value) {
     return stream.str();
 }
 
+std::string hex_address(std::uint32_t value) {
+    std::ostringstream stream;
+    stream << "0x" << std::hex << std::setfill('0') << std::setw(8) << value;
+    return stream.str();
+}
+
 std::string pc_label(std::uint32_t value) {
     std::ostringstream stream;
     stream << "pc_" << std::hex << std::setfill('0') << std::setw(8) << value;
@@ -990,6 +996,16 @@ void emit_project(const ElfImage& image, const std::filesystem::path& directory,
         throw std::runtime_error("shard size must be a power of two >= 0x1000");
     }
     std::filesystem::create_directories(directory);
+    for (const auto& entry : std::filesystem::directory_iterator(directory)) {
+        const auto name = entry.path().filename().string();
+        const auto generated_code =
+            name.rfind("func_", 0) == 0 || name.rfind("unit_", 0) == 0 ||
+            name.rfind("shard_", 0) == 0;
+        if (entry.is_regular_file() && entry.path().extension() == ".cpp" &&
+            generated_code) {
+            std::filesystem::remove(entry.path());
+        }
+    }
     const auto platform_directory = options.platform_directory.empty()
                                         ? directory / "platform"
                                         : options.platform_directory;
@@ -1084,8 +1100,8 @@ void emit_project(const ElfImage& image, const std::filesystem::path& directory,
     // A code map lets project mode preserve real Guest function boundaries.
     // Keeping each Guest function as a separate C++ function gives the host
     // compiler a tractable control-flow graph and lets static J/JAL edges stay
-    // on the native call stack.  Files merely bundle functions to avoid tens of
-    // thousands of compiler invocations.
+    // on the native call stack. Each discovered Guest function is emitted into
+    // its own source file so generated codebases remain easy to navigate.
     const bool function_mode =
         code_map != nullptr && !code_map->function_starts.empty();
     std::vector<std::uint32_t> mapped_function_starts;
@@ -1171,20 +1187,17 @@ void emit_project(const ElfImage& image, const std::filesystem::path& directory,
             static_cast<void>(unused);
             native_starts.push_back(start);
         }
-        constexpr std::size_t functions_per_unit = 128U;
-        for (std::size_t first = 0, unit = 0; first < native_starts.size();
-             first += functions_per_unit, ++unit) {
-            const auto last =
-                std::min(first + functions_per_unit, native_starts.size());
+        for (std::size_t first = 0; first < native_starts.size(); ++first) {
+            const auto last = first + 1U;
             std::ostringstream name;
-            name << "unit_" << std::hex << std::setfill('0') << std::setw(4)
-                 << unit << ".cpp";
+            name << "func_" << std::hex << std::setfill('0') << std::setw(8)
+                 << native_starts[first] << ".cpp";
             source_names.push_back(name.str());
             std::ofstream stream(directory / name.str(),
                                  std::ios::binary | std::ios::trunc);
             if (!stream) {
                 throw std::runtime_error(
-                    "cannot create generated function unit");
+                    "cannot create generated function source");
             }
             std::set<std::uint32_t> declarations;
             for (std::size_t index = first; index < last; ++index) {
@@ -1214,7 +1227,12 @@ void emit_project(const ElfImage& image, const std::filesystem::path& directory,
             for (std::size_t index = first; index < last; ++index) {
                 const auto function_start = native_starts[index];
                 const auto& instructions = functions.at(function_start);
+                const auto function_end = instructions.back().pc + 4U;
                 stream
+                    << "// Original PSP binary range: ["
+                    << hex_address(function_start) << ", "
+                    << hex_address(function_end)
+                    << ")\n"
                     << "bool " << function_name(function_start)
                     << "(State& __restrict__ state, std::uint32_t entry_pc) {\n"
                        "  using namespace psprecomp;\n"
@@ -2205,7 +2223,8 @@ void emit_project(const ElfImage& image, const std::filesystem::path& directory,
                << "\n"
                   "OBJS = main.o platform.o import_bridge.o dispatch.o";
         for (const auto& name : source_names) {
-            if (name.rfind("shard_", 0) == 0 || name.rfind("unit_", 0) == 0) {
+            if (name.rfind("shard_", 0) == 0 ||
+                name.rfind("func_", 0) == 0) {
                 stream << " " << name.substr(0, name.size() - 4) << ".o";
             }
         }

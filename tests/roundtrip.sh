@@ -61,6 +61,44 @@ test -s "$ROUNDTRIP_TMP/EBOOT.PBP"
     -o "$ROUNDTRIP_TMP/project-runner"
 "$ROUNDTRIP_TMP/project-runner"
 
+# A function map must produce one address-named source file per discovered
+# function, rather than grouping several functions into unit_*.cpp files.
+printf 'entry 0\nfunction 0 recomp_test\nfunction 0x20 recomp_loop\n' \
+    > "$ROUNDTRIP_TMP/project.map"
+"$RECOMPILER" "$ROUNDTRIP_TMP/project.elf" \
+    --output-dir "$ROUNDTRIP_TMP/project-functions" \
+    --code-map "$ROUNDTRIP_TMP/project.map"
+test -s "$ROUNDTRIP_TMP/project-functions/func_00000000.cpp"
+test -s "$ROUNDTRIP_TMP/project-functions/func_00000020.cpp"
+function_file_count=$(find "$ROUNDTRIP_TMP/project-functions" \
+    -name 'func_*.cpp' | wc -l | tr -d ' ')
+test "$function_file_count" = 2
+if find "$ROUNDTRIP_TMP/project-functions" -name 'unit_*.cpp' | grep -q .; then
+    echo "function-mode export still contains clustered unit files" >&2
+    exit 1
+fi
+grep -q '// Original PSP binary range: \[0x00000000, 0x' \
+    "$ROUNDTRIP_TMP/project-functions/func_00000000.cpp"
+grep -q '// Original PSP binary range: \[0x00000020, 0x' \
+    "$ROUNDTRIP_TMP/project-functions/func_00000020.cpp"
+"$PSP_GXX" -std=c++20 -O2 -fno-exceptions -fno-rtti \
+    -I"$SOURCE_DIR/include" -I"$ROUNDTRIP_TMP/project-functions" \
+    -c "$ROUNDTRIP_TMP/project-functions/func_00000000.cpp" \
+    -o "$ROUNDTRIP_TMP/project-function-psp.o"
+"$PSP_GXX" -std=c++20 -O2 -fno-exceptions -fno-rtti \
+    -I"$SOURCE_DIR/include" -I"$ROUNDTRIP_TMP/project-functions" \
+    -c "$ROUNDTRIP_TMP/project-functions/func_00000020.cpp" \
+    -o "$ROUNDTRIP_TMP/project-function-loop-psp.o"
+"$HOST_CXX" -std=c++20 -O2 -DPSPRECOMP_TEST_ENTRY=0 \
+    -I"$SOURCE_DIR/include" -I"$ROUNDTRIP_TMP/project-functions" \
+    "$ROUNDTRIP_TMP/project-functions/dispatch.cpp" \
+    "$ROUNDTRIP_TMP/project-functions/func_00000000.cpp" \
+    "$ROUNDTRIP_TMP/project-functions/func_00000020.cpp" \
+    "$SOURCE_DIR/tests/generated_runner.cpp" \
+    "$SOURCE_DIR/tests/fixtures/arithmetic.c" \
+    -o "$ROUNDTRIP_TMP/project-function-runner"
+"$ROUNDTRIP_TMP/project-function-runner"
+
 # Exercise the beginner-facing, self-contained codebase exporter. The exported
 # project must build without referring back to PSPRecomp's source tree.
 "$RECOMPILER" init "$ROUNDTRIP_TMP/project.elf" \

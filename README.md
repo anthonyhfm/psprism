@@ -143,10 +143,10 @@ make -C out/recompiled -j
 ```
 
 The code map is optional. With one, the project emitter creates individual C++
-functions for discovered Guest functions, bundles them into manageable
-translation units and preserves the central PC dispatcher as a fallback for
-indirect or uncertain entry points. Without a map, it emits address-based code
-shards.
+functions for discovered Guest functions, writes each function into its own
+address-named source file and preserves the central PC dispatcher as a fallback
+for indirect or uncertain entry points. Every definition includes its original
+PSP binary address range. Without a map, it emits address-based code shards.
 
 See [docs/code-maps.md](docs/code-maps.md) for the map format and Ghidra export
 workflow.

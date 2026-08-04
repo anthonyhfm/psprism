@@ -84,9 +84,10 @@ CPU code under `src/generated` therefore has no direct dependency on PSP SDK
 headers or SCE functions.
 
 Generated C++ lives in `src/generated`. With a code map, Guest functions are
-the semantic compilation units and groups of them are bundled into `unit_*.cpp`
-files. Without a map, address-based `shard_*.cpp` files are emitted. The
-portable runtime is copied into `include/psprecomp`, and the complete psprism
+written one per address-named `func_*.cpp` file, with the original binary range
+documented above every definition. Without a map, address-based `shard_*.cpp`
+files are emitted. The portable runtime is copied into `include/psprecomp`, and
+the complete psprism
 source is copied into `psprism/`, so moving or archiving the export does not
 break its build. That psprism copy is meant to be edited when a game needs a
 host compatibility quirk.

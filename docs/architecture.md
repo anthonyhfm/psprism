@@ -62,9 +62,10 @@ available:
    function. Static calls use native calls, static tail transfers can remain
    direct, and indirect or uncertain targets fall back to the dispatcher.
 
-Physical source files bundle multiple generated functions. The semantic unit is
-the C++ function, not the file; bundling prevents thousands of tiny compiler
-processes while keeping each control-flow graph manageable for GCC.
+Each discovered Guest function is written to an address-named `func_*.cpp`
+file. A comment directly above its definition records the original PSP binary
+range. This keeps the physical source layout aligned with the semantic function
+layout and makes individual functions easy to inspect or replace.
 
 Delay slots remain explicit. A control instruction records the pending target,
 the delay instruction executes, and only then does generated control flow apply
