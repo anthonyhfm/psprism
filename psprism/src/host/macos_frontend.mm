@@ -10,6 +10,7 @@
 #import <MetalKit/MetalKit.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdio>
 #include <memory>
@@ -35,10 +36,27 @@ struct GeometryBatch {
   std::vector<std::uint8_t> texture;
   std::uint32_t texture_width{};
   std::uint32_t texture_height{};
+  bool depth_test{};
+  bool depth_write{};
+  std::uint32_t depth_function{1};
+  bool alpha_blend{};
+  bool alpha_test{};
+  std::uint32_t alpha_function{1};
+  std::uint32_t alpha_reference{};
+  std::uint32_t alpha_mask{0xff};
+};
+
+struct FragmentState {
+  std::uint32_t alpha_test{};
+  std::uint32_t alpha_function{1};
+  std::uint32_t alpha_reference{};
+  std::uint32_t alpha_mask{0xff};
 };
 
 std::mutex geometry_mutex;
-std::vector<GeometryBatch> geometry_batches;
+std::vector<GeometryBatch> building_geometry_batches;
+std::vector<GeometryBatch> presented_geometry_batches;
+std::atomic_bool has_completed_ge_frame{};
 
 @interface PsprismRenderer : NSObject <MTKViewDelegate>
 @property(nonatomic, strong) id<MTLDevice> device;
@@ -46,7 +64,10 @@ std::vector<GeometryBatch> geometry_batches;
 @property(nonatomic, strong) id<MTLRenderPipelineState> pipeline;
 @property(nonatomic, strong) id<MTLRenderPipelineState> geometryPipeline;
 @property(nonatomic, strong) id<MTLRenderPipelineState> texturedGeometryPipeline;
+@property(nonatomic, strong) id<MTLRenderPipelineState> blendedGeometryPipeline;
+@property(nonatomic, strong) id<MTLRenderPipelineState> blendedTexturedGeometryPipeline;
 @property(nonatomic, strong) id<MTLTexture> texture;
+@property(nonatomic, strong) NSArray<id<MTLDepthStencilState>>* depthStates;
 @end
 
 @implementation PsprismRenderer
@@ -79,17 +100,46 @@ std::vector<GeometryBatch> geometry_batches;
       float4 color;
       float2 texture;
     };
+    struct FragmentState {
+      uint alpha_test;
+      uint alpha_function;
+      uint alpha_reference;
+      uint alpha_mask;
+    };
+    bool psprism_compare(uint value, uint reference, uint function) {
+      switch (function) {
+        case 0: return false;
+        case 1: return true;
+        case 2: return value == reference;
+        case 3: return value != reference;
+        case 4: return value < reference;
+        case 5: return value <= reference;
+        case 6: return value > reference;
+        default: return value >= reference;
+      }
+    }
+    float4 psprism_alpha_test(float4 color, constant FragmentState& state) {
+      uint alpha = uint(round(saturate(color.a) * 255.0)) & state.alpha_mask;
+      uint reference = state.alpha_reference & state.alpha_mask;
+      if (state.alpha_test != 0 &&
+          !psprism_compare(alpha, reference, state.alpha_function))
+        discard_fragment();
+      return color;
+    }
     vertex GeometryOut psprism_geometry_vertex(
         uint id [[vertex_id]], device const GeometryVertex* vertices [[buffer(0)]]) {
       return {vertices[id].position, vertices[id].color, vertices[id].texture};
     }
-    fragment float4 psprism_geometry_fragment(GeometryOut in [[stage_in]]) {
-      return in.color;
+    fragment float4 psprism_geometry_fragment(
+        GeometryOut in [[stage_in]], constant FragmentState& state [[buffer(1)]]) {
+      return psprism_alpha_test(in.color, state);
     }
     fragment float4 psprism_textured_geometry_fragment(
-        GeometryOut in [[stage_in]], texture2d<float> image [[texture(0)]]) {
+        GeometryOut in [[stage_in]], texture2d<float> image [[texture(0)]],
+        constant FragmentState& state [[buffer(1)]]) {
       constexpr sampler linear_sampler(filter::linear, address::clamp_to_edge);
-      return image.sample(linear_sampler, in.texture) * in.color;
+      return psprism_alpha_test(image.sample(linear_sampler, in.texture) * in.color,
+                                state);
     }
   )METAL";
   NSError* error = nil;
@@ -106,6 +156,7 @@ std::vector<GeometryBatch> geometry_batches;
   descriptor.fragmentFunction =
       [library newFunctionWithName:@"psprism_fragment"];
   descriptor.colorAttachments[0].pixelFormat = view.colorPixelFormat;
+  descriptor.depthAttachmentPixelFormat = view.depthStencilPixelFormat;
   self.pipeline = [self.device newRenderPipelineStateWithDescriptor:descriptor
                                                                error:&error];
   if (self.pipeline == nil) NSLog(@"psprism: Metal pipeline error: %@", error);
@@ -123,6 +174,54 @@ std::vector<GeometryBatch> geometry_batches;
       [self.device newRenderPipelineStateWithDescriptor:descriptor error:&error];
   if (self.texturedGeometryPipeline == nil)
     NSLog(@"psprism: Metal textured pipeline error: %@", error);
+  descriptor.colorAttachments[0].blendingEnabled = YES;
+  descriptor.colorAttachments[0].sourceRGBBlendFactor =
+      MTLBlendFactorSourceAlpha;
+  descriptor.colorAttachments[0].destinationRGBBlendFactor =
+      MTLBlendFactorOneMinusSourceAlpha;
+  descriptor.colorAttachments[0].rgbBlendOperation = MTLBlendOperationAdd;
+  descriptor.colorAttachments[0].sourceAlphaBlendFactor =
+      MTLBlendFactorSourceAlpha;
+  descriptor.colorAttachments[0].destinationAlphaBlendFactor =
+      MTLBlendFactorOneMinusSourceAlpha;
+  descriptor.colorAttachments[0].alphaBlendOperation = MTLBlendOperationAdd;
+  descriptor.fragmentFunction =
+      [library newFunctionWithName:@"psprism_geometry_fragment"];
+  self.blendedGeometryPipeline =
+      [self.device newRenderPipelineStateWithDescriptor:descriptor error:&error];
+  if (self.blendedGeometryPipeline == nil)
+    NSLog(@"psprism: Metal blended geometry pipeline error: %@", error);
+  descriptor.fragmentFunction =
+      [library newFunctionWithName:@"psprism_textured_geometry_fragment"];
+  self.blendedTexturedGeometryPipeline =
+      [self.device newRenderPipelineStateWithDescriptor:descriptor error:&error];
+  if (self.blendedTexturedGeometryPipeline == nil)
+    NSLog(@"psprism: Metal blended textured pipeline error: %@", error);
+
+  NSMutableArray<id<MTLDepthStencilState>>* depth_states =
+      [NSMutableArray arrayWithCapacity:32];
+  constexpr MTLCompareFunction compare_functions[] = {
+      MTLCompareFunctionNever,        MTLCompareFunctionAlways,
+      MTLCompareFunctionEqual,        MTLCompareFunctionNotEqual,
+      MTLCompareFunctionLess,         MTLCompareFunctionLessEqual,
+      MTLCompareFunctionGreater,      MTLCompareFunctionGreaterEqual,
+  };
+  for (NSUInteger write = 0; write < 2; ++write) {
+    for (NSUInteger enabled = 0; enabled < 2; ++enabled) {
+      for (NSUInteger function = 0; function < 8; ++function) {
+        MTLDepthStencilDescriptor* depth_descriptor =
+            [[MTLDepthStencilDescriptor alloc] init];
+        depth_descriptor.depthCompareFunction =
+            enabled != 0 ? compare_functions[function]
+                         : MTLCompareFunctionAlways;
+        depth_descriptor.depthWriteEnabled = write != 0;
+        [depth_states addObject:[self.device
+                                    newDepthStencilStateWithDescriptor:
+                                        depth_descriptor]];
+      }
+    }
+  }
+  self.depthStates = depth_states;
   return self;
 }
 
@@ -134,16 +233,31 @@ std::vector<GeometryBatch> geometry_batches;
   id<MTLRenderCommandEncoder> encoder =
       [commands renderCommandEncoderWithDescriptor:pass];
   [encoder setRenderPipelineState:self.pipeline];
+  [encoder setDepthStencilState:self.depthStates[0]];
   if (self.texture != nil) [encoder setFragmentTexture:self.texture atIndex:0];
   [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
   if (self.geometryPipeline != nil) {
     std::lock_guard lock(geometry_mutex);
-    for (const auto& batch : geometry_batches) {
+    for (const auto& batch : presented_geometry_batches) {
       if (batch.vertices.empty()) continue;
+      const auto depth_state =
+          (batch.depth_write ? 16U : 0U) + (batch.depth_test ? 8U : 0U) +
+          std::min(batch.depth_function, 7U);
+      [encoder setDepthStencilState:self.depthStates[depth_state]];
+      const FragmentState fragment_state{
+          batch.alpha_test ? 1U : 0U, batch.alpha_function,
+          batch.alpha_reference, batch.alpha_mask};
+      [encoder setFragmentBytes:&fragment_state
+                         length:sizeof(fragment_state)
+                        atIndex:1];
       if (batch.texture.empty()) {
-        [encoder setRenderPipelineState:self.geometryPipeline];
+        [encoder setRenderPipelineState:batch.alpha_blend
+                                            ? self.blendedGeometryPipeline
+                                            : self.geometryPipeline];
       } else {
-        [encoder setRenderPipelineState:self.texturedGeometryPipeline];
+        [encoder setRenderPipelineState:
+                     batch.alpha_blend ? self.blendedTexturedGeometryPipeline
+                                       : self.texturedGeometryPipeline];
         MTLTextureDescriptor* descriptor = [MTLTextureDescriptor
             texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
                                          width:batch.texture_width
@@ -286,6 +400,8 @@ void initialize_frontend() {
     window.delegate = application_delegate;
     metal_view = [[MTKView alloc] initWithFrame:frame device:device];
     metal_view.colorPixelFormat = MTLPixelFormatBGRA8Unorm;
+    metal_view.depthStencilPixelFormat = MTLPixelFormatDepth32Float;
+    metal_view.clearDepth = 1.0;
     metal_view.clearColor = MTLClearColorMake(0.02, 0.02, 0.025, 1.0);
     metal_view.paused = YES;
     metal_view.enableSetNeedsDisplay = YES;
@@ -337,20 +453,35 @@ void present_frame(const std::uint8_t* pixels, std::uint32_t stride,
     [renderer.texture replaceRegion:region mipmapLevel:0
                           withBytes:converted->data()
                         bytesPerRow:static_cast<NSUInteger>(width) * 4U];
-    [metal_view setNeedsDisplay:YES];
+    if (!has_completed_ge_frame.load()) [metal_view setNeedsDisplay:YES];
   });
 }
 
 void begin_ge_frame() {
   std::lock_guard lock(geometry_mutex);
-  geometry_batches.clear();
+  building_geometry_batches.clear();
+}
+
+void end_ge_frame() {
+  {
+    std::lock_guard lock(geometry_mutex);
+    presented_geometry_batches = std::move(building_geometry_batches);
+    building_geometry_batches.clear();
+  }
+  has_completed_ge_frame.store(true);
+  dispatch_async(dispatch_get_main_queue(), ^{ [metal_view setNeedsDisplay:YES]; });
 }
 
 void submit_ge_primitive(std::uint32_t type,
                          std::vector<GeometryVertex> vertices,
                          std::vector<std::uint8_t> texture,
                          std::uint32_t texture_width,
-                         std::uint32_t texture_height) {
+                         std::uint32_t texture_height, bool depth_test,
+                         bool depth_write, std::uint32_t depth_function,
+                         bool alpha_blend, bool alpha_test,
+                         std::uint32_t alpha_function,
+                         std::uint32_t alpha_reference,
+                         std::uint32_t alpha_mask) {
   MTLPrimitiveType metal_type;
   switch (type) {
     case 0:
@@ -373,11 +504,12 @@ void submit_ge_primitive(std::uint32_t type,
   }
   {
     std::lock_guard lock(geometry_mutex);
-    geometry_batches.push_back({metal_type, std::move(vertices),
-                                std::move(texture), texture_width,
-                                texture_height});
+    building_geometry_batches.push_back(
+        {metal_type, std::move(vertices), std::move(texture), texture_width,
+         texture_height, depth_test, depth_write, depth_function,
+         alpha_blend, alpha_test, alpha_function, alpha_reference,
+         alpha_mask});
   }
-  dispatch_async(dispatch_get_main_queue(), ^{ [metal_view setNeedsDisplay:YES]; });
 }
 
 ControllerState controller_state() {

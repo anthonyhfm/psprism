@@ -29,11 +29,15 @@ void present_frame(const std::uint8_t* pixels, std::uint32_t stride,
                    std::uint32_t width, std::uint32_t height,
                    std::uint32_t format);
 void begin_ge_frame();
-void submit_ge_primitive(std::uint32_t type,
-                         std::vector<GeometryVertex> vertices,
-                         std::vector<std::uint8_t> texture = {},
-                         std::uint32_t texture_width = 0,
-                         std::uint32_t texture_height = 0);
+void end_ge_frame();
+void submit_ge_primitive(
+    std::uint32_t type, std::vector<GeometryVertex> vertices,
+    std::vector<std::uint8_t> texture = {}, std::uint32_t texture_width = 0,
+    std::uint32_t texture_height = 0, bool depth_test = false,
+    bool depth_write = false, std::uint32_t depth_function = 1,
+    bool alpha_blend = false, bool alpha_test = false,
+    std::uint32_t alpha_function = 1, std::uint32_t alpha_reference = 0,
+    std::uint32_t alpha_mask = 0xff);
 ControllerState controller_state();
 
 } // namespace psprism::host

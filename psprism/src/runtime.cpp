@@ -962,7 +962,8 @@ void Runtime::dispatch(psprecomp::State& state, std::string_view name) {
             std::fprintf(stderr,
                          "[psprism:ge] prim=%u type=%u count=%u vtype=%06x "
                          "vaddr=%08x iaddr=%08x tex=%u texaddr=%06x "
-                         "texbuf=%06x texsize=%06x texfmt=%u texmode=%06x\n",
+                         "texbuf=%06x texsize=%06x texfmt=%u texmode=%06x "
+                         "depth=%u/%u/%u blend=%u/%03x\n",
                          primitives, primitive_type, vertex_count, vertex_type,
                          graphics.vertex_address, graphics.index_address,
                          graphics.commands[0x1eU] & 1U,
@@ -970,7 +971,12 @@ void Runtime::dispatch(psprecomp::State& state, std::string_view name) {
                          graphics.commands[0xa8U] & 0x00ffffffU,
                          graphics.commands[0xb8U] & 0x00ffffffU,
                          graphics.commands[0xc3U] & 0xfU,
-                         graphics.commands[0xc2U] & 0x00ffffffU);
+                         graphics.commands[0xc2U] & 0x00ffffffU,
+                         graphics.commands[0x23U] & 1U,
+                         (graphics.commands[0xe7U] & 1U) == 0,
+                         graphics.commands[0xdeU] & 7U,
+                         graphics.commands[0x21U] & 1U,
+                         graphics.commands[0xdfU] & 0xfffU);
           }
           const auto layout = vertex_layout(vertex_type);
           const auto indexed = (vertex_type & (3U << 11U)) != 0;
@@ -1097,9 +1103,17 @@ void Runtime::dispatch(psprecomp::State& state, std::string_view name) {
                   output.texture[1] = v;
                 }
               }
-              host::submit_ge_primitive(primitive_type, std::move(vertices),
-                                        std::move(texture.pixels),
-                                        texture.width, texture.height);
+              host::submit_ge_primitive(
+                  primitive_type, std::move(vertices),
+                  std::move(texture.pixels), texture.width, texture.height,
+                  (graphics.commands[0x23U] & 1U) != 0,
+                  (graphics.commands[0xe7U] & 1U) == 0,
+                  graphics.commands[0xdeU] & 7U,
+                  (graphics.commands[0x21U] & 1U) != 0,
+                  (graphics.commands[0x22U] & 1U) != 0,
+                  graphics.commands[0xdbU] & 7U,
+                  (graphics.commands[0xdbU] >> 8U) & 0xffU,
+                  (graphics.commands[0xdbU] >> 16U) & 0xffU);
             }
             graphics.vertex_address += static_cast<std::uint32_t>(byte_count);
           }
@@ -1186,6 +1200,7 @@ void Runtime::dispatch(psprecomp::State& state, std::string_view name) {
         }
         std::fputc('\n', stderr);
       }
+      host::end_ge_frame();
     }
     state.gpr[2] = next_list++;
     return;
