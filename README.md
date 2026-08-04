@@ -31,6 +31,7 @@ Only use executables and assets you are legally entitled to inspect.
 - A C++20 compiler
 - PSPSDK in `PATH` or referenced by `PSPDEV` for PSP roundtrip tests and PRX
   generation
+- PPSSPP in `PATH` for automatic decryption of retail `~PSP` executables
 - Optional: Ghidra plus a compatible local API endpoint for exporting code maps
 
 ## Build and test
@@ -95,9 +96,9 @@ For scripts and automation, use the same workflow without prompts:
 
 Run `psprecomp --help` for all wizard options. ISO extraction is enabled by
 default and can be disabled with `--no-extract-disc`. Encrypted retail
-executables still need to be decrypted before translation; when both files are
-present, the importer automatically prefers whichever of `EBOOT.BIN` and
-`BOOT.BIN` is a valid ELF.
+`EBOOT.BIN` files are detected and decrypted automatically through a compatible
+local PPSSPP installation. `PSPRECOMP_PPSSPP` can point to the PPSSPP executable
+when it cannot be discovered through `PATH` or a standard installation path.
 
 See [docs/project-wizard.md](docs/project-wizard.md) for the complete workflow
 and generated layout.
@@ -147,6 +148,7 @@ workflow.
 - Guest thread wrappers with independent Guest stacks
 - Generated image/relocation embedding and PSPSDK Makefile output
 - Guided ISO/ELF project wizard with `PARAM.SFO` metadata discovery
+- Automatic retail `~PSP` executable decryption through local PPSSPP
 - Streaming ISO 9660 extraction and complete self-contained codebase exports
 - Address-sharded and function-oriented project emitters
 - Runtime unit tests plus native and PSP roundtrip coverage

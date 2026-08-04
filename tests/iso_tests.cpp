@@ -1,3 +1,4 @@
+#include "decrypt.hpp"
 #include "iso.hpp"
 
 #include <algorithm>
@@ -144,6 +145,9 @@ int main() {
   const auto executable_data = iso.read(*executable);
   CHECK(executable_data.size() == 8U);
   CHECK(executable_data[0] == 0x7fU);
+  CHECK(psprecomp::is_elf_data(executable_data));
+  CHECK(!psprecomp::is_encrypted_psp_data(executable_data));
+  CHECK(psprecomp::is_encrypted_psp_data({'~', 'P', 'S', 'P'}));
   const auto metadata = psprecomp::read_psp_disc_metadata(iso);
   CHECK(metadata.title == "Wizard Fixture");
   CHECK(metadata.disc_id == "TEST00001");

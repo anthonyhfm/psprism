@@ -220,7 +220,11 @@ int run_init(InitArguments arguments) {
   if (interactive) {
     std::cout << "\nReady to export\n"
               << "  Input:        " << arguments.input.string() << '\n'
-              << "  Executable:   " << source.executable_path << '\n'
+              << "  Executable:   " << source.executable_path
+              << (source.executable_encrypted
+                      ? " (~PSP encrypted; decrypt automatically)"
+                      : "")
+              << '\n'
               << "  Display name: " << arguments.display_name << '\n'
               << "  Project name: " << arguments.project_name << '\n'
               << "  Output:       " << arguments.output.string() << '\n'
@@ -263,6 +267,10 @@ int run_init(InitArguments arguments) {
       arguments.extract_disc) {
     std::cout << "  " << summary.disc_entries
               << " ISO entries exported to disc/\n";
+  }
+  if (!summary.decryption_backend.empty()) {
+    std::cout << "  Decrypted executable with " << summary.decryption_backend
+              << '\n';
   }
   std::cout << "\nNext steps:\n"
             << "  cd \"" << summary.output_directory.string() << "\"\n"

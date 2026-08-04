@@ -24,6 +24,10 @@ ISO reader has no external runtime dependencies: it walks directory records,
 normalizes PSP paths, discovers the usable `EBOOT.BIN`/`BOOT.BIN`, and reads
 `TITLE` and `DISC_ID` from `PARAM.SFO`. Full-disc extraction streams data in
 bounded chunks so movie and audio assets do not have to fit in host memory.
+Retail executables using the `~PSP` container are decrypted before extraction
+through a dynamically discovered local PPSSPP implementation. Keeping this a
+runtime integration avoids copying PPSSPP's GPL-licensed cryptography sources
+into PSPRecomp while still making the normal ISO path automatic.
 
 The loader reads ELF32 MIPS program and section metadata, preserves load
 segments, records PSP relocation entries and discovers import stubs. Generated

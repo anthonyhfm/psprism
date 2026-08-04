@@ -76,9 +76,17 @@ configuration, runtime headers and documentation remain trackable.
 ## ISO notes
 
 PSPRecomp currently reads uncompressed ISO 9660 images. CSO and CHD containers
-must first be converted to ISO. Retail `EBOOT.BIN` files may be encrypted; if a
-decrypted `BOOT.BIN` is present, it is selected automatically. Otherwise pass a
-decrypted ELF/PRX directly.
+must first be converted to ISO. Retail `EBOOT.BIN` files beginning with `~PSP`
+are decrypted automatically using a compatible local PPSSPP installation. The
+wizard performs decryption before extracting the complete disc, so a missing or
+incompatible provider fails quickly without first copying a large ISO.
+
+PPSSPP is discovered through `PATH`, common macOS application/Homebrew paths,
+or an explicit environment variable:
+
+```sh
+PSPRECOMP_PPSSPP=/path/to/PPSSPPSDL psprecomp game.iso
+```
 
 The `disc-tree` target prepares files under `dist/disc`, but it does not author
 a new ISO image. ISO mastering is intentionally kept separate until PSP LBA and

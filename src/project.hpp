@@ -16,6 +16,7 @@ struct SourceInfo {
   std::string suggested_display_name;
   std::string disc_id;
   std::string executable_path;
+  bool executable_encrypted{};
   std::size_t disc_entries{};
 };
 
@@ -35,6 +36,7 @@ struct ExportSummary {
   InputKind input_kind{InputKind::executable};
   std::filesystem::path output_directory;
   std::filesystem::path executable_source;
+  std::string decryption_backend;
   std::size_t disc_entries{};
   std::size_t generated_translation_units{};
 };
