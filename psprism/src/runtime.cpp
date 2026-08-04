@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <bit>
 #include <cerrno>
 #include <condition_variable>
 #include <cstdio>
@@ -12,6 +13,7 @@
 #include <cstring>
 #include <fcntl.h>
 #include <filesystem>
+#include <fstream>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -81,6 +83,99 @@ int host_open_flags(std::uint32_t flags) {
   return result;
 }
 
+struct VertexLayout {
+  std::size_t stride{};
+  std::size_t texture_offset{};
+  std::size_t color_offset{};
+  std::size_t normal_offset{};
+  std::size_t position_offset{};
+  std::uint32_t texture_type{};
+  std::uint32_t color_type{};
+  std::uint32_t normal_type{};
+  std::uint32_t position_type{};
+};
+
+std::size_t component_size(std::uint32_t type) {
+  return type == 1U ? 1U : type == 2U ? 2U : type == 3U ? 4U : 0U;
+}
+
+std::size_t align_offset(std::size_t value, std::size_t alignment) {
+  return alignment == 0 ? value : (value + alignment - 1U) & ~(alignment - 1U);
+}
+
+VertexLayout vertex_layout(std::uint32_t type) {
+  VertexLayout result;
+  result.texture_type = type & 3U;
+  result.color_type = (type >> 2U) & 7U;
+  result.normal_type = (type >> 5U) & 3U;
+  result.position_type = (type >> 7U) & 3U;
+  const auto weight_type = (type >> 9U) & 3U;
+  const auto weight_size = component_size(weight_type);
+  std::size_t offset{};
+  std::size_t maximum_alignment{1U};
+  if (weight_size != 0) {
+    maximum_alignment = std::max(maximum_alignment, weight_size);
+    offset = align_offset(offset, weight_size);
+    offset += weight_size * (((type >> 14U) & 7U) + 1U);
+  }
+  const auto texture_size = component_size(result.texture_type);
+  if (texture_size != 0) {
+    maximum_alignment = std::max(maximum_alignment, texture_size);
+    offset = align_offset(offset, texture_size);
+    result.texture_offset = offset;
+    offset += texture_size * 2U;
+  }
+  const std::size_t color_size = result.color_type == 7U   ? 4U
+                                 : result.color_type >= 4U ? 2U
+                                                           : 0U;
+  if (color_size != 0) {
+    maximum_alignment = std::max(maximum_alignment, color_size);
+    offset = align_offset(offset, color_size);
+    result.color_offset = offset;
+    offset += color_size;
+  }
+  const auto normal_size = component_size(result.normal_type);
+  if (normal_size != 0) {
+    maximum_alignment = std::max(maximum_alignment, normal_size);
+    offset = align_offset(offset, normal_size);
+    result.normal_offset = offset;
+    offset += normal_size * 3U;
+  }
+  const auto position_size = component_size(result.position_type);
+  maximum_alignment = std::max(maximum_alignment, position_size);
+  offset = align_offset(offset, position_size);
+  result.position_offset = offset;
+  offset += position_size * 3U;
+  result.stride = align_offset(offset, maximum_alignment);
+  return result;
+}
+
+float float24(std::uint32_t value) {
+  return std::bit_cast<float>((value & 0x00ffffffU) << 8U);
+}
+
+void transform43(const std::array<float, 12>& matrix, const float input[3],
+                 float output[3]) {
+  output[0] = matrix[0] * input[0] + matrix[3] * input[1] +
+              matrix[6] * input[2] + matrix[9];
+  output[1] = matrix[1] * input[0] + matrix[4] * input[1] +
+              matrix[7] * input[2] + matrix[10];
+  output[2] = matrix[2] * input[0] + matrix[5] * input[1] +
+              matrix[8] * input[2] + matrix[11];
+}
+
+void transform44(const std::array<float, 16>& matrix, const float input[3],
+                 float output[4]) {
+  output[0] = matrix[0] * input[0] + matrix[4] * input[1] +
+              matrix[8] * input[2] + matrix[12];
+  output[1] = matrix[1] * input[0] + matrix[5] * input[1] +
+              matrix[9] * input[2] + matrix[13];
+  output[2] = matrix[2] * input[0] + matrix[6] * input[1] +
+              matrix[10] * input[2] + matrix[14];
+  output[3] = matrix[3] * input[0] + matrix[7] * input[1] +
+              matrix[11] * input[2] + matrix[15];
+}
+
 } // namespace
 
 struct Runtime::Implementation {
@@ -127,6 +222,20 @@ struct Runtime::Implementation {
     std::size_t next{};
   };
 
+  struct GraphicsState {
+    std::mutex mutex;
+    std::array<std::uint32_t, 256> commands{};
+    std::uint32_t vertex_address{};
+    std::uint32_t index_address{};
+    std::uint32_t offset_address{};
+    std::array<float, 12> world_matrix{};
+    std::array<float, 12> view_matrix{};
+    std::array<float, 16> projection_matrix{};
+    std::uint32_t world_matrix_index{};
+    std::uint32_t view_matrix_index{};
+    std::uint32_t projection_matrix_index{};
+  };
+
   std::uint8_t* memory{};
   std::size_t memory_size{};
   std::uint32_t memory_base{};
@@ -150,9 +259,11 @@ struct Runtime::Implementation {
   std::atomic<bool> exit_requested{};
   std::atomic<std::uint32_t> displayed_frames{};
   std::atomic<std::uint32_t> submitted_ge_lists{};
+  GraphicsState graphics;
   std::atomic<std::uint32_t> savedata_status{};
   std::uint32_t savedata_parameters{};
   bool savedata_operation_complete{};
+  std::atomic<std::uint32_t> message_dialog_status{};
 
   int allocate_uid() { return next_uid++; }
 
@@ -710,39 +821,238 @@ void Runtime::dispatch(psprecomp::State& state, std::string_view name) {
   if (name == "sceGeListEnQueue") {
     static std::atomic<std::uint32_t> next_list{1};
     const auto submission = implementation_->submitted_ge_lists++;
-    if (submission < 8U) {
+    {
+      std::lock_guard graphics_lock(implementation_->graphics.mutex);
+      auto& graphics = implementation_->graphics;
+      host::begin_ge_frame();
       std::array<std::uint32_t, 256> commands{};
+      std::vector<std::uint32_t> return_addresses;
+      auto program_counter = state.gpr[4];
       std::uint32_t words{};
+      std::uint32_t primitives{};
       bool ended{};
       for (; words < 65536U; ++words) {
-        const auto address = state.gpr[4] + words * 4U;
-        const auto* pointer = psprecomp::mapped_address(state, address, 4U);
+        const auto* pointer =
+            psprecomp::mapped_address(state, program_counter, 4U);
         if (pointer == nullptr)
           break;
         std::uint32_t instruction{};
         std::memcpy(&instruction, pointer, sizeof(instruction));
         const auto command = instruction >> 24U;
+        const auto argument = instruction & 0x00ffffffU;
+        const auto next = program_counter + 4U;
         ++commands[command];
+        graphics.commands[command] = instruction;
+        const auto relative_address = [&](std::uint32_t value) {
+          const auto base = (graphics.commands[0x10U] & 0x000f0000U) << 8U;
+          return (graphics.offset_address + (base | value)) & 0x0fffffffU;
+        };
+        if (command == 0x01U) {
+          graphics.vertex_address = relative_address(argument);
+        } else if (command == 0x02U) {
+          graphics.index_address = relative_address(argument);
+        } else if (command == 0x3aU) {
+          graphics.world_matrix_index = argument & 0xfU;
+        } else if (command == 0x3bU) {
+          if (graphics.world_matrix_index < graphics.world_matrix.size())
+            graphics.world_matrix[graphics.world_matrix_index++] =
+                float24(argument);
+        } else if (command == 0x3cU) {
+          graphics.view_matrix_index = argument & 0xfU;
+        } else if (command == 0x3dU) {
+          if (graphics.view_matrix_index < graphics.view_matrix.size())
+            graphics.view_matrix[graphics.view_matrix_index++] =
+                float24(argument);
+        } else if (command == 0x3eU) {
+          graphics.projection_matrix_index = argument & 0xfU;
+        } else if (command == 0x3fU) {
+          if (graphics.projection_matrix_index <
+              graphics.projection_matrix.size())
+            graphics.projection_matrix[graphics.projection_matrix_index++] =
+                float24(argument);
+        } else if (command == 0x04U) {
+          const auto primitive_type = (argument >> 16U) & 7U;
+          const auto vertex_count = argument & 0xffffU;
+          const auto vertex_type = graphics.commands[0x12U] & 0x00ffffffU;
+          if (submission < 2U && primitives < 32U) {
+            std::fprintf(stderr,
+                         "[psprism:ge] prim=%u type=%u count=%u vtype=%06x "
+                         "vaddr=%08x iaddr=%08x\n",
+                         primitives, primitive_type, vertex_count, vertex_type,
+                         graphics.vertex_address, graphics.index_address);
+          }
+          const auto layout = vertex_layout(vertex_type);
+          const auto indexed = (vertex_type & (3U << 11U)) != 0;
+          if (!indexed && layout.stride != 0 && primitive_type <= 4U) {
+            const auto byte_count =
+                static_cast<std::size_t>(vertex_count) * layout.stride;
+            if (const auto* source = psprecomp::mapped_address(
+                    state, graphics.vertex_address, byte_count)) {
+              std::vector<host::GeometryVertex> vertices(vertex_count);
+              const auto material_color = graphics.commands[0x55U];
+              for (std::uint32_t index = 0; index < vertex_count; ++index) {
+                const auto* input = source + index * layout.stride;
+                const auto* position = input + layout.position_offset;
+                float decoded[3]{};
+                const auto through = (vertex_type & (1U << 23U)) != 0;
+                if (layout.position_type == 1U) {
+                  for (std::size_t component = 0; component < 3U; ++component)
+                    decoded[component] =
+                        through ? static_cast<float>(position[component])
+                                : static_cast<float>(
+                                      reinterpret_cast<const std::int8_t*>(
+                                          position)[component]) /
+                                      127.0F;
+                } else if (layout.position_type == 2U) {
+                  for (std::size_t component = 0; component < 3U; ++component) {
+                    if (through) {
+                      std::uint16_t value{};
+                      std::memcpy(&value, position + component * 2U,
+                                  sizeof(value));
+                      decoded[component] = static_cast<float>(value);
+                    } else {
+                      std::int16_t value{};
+                      std::memcpy(&value, position + component * 2U,
+                                  sizeof(value));
+                      decoded[component] = static_cast<float>(value) / 32767.0F;
+                    }
+                  }
+                } else if (layout.position_type == 3U) {
+                  std::memcpy(decoded, position, sizeof(decoded));
+                }
+                auto& output = vertices[index];
+                if (through) {
+                  output.position[0] = decoded[0] / 240.0F - 1.0F;
+                  output.position[1] = 1.0F - decoded[1] / 136.0F;
+                  output.position[2] = decoded[2] / 65535.0F;
+                  output.position[3] = 1.0F;
+                } else {
+                  float world[3]{};
+                  float view[3]{};
+                  transform43(graphics.world_matrix, decoded, world);
+                  transform43(graphics.view_matrix, world, view);
+                  transform44(graphics.projection_matrix, view,
+                              output.position);
+                }
+                std::uint32_t color = material_color;
+                if (layout.color_type == 7U) {
+                  std::memcpy(&color, input + layout.color_offset,
+                              sizeof(color));
+                } else if (layout.color_type >= 4U) {
+                  std::uint16_t packed{};
+                  std::memcpy(&packed, input + layout.color_offset,
+                              sizeof(packed));
+                  if (layout.color_type == 4U) {
+                    color = ((packed & 31U) << 3U) |
+                            (((packed >> 5U) & 63U) * 255U / 63U << 8U) |
+                            (((packed >> 11U) & 31U) << 19U) | 0xff000000U;
+                  } else if (layout.color_type == 5U) {
+                    color = ((packed & 31U) << 3U) |
+                            (((packed >> 5U) & 31U) << 11U) |
+                            (((packed >> 10U) & 31U) << 19U) |
+                            ((packed & 0x8000U) != 0 ? 0xff000000U : 0U);
+                  } else {
+                    color = ((packed & 15U) * 17U) |
+                            (((packed >> 4U) & 15U) * 17U << 8U) |
+                            (((packed >> 8U) & 15U) * 17U << 16U) |
+                            (((packed >> 12U) & 15U) * 17U << 24U);
+                  }
+                }
+                output.color[0] = static_cast<float>(color & 0xffU) / 255.0F;
+                output.color[1] =
+                    static_cast<float>((color >> 8U) & 0xffU) / 255.0F;
+                output.color[2] =
+                    static_cast<float>((color >> 16U) & 0xffU) / 255.0F;
+                output.color[3] =
+                    static_cast<float>((color >> 24U) & 0xffU) / 255.0F;
+              }
+              host::submit_ge_primitive(primitive_type, std::move(vertices));
+            }
+            graphics.vertex_address += static_cast<std::uint32_t>(byte_count);
+          }
+          ++primitives;
+        } else if (command == 0x08U) {
+          program_counter = relative_address(argument & 0x00fffffcU);
+          continue;
+        } else if (command == 0x0aU) {
+          if (return_addresses.size() >= 64U)
+            break;
+          return_addresses.push_back(next);
+          program_counter = relative_address(argument & 0x00fffffcU);
+          if (submission == 0U)
+            std::fprintf(
+                stderr, "[psprism:ge] call from=%08x target=%08x return=%08x\n",
+                next - 4U, program_counter, next);
+          continue;
+        } else if (command == 0x0bU) {
+          if (return_addresses.empty())
+            break;
+          program_counter = return_addresses.back();
+          return_addresses.pop_back();
+          if (submission == 0U)
+            std::fprintf(stderr, "[psprism:ge] return target=%08x\n",
+                         program_counter);
+          continue;
+        } else if (command == 0x13U) {
+          graphics.offset_address = argument << 8U;
+        } else if (command == 0xeaU) {
+          const auto source_address =
+              (graphics.commands[0xb2U] & 0x00fffff0U) |
+              ((graphics.commands[0xb3U] & 0x00ff0000U) << 8U);
+          const auto destination_address =
+              (graphics.commands[0xb4U] & 0x00fffff0U) |
+              ((graphics.commands[0xb5U] & 0x00ff0000U) << 8U);
+          const auto source_stride = graphics.commands[0xb3U] & 0x7f8U;
+          const auto destination_stride = graphics.commands[0xb5U] & 0x7f8U;
+          const auto source_x = graphics.commands[0xebU] & 0x3ffU;
+          const auto source_y = (graphics.commands[0xebU] >> 10U) & 0x3ffU;
+          const auto destination_x = graphics.commands[0xecU] & 0x3ffU;
+          const auto destination_y = (graphics.commands[0xecU] >> 10U) & 0x3ffU;
+          const auto width = (graphics.commands[0xeeU] & 0x3ffU) + 1U;
+          const auto height = ((graphics.commands[0xeeU] >> 10U) & 0x3ffU) + 1U;
+          const auto bytes_per_pixel = (argument & 1U) != 0 ? 4U : 2U;
+          for (std::uint32_t row = 0; row < height; ++row) {
+            const auto source =
+                source_address +
+                ((source_y + row) * source_stride + source_x) * bytes_per_pixel;
+            const auto destination =
+                destination_address +
+                ((destination_y + row) * destination_stride + destination_x) *
+                    bytes_per_pixel;
+            const auto row_size =
+                static_cast<std::size_t>(width) * bytes_per_pixel;
+            const auto* input =
+                psprecomp::mapped_address(state, source, row_size);
+            auto* output =
+                psprecomp::mapped_address(state, destination, row_size);
+            if (input == nullptr || output == nullptr)
+              break;
+            std::memmove(output, input, row_size);
+          }
+        }
         if (command == 0x0cU) {
           ++words;
           ended = true;
           break;
         }
+        program_counter = next;
       }
-      std::fprintf(stderr,
-                   "[psprism:ge] list=%u address=%08x stall=%08x words=%u "
-                   "ended=%u commands=",
-                   submission, state.gpr[4], state.gpr[5], words,
-                   ended ? 1U : 0U);
-      bool first = true;
-      for (std::size_t command = 0; command < commands.size(); ++command) {
-        if (commands[command] == 0)
-          continue;
-        std::fprintf(stderr, "%s%02zx:%u", first ? "" : ",", command,
-                     commands[command]);
-        first = false;
+      if (submission < 8U) {
+        std::fprintf(stderr,
+                     "[psprism:ge] list=%u address=%08x stall=%08x words=%u "
+                     "prims=%u ended=%u commands=",
+                     submission, state.gpr[4], state.gpr[5], words, primitives,
+                     ended ? 1U : 0U);
+        bool first = true;
+        for (std::size_t command = 0; command < commands.size(); ++command) {
+          if (commands[command] == 0)
+            continue;
+          std::fprintf(stderr, "%s%02zx:%u", first ? "" : ",", command,
+                       commands[command]);
+          first = false;
+        }
+        std::fputc('\n', stderr);
       }
-      std::fputc('\n', stderr);
     }
     state.gpr[2] = next_list++;
     return;
@@ -852,9 +1162,43 @@ void Runtime::dispatch(psprecomp::State& state, std::string_view name) {
       implementation_->savedata_operation_complete = true;
       implementation_->savedata_status = 3U;
       if (auto* parameters = psprecomp::mapped_address(
-              state, implementation_->savedata_parameters, 48U)) {
+              state, implementation_->savedata_parameters, 1536U)) {
         const std::uint32_t success{};
         std::memcpy(parameters + 28U, &success, sizeof(success));
+        std::uint32_t mode{};
+        std::memcpy(&mode, parameters + 48U, sizeof(mode));
+        if (mode == 8U) {
+          std::uint32_t free_info{};
+          std::uint32_t data_info{};
+          std::uint32_t utility_info{};
+          std::memcpy(&free_info, parameters + 1488U, sizeof(free_info));
+          std::memcpy(&data_info, parameters + 1492U, sizeof(data_info));
+          std::memcpy(&utility_info, parameters + 1496U, sizeof(utility_info));
+          std::error_code space_error;
+          const auto space = std::filesystem::space(
+              implementation_->configuration.writable_root, space_error);
+          const auto available =
+              space_error ? 1024ULL * 1024ULL * 1024ULL : space.available;
+          const auto free_kb = static_cast<std::uint32_t>(
+              std::min<std::uintmax_t>(available / 1024U, 0x7fffffffU));
+          if (auto* output = psprecomp::mapped_address(state, free_info, 20U)) {
+            std::memset(output, 0, 20U);
+            const std::uint32_t cluster_size = 32768U;
+            const auto free_clusters = free_kb / 32U;
+            std::memcpy(output, &cluster_size, sizeof(cluster_size));
+            std::memcpy(output + 4U, &free_clusters, sizeof(free_clusters));
+            std::memcpy(output + 8U, &free_kb, sizeof(free_kb));
+            std::snprintf(reinterpret_cast<char*>(output + 12U), 8U, "%uMB",
+                          free_kb / 1024U);
+          }
+          if (auto* output = psprecomp::mapped_address(state, data_info, 64U))
+            std::memset(output, 0, 64U);
+          if (auto* output =
+                  psprecomp::mapped_address(state, utility_info, 28U))
+            std::memset(output, 0, 28U);
+          std::fprintf(stderr, "[psprism:savedata] memory-stick free=%uKB\n",
+                       free_kb);
+        }
       }
     }
     state.gpr[2] = 0U;
@@ -862,6 +1206,31 @@ void Runtime::dispatch(psprecomp::State& state, std::string_view name) {
   }
   if (name == "sceUtilitySavedataShutdownStart") {
     implementation_->savedata_status = 4U;
+    state.gpr[2] = 0U;
+    return;
+  }
+  if (name == "sceUtilityMsgDialogInitStart") {
+    implementation_->message_dialog_status = 1U;
+    state.gpr[2] = 0U;
+    return;
+  }
+  if (name == "sceUtilityMsgDialogGetStatus") {
+    const auto status = implementation_->message_dialog_status.load();
+    state.gpr[2] = status;
+    if (status == 1U)
+      implementation_->message_dialog_status = 2U;
+    else if (status == 4U)
+      implementation_->message_dialog_status = 0U;
+    return;
+  }
+  if (name == "sceUtilityMsgDialogUpdate") {
+    if (implementation_->message_dialog_status == 2U)
+      implementation_->message_dialog_status = 3U;
+    state.gpr[2] = 0U;
+    return;
+  }
+  if (name == "sceUtilityMsgDialogShutdownStart") {
+    implementation_->message_dialog_status = 4U;
     state.gpr[2] = 0U;
     return;
   }

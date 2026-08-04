@@ -29,10 +29,19 @@ constexpr std::uint32_t psp_circle = 0x002000U;
 constexpr std::uint32_t psp_cross = 0x004000U;
 constexpr std::uint32_t psp_square = 0x008000U;
 
+struct GeometryBatch {
+  MTLPrimitiveType type;
+  std::vector<psprism::host::GeometryVertex> vertices;
+};
+
+std::mutex geometry_mutex;
+std::vector<GeometryBatch> geometry_batches;
+
 @interface PsprismRenderer : NSObject <MTKViewDelegate>
 @property(nonatomic, strong) id<MTLDevice> device;
 @property(nonatomic, strong) id<MTLCommandQueue> queue;
 @property(nonatomic, strong) id<MTLRenderPipelineState> pipeline;
+@property(nonatomic, strong) id<MTLRenderPipelineState> geometryPipeline;
 @property(nonatomic, strong) id<MTLTexture> texture;
 @end
 
@@ -56,6 +65,15 @@ constexpr std::uint32_t psp_square = 0x008000U;
       constexpr sampler nearest(filter::nearest, address::clamp_to_edge);
       return image.sample(nearest, in.uv);
     }
+    struct GeometryVertex { packed_float4 position; packed_float4 color; };
+    struct GeometryOut { float4 position [[position]]; float4 color; };
+    vertex GeometryOut psprism_geometry_vertex(
+        uint id [[vertex_id]], device const GeometryVertex* vertices [[buffer(0)]]) {
+      return {vertices[id].position, vertices[id].color};
+    }
+    fragment float4 psprism_geometry_fragment(GeometryOut in [[stage_in]]) {
+      return in.color;
+    }
   )METAL";
   NSError* error = nil;
   id<MTLLibrary> library = [self.device newLibraryWithSource:source
@@ -74,6 +92,14 @@ constexpr std::uint32_t psp_square = 0x008000U;
   self.pipeline = [self.device newRenderPipelineStateWithDescriptor:descriptor
                                                                error:&error];
   if (self.pipeline == nil) NSLog(@"psprism: Metal pipeline error: %@", error);
+  descriptor.vertexFunction =
+      [library newFunctionWithName:@"psprism_geometry_vertex"];
+  descriptor.fragmentFunction =
+      [library newFunctionWithName:@"psprism_geometry_fragment"];
+  self.geometryPipeline =
+      [self.device newRenderPipelineStateWithDescriptor:descriptor error:&error];
+  if (self.geometryPipeline == nil)
+    NSLog(@"psprism: Metal geometry pipeline error: %@", error);
   return self;
 }
 
@@ -87,6 +113,19 @@ constexpr std::uint32_t psp_square = 0x008000U;
   [encoder setRenderPipelineState:self.pipeline];
   if (self.texture != nil) [encoder setFragmentTexture:self.texture atIndex:0];
   [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+  if (self.geometryPipeline != nil) {
+    std::lock_guard lock(geometry_mutex);
+    [encoder setRenderPipelineState:self.geometryPipeline];
+    for (const auto& batch : geometry_batches) {
+      if (batch.vertices.empty()) continue;
+      [encoder setVertexBytes:batch.vertices.data()
+                       length:batch.vertices.size() * sizeof(psprism::host::GeometryVertex)
+                      atIndex:0];
+      [encoder drawPrimitives:batch.type
+                  vertexStart:0
+                  vertexCount:batch.vertices.size()];
+    }
+  }
   [encoder endEncoding];
   [commands presentDrawable:drawable];
   [commands commit];
@@ -260,6 +299,40 @@ void present_frame(const std::uint8_t* pixels, std::uint32_t stride,
                         bytesPerRow:static_cast<NSUInteger>(width) * 4U];
     [metal_view setNeedsDisplay:YES];
   });
+}
+
+void begin_ge_frame() {
+  std::lock_guard lock(geometry_mutex);
+  geometry_batches.clear();
+}
+
+void submit_ge_primitive(std::uint32_t type,
+                         std::vector<GeometryVertex> vertices) {
+  MTLPrimitiveType metal_type;
+  switch (type) {
+    case 0:
+      metal_type = MTLPrimitiveTypePoint;
+      break;
+    case 1:
+      metal_type = MTLPrimitiveTypeLine;
+      break;
+    case 2:
+      metal_type = MTLPrimitiveTypeLineStrip;
+      break;
+    case 3:
+      metal_type = MTLPrimitiveTypeTriangle;
+      break;
+    case 4:
+      metal_type = MTLPrimitiveTypeTriangleStrip;
+      break;
+    default:
+      return;
+  }
+  {
+    std::lock_guard lock(geometry_mutex);
+    geometry_batches.push_back({metal_type, std::move(vertices)});
+  }
+  dispatch_async(dispatch_get_main_queue(), ^{ [metal_view setNeedsDisplay:YES]; });
 }
 
 ControllerState controller_state() {
