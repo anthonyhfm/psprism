@@ -56,6 +56,7 @@ struct GeometryState {
 };
 
 void initialize_frontend();
+void set_verbose_logging(bool enabled);
 void run_event_loop();
 void request_frontend_exit();
 void present_frame(const std::uint8_t* pixels, std::uint32_t stride,

@@ -134,6 +134,7 @@ std::string generated_readme(const ExportConfig& config, InputKind kind,
          "make macos      # build a native Release .app (-O3)\n"
          "make macos-debug # build a native Debug .app\n"
          "make macos-run  # build and run the native Release app\n"
+         "make macos-run MACOS_RUN_ARGS=--verbose # enable runtime logs\n"
          "```\n\n"
          "The PSP targets require PSPSDK and `psp-config` in `PATH`. The "
          "macOS target requires CMake and Apple Clang.\n\n"
@@ -172,6 +173,7 @@ std::string root_makefile(const ExportConfig& config, bool has_disc,
   out << "PPSSPP ?= ppsspp\n"
          "CMAKE ?= cmake\n"
          "MACOS_BUILD_TYPE ?= Release\n"
+         "MACOS_RUN_ARGS ?=\n"
          "\n"
          ".PHONY: all psp-binary psp psp-run macos macos-debug macos-run "
          "clean rebuild "
@@ -207,7 +209,7 @@ std::string root_makefile(const ExportConfig& config, bool has_disc,
          "PSPRISM_WRITABLE_ROOT=\"$(CURDIR)/.psprism/ms0\" "
          "\"$(CURDIR)/build/macos/"
       << config.project_name << ".app/Contents/MacOS/" << config.project_name
-      << "\"\n\n"
+      << "\" $(MACOS_RUN_ARGS)\n\n"
          "ppsspp: psp-run\n\n"
          "clean:\n"
          "\t$(MAKE) -C src/generated clean\n"
@@ -236,6 +238,7 @@ std::string root_makefile(const ExportConfig& config, bool has_disc,
          "\t@echo \"make macos      Build a native Release .app (-O3)\"\n"
          "\t@echo \"make macos-debug Build a native Debug .app\"\n"
          "\t@echo \"make macos-run  Build and launch the Release .app\"\n"
+         "\t@echo \"  Add MACOS_RUN_ARGS=--verbose for runtime logs\"\n"
          "\t@echo \"make clean      Remove compiler output\"\n";
   return out.str();
 }

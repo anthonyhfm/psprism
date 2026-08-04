@@ -416,6 +416,7 @@ struct Runtime::Implementation {
   std::uint32_t heap_cursor{};
   std::uint32_t stack_cursor{};
   std::atomic<bool> exit_requested{};
+  bool verbose{};
   std::atomic<std::uint32_t> displayed_frames{};
   std::atomic<std::uint32_t> submitted_ge_lists{};
   std::uint64_t start_monotonic_microseconds{};
@@ -494,6 +495,11 @@ Runtime::~Runtime() {
   delete implementation_;
 }
 
+void Runtime::set_verbose(bool enabled) {
+  implementation_->verbose = enabled;
+  host::set_verbose_logging(enabled);
+}
+
 void Runtime::configure(std::uint8_t* memory, std::size_t size,
                         std::uint32_t base, Configuration configuration) {
   implementation_->memory = memory;
@@ -526,14 +532,17 @@ void Runtime::configure(std::uint8_t* memory, std::size_t size,
   implementation_->configuration = std::move(configuration);
   implementation_->current_directory = implementation_->configuration.disc_root;
   host::initialize_frontend();
-  std::fprintf(stderr, "[psprism:macos] disc=%s writable=%s\n",
-               implementation_->configuration.disc_root.c_str(),
-               implementation_->configuration.writable_root.c_str());
+  if (implementation_->verbose) {
+    std::fprintf(stderr, "[psprism:macos] disc=%s writable=%s\n",
+                 implementation_->configuration.disc_root.c_str(),
+                 implementation_->configuration.writable_root.c_str());
+  }
 }
 
 void Runtime::log(const char* format, std::uint32_t first,
                   std::uint32_t second) {
-  std::fprintf(stderr, format, first, second);
+  if (implementation_->verbose)
+    std::fprintf(stderr, format, first, second);
 }
 
 void Runtime::prepare_state(psprecomp::State& state) {
@@ -593,8 +602,10 @@ void Runtime::dispatch(psprecomp::State& state, std::string_view name) {
     thread->tls_address = tls;
     implementation_->threads.emplace(thread->uid, thread);
     state.gpr[2] = static_cast<std::uint32_t>(thread->uid);
-    std::fprintf(stderr, "[psprism:thread] create uid=%d name=%s entry=%08x\n",
-                 thread->uid, thread->name.c_str(), thread->entry);
+    if (implementation_->verbose)
+      std::fprintf(stderr,
+                   "[psprism:thread] create uid=%d name=%s entry=%08x\n",
+                   thread->uid, thread->name.c_str(), thread->entry);
     return;
   }
   if (name == "sceKernelStartThread") {
@@ -610,8 +621,10 @@ void Runtime::dispatch(psprecomp::State& state, std::string_view name) {
     }
     const auto argument_size = state.gpr[5];
     const auto argument_pointer = state.gpr[6];
-    std::fprintf(stderr, "[psprism:thread] launch uid=%d args=%u argp=%08x\n",
-                 thread->uid, argument_size, argument_pointer);
+    if (implementation_->verbose)
+      std::fprintf(stderr,
+                   "[psprism:thread] launch uid=%d args=%u argp=%08x\n",
+                   thread->uid, argument_size, argument_pointer);
     thread->state = std::make_shared<psprecomp::State>();
     thread->state->memory = implementation_->memory;
     thread->state->memory_size = implementation_->memory_size;
@@ -626,23 +639,27 @@ void Runtime::dispatch(psprecomp::State& state, std::string_view name) {
     thread->state->gpr[29] = thread->stack_address + thread->stack_size - 64U;
     thread->state->gpr[31] = return_address;
     const auto executor = implementation_->configuration.guest_executor;
-    thread->host_thread = std::thread([thread, executor] {
+    const auto verbose = implementation_->verbose;
+    thread->host_thread = std::thread([thread, executor, verbose] {
       current_thread_id = thread->uid;
-      std::fprintf(stderr, "[psprism:thread] start uid=%d name=%s\n",
-                   thread->uid, thread->name.c_str());
+      if (verbose)
+        std::fprintf(stderr, "[psprism:thread] start uid=%d name=%s\n",
+                     thread->uid, thread->name.c_str());
       executor(*thread->state);
       thread->result = static_cast<std::int32_t>(thread->state->gpr[2]);
       thread->finished = true;
-      std::fprintf(
-          stderr,
-          "[psprism:thread] stop uid=%d reason=%u pc=%08x result=%d "
-          "fault=%08x fault_pc=%08x insn=%08x sp=%08x ra=%08x "
-          "a0=%08x a1=%08x a2=%08x a3=%08x\n",
-          thread->uid, static_cast<unsigned>(thread->state->stop_reason),
-          thread->state->pc, thread->result, thread->state->fault_address,
-          thread->state->fault_pc, thread->state->fault_instruction,
-          thread->state->gpr[29], thread->state->gpr[31], thread->state->gpr[4],
-          thread->state->gpr[5], thread->state->gpr[6], thread->state->gpr[7]);
+      if (verbose)
+        std::fprintf(
+            stderr,
+            "[psprism:thread] stop uid=%d reason=%u pc=%08x result=%d "
+            "fault=%08x fault_pc=%08x insn=%08x sp=%08x ra=%08x "
+            "a0=%08x a1=%08x a2=%08x a3=%08x\n",
+            thread->uid, static_cast<unsigned>(thread->state->stop_reason),
+            thread->state->pc, thread->result, thread->state->fault_address,
+            thread->state->fault_pc, thread->state->fault_instruction,
+            thread->state->gpr[29], thread->state->gpr[31],
+            thread->state->gpr[4], thread->state->gpr[5],
+            thread->state->gpr[6], thread->state->gpr[7]);
     });
     state.gpr[2] = 0;
     return;
@@ -834,9 +851,10 @@ void Runtime::dispatch(psprecomp::State& state, std::string_view name) {
     implementation_->memory_blocks.emplace(
         uid, Implementation::MemoryBlock{address, size});
     state.gpr[2] = static_cast<std::uint32_t>(uid);
-    std::fprintf(stderr,
-                 "[psprism:memory] partition uid=%d size=%u address=%08x\n",
-                 uid, size, address);
+    if (implementation_->verbose)
+      std::fprintf(stderr,
+                   "[psprism:memory] partition uid=%d size=%u address=%08x\n",
+                   uid, size, address);
     return;
   }
   if (name == "sceKernelGetBlockHeadAddr") {
@@ -866,10 +884,11 @@ void Runtime::dispatch(psprecomp::State& state, std::string_view name) {
   if (name == "sceKernelCreateFpl") {
     const auto block_size = state.gpr[7];
     const auto block_count = state.gpr[8];
-    std::fprintf(stderr,
-                 "[psprism:memory] create-fpl block_size=%u blocks=%u "
-                 "sp=%08x\n",
-                 block_size, block_count, state.gpr[29]);
+    if (implementation_->verbose)
+      std::fprintf(stderr,
+                   "[psprism:memory] create-fpl block_size=%u blocks=%u "
+                   "sp=%08x\n",
+                   block_size, block_count, state.gpr[29]);
     if (block_size == 0 || block_count == 0) {
       state.gpr[2] = out_of_memory;
       return;
@@ -887,7 +906,8 @@ void Runtime::dispatch(psprecomp::State& state, std::string_view name) {
     const auto uid = implementation_->allocate_uid();
     implementation_->fixed_pools.emplace(uid, pool);
     state.gpr[2] = static_cast<std::uint32_t>(uid);
-    std::fprintf(stderr, "[psprism:memory] fpl uid=%d\n", uid);
+    if (implementation_->verbose)
+      std::fprintf(stderr, "[psprism:memory] fpl uid=%d\n", uid);
     return;
   }
   if (name == "sceKernelAllocateFpl") {
@@ -911,10 +931,11 @@ void Runtime::dispatch(psprecomp::State& state, std::string_view name) {
     if (auto* output = guest_pointer<std::uint32_t>(state, state.gpr[5]))
       *output = address;
     state.gpr[2] = 0;
-    std::fprintf(stderr,
-                 "[psprism:memory] allocate-fpl uid=%u output=%08x "
-                 "address=%08x\n",
-                 state.gpr[4], state.gpr[5], address);
+    if (implementation_->verbose)
+      std::fprintf(stderr,
+                   "[psprism:memory] allocate-fpl uid=%u output=%08x "
+                   "address=%08x\n",
+                   state.gpr[4], state.gpr[5], address);
     return;
   }
   if (name == "sceKernelFreeFpl") {
@@ -966,7 +987,7 @@ void Runtime::dispatch(psprecomp::State& state, std::string_view name) {
     if (auto* pixels =
             psprecomp::mapped_address(state, state.gpr[4], byte_count)) {
       const auto frame = implementation_->displayed_frames++;
-      if (frame < 4U) {
+      if (implementation_->verbose && frame < 4U) {
         std::fprintf(stderr,
                      "[psprism:display] frame=%u address=%08x stride=%u "
                      "format=%u sync=%u\n",
@@ -1084,7 +1105,8 @@ void Runtime::dispatch(psprecomp::State& state, std::string_view name) {
           const auto primitive_type = (argument >> 16U) & 7U;
           const auto vertex_count = argument & 0xffffU;
           const auto vertex_type = graphics.commands[0x12U] & 0x00ffffffU;
-          if (submission < 2U && primitives < 32U) {
+          if (implementation_->verbose && submission < 2U &&
+              primitives < 32U) {
             std::fprintf(
                 stderr,
                 "[psprism:ge] prim=%u type=%u count=%u vtype=%06x "
@@ -1688,7 +1710,7 @@ void Runtime::dispatch(psprecomp::State& state, std::string_view name) {
             break;
           call_stack.push_back({next, graphics.offset_address});
           program_counter = relative_address(argument & 0x00fffffcU);
-          if (submission == 0U)
+          if (implementation_->verbose && submission == 0U)
             std::fprintf(
                 stderr, "[psprism:ge] call from=%08x target=%08x return=%08x\n",
                 next - 4U, program_counter, next);
@@ -1700,7 +1722,7 @@ void Runtime::dispatch(psprecomp::State& state, std::string_view name) {
           call_stack.pop_back();
           program_counter = frame.return_address;
           graphics.offset_address = frame.offset_address;
-          if (submission == 0U)
+          if (implementation_->verbose && submission == 0U)
             std::fprintf(stderr, "[psprism:ge] return target=%08x\n",
                          program_counter);
           continue;
@@ -1751,7 +1773,7 @@ void Runtime::dispatch(psprecomp::State& state, std::string_view name) {
         }
         program_counter = next;
       }
-      if (submission < 8U) {
+      if (implementation_->verbose && submission < 8U) {
         std::fprintf(stderr,
                      "[psprism:ge] list=%u address=%08x stall=%08x words=%u "
                      "prims=%u ended=%u commands=",
@@ -1804,9 +1826,9 @@ void Runtime::dispatch(psprecomp::State& state, std::string_view name) {
     return;
   }
   if (name == "sceKernelPrintf") {
-    if (const auto* format = guest_string(state, state.gpr[4])) {
-      std::fprintf(stderr, "[guest] %s", format);
-    }
+    if (implementation_->verbose)
+      if (const auto* format = guest_string(state, state.gpr[4]))
+        std::fprintf(stderr, "[guest] %s", format);
     state.gpr[2] = 0;
     return;
   }
@@ -1875,9 +1897,11 @@ void Runtime::dispatch(psprecomp::State& state, std::string_view name) {
     implementation_->savedata_parameters = state.gpr[4];
     implementation_->savedata_operation_complete = false;
     implementation_->savedata_status = 1U;
-    std::fprintf(stderr,
-                 "[psprism:savedata] init mode=%u game=%s save=%s file=%s\n",
-                 mode, game_name, save_name, file_name);
+    if (implementation_->verbose)
+      std::fprintf(
+          stderr,
+          "[psprism:savedata] init mode=%u game=%s save=%s file=%s\n", mode,
+          game_name, save_name, file_name);
     state.gpr[2] = 0U;
     return;
   }
@@ -1930,8 +1954,10 @@ void Runtime::dispatch(psprecomp::State& state, std::string_view name) {
           if (auto* output =
                   psprecomp::mapped_address(state, utility_info, 28U))
             std::memset(output, 0, 28U);
-          std::fprintf(stderr, "[psprism:savedata] memory-stick free=%uKB\n",
-                       free_kb);
+          if (implementation_->verbose)
+            std::fprintf(
+                stderr, "[psprism:savedata] memory-stick free=%uKB\n",
+                free_kb);
         }
       }
     }
@@ -2008,7 +2034,7 @@ void Runtime::dispatch(psprecomp::State& state, std::string_view name) {
     auto* output =
         psprecomp::mapped_address(state, state.gpr[4], pad_size * count);
     const auto controller = host::controller_state();
-    if (controller.buttons != 0)
+    if (implementation_->verbose && controller.buttons != 0)
       std::fprintf(stderr, "[psprism:controller] buttons=%08x\n",
                    controller.buttons);
     std::memset(output, 0, pad_size * count);
@@ -2226,7 +2252,8 @@ void Runtime::dispatch(psprecomp::State& state, std::string_view name) {
     return;
   }
 
-  if (implementation_->warned.emplace(name).second) {
+  if (implementation_->verbose &&
+      implementation_->warned.emplace(name).second) {
     std::fprintf(stderr, "[psprism:macos] unimplemented: %.*s\n",
                  static_cast<int>(name.size()), name.data());
   }

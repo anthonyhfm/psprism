@@ -114,6 +114,7 @@ std::atomic_uint32_t display_framebuffer_address{0x04000000U};
 std::atomic_uint32_t keyboard_buttons{};
 std::atomic_uint32_t keyboard_latched_buttons{};
 std::atomic_uint32_t keyboard_analog_directions{};
+std::atomic_bool verbose_logging{};
 id keyboard_event_monitor;
 
 constexpr std::uint32_t analog_left = 1U << 0U;
@@ -752,6 +753,10 @@ std::uint8_t axis_to_byte(float value) {
 
 namespace psprism::host {
 
+void set_verbose_logging(bool enabled) {
+  verbose_logging.store(enabled, std::memory_order_relaxed);
+}
+
 void initialize_frontend() {
   std::call_once(frontend_once, [] {
     [NSApplication sharedApplication];
@@ -793,8 +798,10 @@ void initialize_frontend() {
                      queue:[NSOperationQueue mainQueue]
                 usingBlock:^(NSNotification* notification) {
                   active_controller = notification.object;
-                  std::fprintf(stderr, "[psprism:controller] connected: %s\n",
-                               active_controller.vendorName.UTF8String);
+                  if (verbose_logging.load(std::memory_order_relaxed))
+                    std::fprintf(
+                        stderr, "[psprism:controller] connected: %s\n",
+                        active_controller.vendorName.UTF8String);
                 }];
     if (GCController.controllers.count != 0)
       active_controller = GCController.controllers.firstObject;
@@ -806,7 +813,10 @@ void initialize_frontend() {
                                           event.type == NSEventTypeKeyDown;
                                       const auto handled = update_keyboard_key(
                                           event.keyCode, pressed);
-                                      if (handled && pressed && !event.isARepeat)
+                                      if (handled && pressed &&
+                                          !event.isARepeat &&
+                                          verbose_logging.load(
+                                              std::memory_order_relaxed))
                                         std::fprintf(
                                             stderr,
                                             "[psprism:keyboard] key=%hu\n",

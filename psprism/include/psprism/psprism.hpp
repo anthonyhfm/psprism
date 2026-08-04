@@ -23,6 +23,7 @@ public:
 
   void configure(std::uint8_t* memory, std::size_t size, std::uint32_t base,
                  Configuration configuration = {});
+  void set_verbose(bool enabled);
   void dispatch(psprecomp::State& state, std::string_view import_name);
   void log(const char* format, std::uint32_t first, std::uint32_t second);
   void prepare_state(psprecomp::State& state);
