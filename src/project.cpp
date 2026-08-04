@@ -131,8 +131,9 @@ std::string generated_readme(const ExportConfig& config, InputKind kind,
          "```sh\n"
          "make psp        # build PSP output (plus ISO for disc exports)\n"
          "make psp-run    # build and launch through the PPSSPP CLI\n"
-         "make macos      # build a native Debug .app\n"
-         "make macos-run  # build and run the native Debug app\n"
+         "make macos      # build a native Release .app (-O3)\n"
+         "make macos-debug # build a native Debug .app\n"
+         "make macos-run  # build and run the native Release app\n"
          "```\n\n"
          "The PSP targets require PSPSDK and `psp-config` in `PATH`. The "
          "macOS target requires CMake and Apple Clang.\n\n"
@@ -170,8 +171,10 @@ std::string root_makefile(const ExportConfig& config, bool has_disc,
   std::ostringstream out;
   out << "PPSSPP ?= ppsspp\n"
          "CMAKE ?= cmake\n"
+         "MACOS_BUILD_TYPE ?= Release\n"
          "\n"
-         ".PHONY: all psp-binary psp psp-run macos macos-run clean rebuild "
+         ".PHONY: all psp-binary psp psp-run macos macos-debug macos-run "
+         "clean rebuild "
          "ppsspp "
          "disc-tree help\n\n"
          "all: psp\n\n"
@@ -194,8 +197,11 @@ std::string root_makefile(const ExportConfig& config, bool has_disc,
            "\t$(PPSSPP) \"$(CURDIR)/src/generated/EBOOT.PBP\"\n\n";
   }
   out << "macos:\n"
-         "\t$(CMAKE) -S . -B build/macos -DCMAKE_BUILD_TYPE=Debug\n"
+         "\t$(CMAKE) -S . -B build/macos "
+         "-DCMAKE_BUILD_TYPE=$(MACOS_BUILD_TYPE)\n"
          "\t$(CMAKE) --build build/macos -j\n\n"
+         "macos-debug:\n"
+         "\t$(MAKE) macos MACOS_BUILD_TYPE=Debug\n\n"
          "macos-run: macos\n"
          "\tPSPRISM_DISC_ROOT=\"$(CURDIR)/disc\" "
          "PSPRISM_WRITABLE_ROOT=\"$(CURDIR)/.psprism/ms0\" "
@@ -227,8 +233,9 @@ std::string root_makefile(const ExportConfig& config, bool has_disc,
       << (has_disc ? " plus ISO" : "")
       << "\"\n"
          "\t@echo \"make psp-run    Build PSP and launch it in PPSSPP\"\n"
-         "\t@echo \"make macos      Build a native Debug .app\"\n"
-         "\t@echo \"make macos-run  Build and launch the Debug .app\"\n"
+         "\t@echo \"make macos      Build a native Release .app (-O3)\"\n"
+         "\t@echo \"make macos-debug Build a native Debug .app\"\n"
+         "\t@echo \"make macos-run  Build and launch the Release .app\"\n"
          "\t@echo \"make clean      Remove compiler output\"\n";
   return out.str();
 }

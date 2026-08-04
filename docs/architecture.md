@@ -120,7 +120,7 @@ does not leave a plausible-looking partial project.
 - Compile synthetic C with PSPSDK, recompile it to C++, and compare it with the
   native reference implementation.
 - Compile the same generated C++ back to a PSP PRX and package an EBOOT.
-- Build the self-contained export as a native macOS Debug application.
+- Build the self-contained export as a native optimized macOS application.
 - Compare register, memory and import traces between original and recompiled
   programs.
 - Treat PPSSPP and physical PSP hardware as independent validation targets.

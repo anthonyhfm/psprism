@@ -60,8 +60,9 @@ The root `Makefile` is the normal entry point:
 ```sh
 make psp         # build PRX, EBOOT.PBP and a rebuilt ISO
 make psp-run     # build PSP output and launch its writable PPSSPP run tree
-make macos       # build a native Debug .app
-make macos-run   # build and execute the native Debug app
+make macos       # build a native Release .app (-O3)
+make macos-debug # build a native Debug .app
+make macos-run   # build and execute the native Release app
 make clean       # remove compiler products
 ```
 

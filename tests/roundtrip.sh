@@ -85,7 +85,9 @@ grep -q 'psprism::Runtime::instance' \
 grep -q '^psp:' "$ROUNDTRIP_TMP/exported/Makefile"
 grep -q '^psp-run:' "$ROUNDTRIP_TMP/exported/Makefile"
 grep -q '^macos:' "$ROUNDTRIP_TMP/exported/Makefile"
+grep -q '^macos-debug:' "$ROUNDTRIP_TMP/exported/Makefile"
 grep -q '^macos-run:' "$ROUNDTRIP_TMP/exported/Makefile"
+grep -q 'MACOS_BUILD_TYPE ?= Release' "$ROUNDTRIP_TMP/exported/Makefile"
 if grep -E 'sce[A-Z]|pspkernel[.]h' "$ROUNDTRIP_TMP/exported/src/generated/"*.cpp; then
     echo "portable generated core contains a direct PSP API dependency" >&2
     exit 1

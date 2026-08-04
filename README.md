@@ -67,7 +67,7 @@ the remaining project choices and produces a self-contained codebase:
 ```text
 my_game/
 ├── Makefile                 one-command build entry point
-├── CMakeLists.txt           native macOS Debug app build
+├── CMakeLists.txt           native macOS app build
 ├── README.md                generated project guide
 ├── project.toml             reproducible project metadata
 ├── config/code.map          optional copied function metadata
@@ -89,8 +89,9 @@ make psp-run
 ```
 
 Use `make psp` to produce the PSP PRX, EBOOT and rebuilt ISO without launching
-the emulator. `make macos` builds a native Debug `.app`; `make macos-run` builds
-and executes that app. The PSP target calls the firmware through
+the emulator. `make macos` builds a performance-oriented Release `.app` with
+`-O3`; `make macos-debug` remains available for debugging, and `make macos-run`
+builds and executes the Release app. The PSP target calls the firmware through
 `platform/psp`. Native targets use the vendored `psprism/` engine;
 `platform/macos` is the generated adapter between the game's import table and
 psprism. Every export owns its copy, so title-specific syscall quirks stay
