@@ -3,6 +3,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
+#include <string>
 #include <vector>
 
 namespace psprism::host {
@@ -15,6 +17,58 @@ struct ControllerState {
   std::uint32_t buttons{};
   std::uint8_t analog_x{128};
   std::uint8_t analog_y{128};
+};
+
+enum class DialogKind {
+  message,
+  savedata_load,
+  savedata_save,
+  savedata_delete,
+  osk,
+};
+
+struct DialogItem {
+  std::string title;
+  std::string subtitle;
+  std::string detail;
+  std::string timestamp;
+  std::string size;
+  std::vector<std::uint8_t> icon_png;
+  std::vector<std::uint8_t> preview_png;
+  bool empty{};
+};
+
+struct OskField {
+  std::string label;
+  std::u16string text;
+  std::uint32_t limit{};
+  std::uint32_t input_type{};
+};
+
+struct DialogModel {
+  std::uint64_t id{};
+  DialogKind kind{DialogKind::message};
+  std::string title;
+  std::string message;
+  std::string detail;
+  std::string accept_label{"OK"};
+  std::string cancel_label{"Back"};
+  std::string yes_label{"Yes"};
+  std::string no_label{"No"};
+  std::vector<DialogItem> items;
+  std::vector<OskField> fields;
+  std::size_t selected_item{};
+  bool confirm_with_cross{true};
+  bool yes_no{};
+  bool default_no{};
+};
+
+struct DialogResult {
+  std::uint64_t id{};
+  bool cancelled{};
+  bool affirmative{true};
+  std::size_t selected_item{};
+  std::vector<std::u16string> field_text;
 };
 
 struct GeometryVertex {
@@ -73,5 +127,9 @@ void submit_ge_primitive(std::uint32_t type,
                          std::uint32_t texture_height = 0,
                          GeometryState graphics_state = {});
 ControllerState controller_state();
+void present_dialog(DialogModel model);
+std::optional<DialogResult> poll_dialog_result(std::uint64_t id);
+void dismiss_dialog(std::uint64_t id);
+bool dialog_visible();
 
 } // namespace psprism::host

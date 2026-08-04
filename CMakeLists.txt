@@ -11,6 +11,7 @@ add_executable(psprecomp
     src/elf.cpp
     src/emitter.cpp
     src/iso.cpp
+    src/nids.cpp
     src/project.cpp
 )
 target_compile_definitions(psprecomp PRIVATE
@@ -32,6 +33,14 @@ if(BUILD_TESTING)
     target_compile_options(iso_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
     target_link_libraries(iso_tests PRIVATE ${CMAKE_DL_LIBS})
     add_test(NAME iso_tests COMMAND iso_tests)
+
+    add_executable(psprism_utility_tests
+        tests/psprism_utility_tests.cpp
+        psprism/src/utility_data.cpp)
+    target_include_directories(psprism_utility_tests PRIVATE psprism/src)
+    target_compile_options(psprism_utility_tests PRIVATE
+        -Wall -Wextra -Wpedantic -Werror)
+    add_test(NAME psprism_utility_tests COMMAND psprism_utility_tests)
 
     find_program(PSP_GCC psp-gcc HINTS "$ENV{PSPDEV}/bin")
     find_program(PSP_LD psp-ld HINTS "$ENV{PSPDEV}/bin")

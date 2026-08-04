@@ -1,4 +1,5 @@
 #include "emitter.hpp"
+#include "nids.hpp"
 
 #include <psprecomp/vfpu.hpp>
 
@@ -16,6 +17,15 @@
 
 namespace psprecomp {
 namespace {
+
+std::string import_symbol(const Import& import, const CodeMap* code_map) {
+    if (code_map != nullptr) {
+        if (const auto* symbol = code_map->symbol_at(import.stub_address)) {
+            return *symbol;
+        }
+    }
+    return std::string(resolve_psp_nid(import.library, import.nid));
+}
 
 std::uint32_t word_at(const ExecutableSection& section, std::size_t offset) {
     const auto* bytes = section.bytes.data() + offset;
@@ -109,21 +119,12 @@ bool starts_delayed_branch(std::uint32_t instruction) {
 }
 
 bool needs_post_delay_entry(std::uint32_t instruction) {
-    const auto op = instruction >> 26U;
-    if (op == 0U) {
-        return (instruction & 63U) == 0x09U; // JALR return address
-    }
-    if (op == 0x03U || (op >= 0x14U && op <= 0x17U)) {
-        return true; // JAL return address or branch-likely annul path
-    }
-    if (op == 0x01U) {
-        const auto rt = (instruction >> 16U) & 31U;
-        return rt == 0x02U || rt == 0x03U || (rt >= 0x10U && rt <= 0x13U);
-    }
-    if ((op == 0x11U || op == 0x12U) && ((instruction >> 21U) & 31U) == 0x08U) {
-        return ((instruction >> 17U) & 1U) != 0U;
-    }
-    return false;
+    // Compilers place jump-table landing pads directly after unconditional
+    // branch delay slots (Duff-style loops are a common example). The target
+    // is reached through JR/JALR, so static direct-target discovery cannot see
+    // it. Registering pc + 8 for every delayed control transfer is harmless
+    // for normal fall-through and makes these indirect entries dispatchable.
+    return starts_delayed_branch(instruction);
 }
 
 bool may_stop_execution(std::uint32_t instruction) {
@@ -188,7 +189,8 @@ jump_relocation_bases(const ElfImage& image) {
 
 std::optional<std::uint32_t> direct_control_target(
     std::uint32_t pc, std::uint32_t instruction,
-    const std::map<std::uint32_t, std::uint32_t>& jump_bases) {
+    const std::map<std::uint32_t, std::uint32_t>& jump_bases,
+    std::uint32_t preferred_base = 0) {
     if (!starts_delayed_branch(instruction)) {
         return std::nullopt;
     }
@@ -203,7 +205,10 @@ std::optional<std::uint32_t> direct_control_target(
             target_field =
                 (target_field + (relocation->second >> 2U)) & 0x03ffffffU;
         }
-        return ((pc + 4U) & 0xf0000000U) | (target_field << 2U);
+        const auto original_pc = pc + preferred_base;
+        const auto absolute_target =
+            ((original_pc + 4U) & 0xf0000000U) | (target_field << 2U);
+        return absolute_target - preferred_base;
     }
     const auto displacement = static_cast<std::uint32_t>(
         static_cast<std::int32_t>(static_cast<std::int16_t>(instruction)) * 4);
@@ -269,7 +274,8 @@ std::set<std::uint32_t> potential_block_entries(const ElfImage& image,
                 add(pc + 8U);
             }
             if (const auto target =
-                    direct_control_target(pc, instruction, jump_bases)) {
+                    direct_control_target(pc, instruction, jump_bases,
+                                          image.preferred_base)) {
                 add(*target);
             }
         }
@@ -283,16 +289,16 @@ std::set<std::uint32_t> potential_block_entries(const ElfImage& image,
     if (image.relocations.empty()) {
         for (std::size_t offset = 0; offset + 4U <= memory.size();
              offset += 4U) {
-            const auto address = static_cast<std::uint32_t>(offset);
-            if (is_executable_word(image, address)) {
-                continue;
-            }
             const auto value =
                 static_cast<std::uint32_t>(memory[offset]) |
                 static_cast<std::uint32_t>(memory[offset + 1U]) << 8U |
                 static_cast<std::uint32_t>(memory[offset + 2U]) << 16U |
                 static_cast<std::uint32_t>(memory[offset + 3U]) << 24U;
-            add(value);
+            if (image.preferred_base != 0 && value >= image.preferred_base) {
+                add(value - image.preferred_base);
+            } else {
+                add(value);
+            }
         }
     }
     // Addresses passed directly in registers (thread entries, callbacks,
@@ -412,22 +418,17 @@ std::string branch_target(std::uint32_t pc, std::uint32_t instruction,
 }
 
 std::string jump_target(std::uint32_t pc, std::uint32_t instruction,
-                        bool relocated) {
+                        bool relocated, std::uint32_t preferred_base) {
     if (!relocated) {
+        const auto original_pc = pc + preferred_base;
         const auto target =
-            ((pc + 4U) & 0xf0000000U) | ((instruction & 0x03ffffffU) << 2U);
+            (((original_pc + 4U) & 0xf0000000U) |
+             ((instruction & 0x03ffffffU) << 2U)) -
+            preferred_base;
         return "state.memory_base + " + hex(target);
     }
     return "instruction_jump_target(state, current_pc, " + hex(instruction) +
            ")";
-}
-
-std::string unsupported(std::uint32_t pc, std::uint32_t instruction) {
-    std::ostringstream stream;
-    stream << "unsupported instruction 0x" << std::hex << std::setw(8)
-           << std::setfill('0') << instruction << " at 0x" << std::setw(8)
-           << pc;
-    return stream.str();
 }
 
 std::string opcode_group(std::uint32_t instruction) {
@@ -445,7 +446,8 @@ std::string opcode_group(std::uint32_t instruction) {
 }
 
 std::string emit_instruction(std::uint32_t pc, std::uint32_t instruction,
-                             bool relocated = true) {
+                             bool relocated = true,
+                             std::uint32_t preferred_base = 0) {
     const auto op = instruction >> 26U;
     const auto rs = (instruction >> 21U) & 31U;
     const auto rt = (instruction >> 16U) & 31U;
@@ -474,7 +476,8 @@ std::string emit_instruction(std::uint32_t pc, std::uint32_t instruction,
             } else if (rs == 0) {
                 out << reg(rd) << " = " << reg(rt) << " >> " << shift << "U;";
             } else {
-                throw std::runtime_error(unsupported(pc, instruction));
+                return "/* unsupported/reserved PSP word */ "
+                       "state.stop_reason = StopReason::invalid_pc;";
             }
             break;
         case 0x03:
@@ -493,7 +496,8 @@ std::string emit_instruction(std::uint32_t pc, std::uint32_t instruction,
                 out << reg(rd) << " = " << reg(rt) << " >> (" << reg(rs)
                     << " & 31U);";
             } else {
-                throw std::runtime_error(unsupported(pc, instruction));
+                return "/* unsupported/reserved PSP word */ "
+                       "state.stop_reason = StopReason::invalid_pc;";
             }
             break;
         case 0x07:
@@ -537,6 +541,9 @@ std::string emit_instruction(std::uint32_t pc, std::uint32_t instruction,
             break;
         case 0x13:
             out << "state.lo = " << reg(rs) << ";";
+            break;
+        case 0x16:
+            out << reg(rd) << " = std::countl_zero(" << reg(rs) << ");";
             break;
         case 0x18:
             out << "{ const auto product = static_cast<std::int64_t>(as_s32("
@@ -612,7 +619,8 @@ std::string emit_instruction(std::uint32_t pc, std::uint32_t instruction,
                 << reg(rt) << ") ? " << reg(rs) << " : " << reg(rt) << ";";
             break;
         default:
-            throw std::runtime_error(unsupported(pc, instruction));
+            return "/* unsupported/reserved PSP word */ "
+                   "state.stop_reason = StopReason::invalid_pc;";
         }
         return out.str();
     }
@@ -625,7 +633,9 @@ std::string emit_instruction(std::uint32_t pc, std::uint32_t instruction,
             rt == 0x02 || rt == 0x03 || rt == 0x12 || rt == 0x13;
         if (rt != 0x00 && rt != 0x01 && rt != 0x02 && rt != 0x03 &&
             rt != 0x10 && rt != 0x11 && rt != 0x12 && rt != 0x13) {
-            throw std::runtime_error(unsupported(pc, instruction));
+            out << "/* reserved REGIMM word in executable data */ "
+                   "state.stop_reason = StopReason::invalid_pc;";
+            break;
         }
         if (link) {
             out << "state.gpr[31] = state.memory_base + " << hex(pc + 8U)
@@ -647,7 +657,7 @@ std::string emit_instruction(std::uint32_t pc, std::uint32_t instruction,
                 << "; ";
         }
         out << "state.branch_pending = true; state.branch_target = "
-            << jump_target(pc, instruction, relocated) << ";";
+            << jump_target(pc, instruction, relocated, preferred_base) << ";";
         break;
     }
     case 0x04:
@@ -834,7 +844,8 @@ std::string emit_instruction(std::uint32_t pc, std::uint32_t instruction,
                         << "), f32(state, " << ft << "), " << (function & 15U)
                         << "U);";
                 } else {
-                    throw std::runtime_error(unsupported(pc, instruction));
+                    return "/* unsupported/reserved PSP word */ "
+                           "state.stop_reason = StopReason::invalid_pc;";
                 }
                 break;
             }
@@ -842,7 +853,8 @@ std::string emit_instruction(std::uint32_t pc, std::uint32_t instruction,
             out << "set_f32(state, " << fd << ", static_cast<float>(as_s32("
                 << "state.fpr[" << fs << "])));";
         } else {
-            throw std::runtime_error(unsupported(pc, instruction));
+            return "/* unsupported/reserved PSP word */ "
+                   "state.stop_reason = StopReason::invalid_pc;";
         }
         break;
     }
@@ -858,6 +870,10 @@ std::string emit_instruction(std::uint32_t pc, std::uint32_t instruction,
                "static_cast<std::int16_t>(PSPRECOMP_LOAD16(state, "
             << reg(rs) << signed_imm(instruction, relocated) << "))));";
         break;
+    case 0x22:
+        out << reg(rt) << " = load_word_left(state, " << reg(rs)
+            << signed_imm(instruction, relocated) << ", " << reg(rt) << ");";
+        break;
     case 0x23:
         out << reg(rt) << " = PSPRECOMP_LOAD32(state, " << reg(rs)
             << signed_imm(instruction, relocated) << ");";
@@ -869,6 +885,10 @@ std::string emit_instruction(std::uint32_t pc, std::uint32_t instruction,
     case 0x25:
         out << reg(rt) << " = PSPRECOMP_LOAD16(state, " << reg(rs)
             << signed_imm(instruction, relocated) << ");";
+        break;
+    case 0x26:
+        out << reg(rt) << " = load_word_right(state, " << reg(rs)
+            << signed_imm(instruction, relocated) << ", " << reg(rt) << ");";
         break;
     case 0x28:
         out << "PSPRECOMP_STORE8(state, " << reg(rs)
@@ -905,8 +925,34 @@ std::string emit_instruction(std::uint32_t pc, std::uint32_t instruction,
             << "]);";
         break;
     case 0x1f: {
+        if (function == 0x20 && shift == 0x10) {
+            out << reg(rd)
+                << " = static_cast<std::uint32_t>(static_cast<std::int32_t>("
+                   "static_cast<std::int8_t>("
+                << reg(rt) << ")));";
+            break;
+        }
+        if (function == 0x20 && shift == 0x18) {
+            out << reg(rd)
+                << " = static_cast<std::uint32_t>(static_cast<std::int32_t>("
+                   "static_cast<std::int16_t>("
+                << reg(rt) << ")));";
+            break;
+        }
         if (function != 0) {
-            throw std::runtime_error(unsupported(pc, instruction));
+            if (function == 4 && rd >= shift) {
+                const auto position = shift;
+                const auto width = rd - shift + 1U;
+                const auto mask = width == 32 ? 0xffffffffU
+                                              : (1U << width) - 1U;
+                const auto positioned_mask = mask << position;
+                out << reg(rt) << " = (" << reg(rt) << " & ~"
+                    << hex(positioned_mask) << ") | ((" << reg(rs) << " << "
+                    << position << "U) & " << hex(positioned_mask) << ");";
+                break;
+            }
+            return "/* unsupported/reserved PSP word */ "
+                   "state.stop_reason = StopReason::invalid_pc;";
         }
         const auto position = shift;
         const auto width = rd + 1U;
@@ -916,7 +962,8 @@ std::string emit_instruction(std::uint32_t pc, std::uint32_t instruction,
         break;
     }
     default:
-        throw std::runtime_error(unsupported(pc, instruction));
+        return "/* unsupported/reserved PSP word */ "
+               "state.stop_reason = StopReason::invalid_pc;";
     }
     return out.str();
 }
@@ -954,8 +1001,13 @@ void emit_cpp(const ElfImage& image, const std::filesystem::path& output,
            "namespace psprecomp::generated {\n\n"
            "void run(State& state, std::uint32_t return_address, "
            "std::uint64_t max_steps) {\n"
-           "    state.stop_reason = StopReason::running;\n"
-           "    for (std::uint64_t step = 0; step < max_steps; ++step) {\n"
+           "    state.stop_reason = StopReason::running;\n";
+    if (image.preferred_base != 0U) {
+        stream << "    if (state.memory_base == 0U) state.memory_base = "
+               << hex(image.preferred_base) << ";\n";
+    }
+    stream
+        << "    for (std::uint64_t step = 0; step < max_steps; ++step) {\n"
            "        if (state.pc == return_address && !state.branch_pending) "
            "{\n"
            "            state.stop_reason = StopReason::returned;\n"
@@ -1021,10 +1073,7 @@ void emit_project(const ElfImage& image, const std::filesystem::path& directory,
     platform_imports.reserve(image.imports.size());
     for (std::size_t index = 0; index < image.imports.size(); ++index) {
         const auto& import = image.imports[index];
-        const auto* mapped = code_map != nullptr
-                                 ? code_map->symbol_at(import.stub_address)
-                                 : nullptr;
-        const auto symbol = mapped != nullptr ? *mapped : std::string{};
+        const auto symbol = import_symbol(import, code_map);
         std::ostringstream id;
         id << "import_" << std::setfill('0') << std::setw(4) << index << "_"
            << identifier(symbol.empty() ? import.library : symbol);
@@ -1084,8 +1133,10 @@ void emit_project(const ElfImage& image, const std::filesystem::path& directory,
             const auto instruction = word_at(section, offset);
             shards[pc / shard_size].push_back(
                 {pc, instruction,
-                 emit_instruction(pc, instruction, relocated.contains(pc)),
-                 direct_control_target(pc, instruction, jump_bases)});
+                 emit_instruction(pc, instruction, relocated.contains(pc),
+                                  image.preferred_base),
+                 direct_control_target(pc, instruction, jump_bases,
+                                       image.preferred_base)});
             if (starts_delayed_branch(instruction)) {
                 delay_slots.insert(pc + 4U);
             }
@@ -1509,25 +1560,50 @@ void emit_project(const ElfImage& image, const std::filesystem::path& directory,
                   "#include <malloc.h>\n\n"
                   "using PspImportFunction = void (*)();\n"
                   "using PspThreadEntry = int (*)(std::uint32_t, void*);\n"
-                  "extern \"C\" void psprecomp_call_import("
+                  "extern \"C\" void psprecomp_call_import_raw("
                   "psprecomp::State*, PspImportFunction);\n"
+                  "extern \"C\" void psprecomp_call_import("
+                  "psprecomp::State* state, PspImportFunction function) {\n"
+                  "  constexpr std::uint32_t registers[] = {4U, 5U, 6U, 7U, "
+                  "8U, 9U, 10U, 11U, 29U};\n"
+                  "  std::uint32_t saved[sizeof(registers) / "
+                  "sizeof(registers[0])]{};\n"
+                  "  for (std::size_t index = 0; index < sizeof(registers) / "
+                  "sizeof(registers[0]); ++index) {\n"
+                  "    const auto reg = registers[index];\n"
+                  "    saved[index] = state->gpr[reg];\n"
+                  "    if (auto* pointer = psprecomp::mapped_address(*state, "
+                  "state->gpr[reg], 1U)) state->gpr[reg] = "
+                  "static_cast<std::uint32_t>(reinterpret_cast<std::uintptr_t>"
+                  "(pointer));\n"
+                  "  }\n"
+                  "  psprecomp_call_import_raw(state, function);\n"
+                  "  for (std::size_t index = 0; index < sizeof(registers) / "
+                  "sizeof(registers[0]); ++index) state->gpr[registers[index]]"
+                  " = saved[index];\n"
+                  "}\n"
                   "extern \"C\" int sceKernelCreateThread(const char*, "
                   "PspThreadEntry, int, int, std::uint32_t, void*);\n";
         std::set<std::string> declared;
+        std::uint64_t guest_load_size = 0;
+        for (const auto& segment : image.load_segments) {
+            guest_load_size += segment.memory_size;
+        }
+        const auto guest_free_memory_cap = static_cast<std::uint32_t>(
+            guest_load_size < 0x01800000ULL
+                ? 0x01800000ULL - guest_load_size
+                : 0x00100000ULL);
         for (const auto& import : image.imports) {
-            const auto* symbol = code_map != nullptr
-                                     ? code_map->symbol_at(import.stub_address)
-                                     : nullptr;
-            if (symbol == nullptr || symbol->empty() ||
-                *symbol == "sceKernelCreateThread" ||
-                *symbol == "sceKernelPrintf" ||
-                *symbol == "sceKernelGetModuleId" ||
-                *symbol == "sceKernelSetCompilerVersion" ||
-                *symbol == "sceMpegAvcDecodeFlush" ||
-                !declared.insert(*symbol).second) {
+            const auto symbol = import_symbol(import, code_map);
+            if (symbol.empty() || symbol == "sceKernelCreateThread" ||
+                symbol == "sceKernelPrintf" ||
+                symbol == "sceKernelGetModuleId" ||
+                symbol == "sceKernelSetCompilerVersion" ||
+                symbol == "sceMpegAvcDecodeFlush" ||
+                !declared.insert(symbol).second) {
                 continue;
             }
-            stream << "extern \"C\" void " << *symbol << "();\n";
+            stream << "extern \"C\" void " << symbol << "();\n";
         }
         stream << "extern \"C\" int sceKernelPrintf(const char*, ...);\n"
                   "extern \"C\" std::uint32_t sceKernelGetModuleId() "
@@ -1617,15 +1693,16 @@ void emit_project(const ElfImage& image, const std::filesystem::path& directory,
                   "  thread_slots[slot] = {state.gpr[5], stack_size, "
                   "guest_stack, true};\n"
                   "  const auto attr = state.gpr[8];\n"
-                  "  auto* option = reinterpret_cast<void*>("
-                  "static_cast<std::uintptr_t>(state.gpr[9]));\n"
+                  "  auto* option = state.gpr[9] == 0U ? nullptr : "
+                  "psprecomp::mapped_address(state, state.gpr[9], 1U);\n"
+                  "  auto* name = reinterpret_cast<const char*>("
+                  "psprecomp::mapped_address(state, state.gpr[4], 1U));\n"
                   "  sceKernelPrintf(\"[psprecomp] create guest slot=%u "
                   "entry=%08x\\n\", static_cast<unsigned int>(slot), "
                   "static_cast<unsigned int>(state.gpr[5] - "
                   "state.memory_base));\n"
                   "  state.gpr[2] = static_cast<std::uint32_t>("
-                  "sceKernelCreateThread(reinterpret_cast<const char*>("
-                  "static_cast<std::uintptr_t>(state.gpr[4])), "
+                  "sceKernelCreateThread(name, "
                   "thread_entries[slot], static_cast<int>(state.gpr[6]), "
                   "static_cast<int>(std::max<std::uint32_t>(state.gpr[7], "
                   "0x10000U)), attr, option));\n"
@@ -1642,15 +1719,13 @@ void emit_project(const ElfImage& image, const std::filesystem::path& directory,
                   "}\n\n"
                   "bool patch_imports(State& state) {\n";
         for (const auto& import : image.imports) {
-            const auto* symbol = code_map != nullptr
-                                     ? code_map->symbol_at(import.stub_address)
-                                     : nullptr;
-            if (symbol == nullptr || symbol->empty()) {
+            const auto symbol = import_symbol(import, code_map);
+            if (symbol.empty()) {
                 continue;
             }
             stream << "  { const auto target = static_cast<std::uint32_t>("
                       "reinterpret_cast<std::uintptr_t>(&"
-                   << *symbol << ")); const auto stub = state.memory_base + "
+                   << symbol << ")); const auto stub = state.memory_base + "
                    << hex(import.stub_address)
                    << "; if (((stub + 4U) & 0xf0000000U) != "
                       "(target & 0xf0000000U)) return false; "
@@ -1663,19 +1738,22 @@ void emit_project(const ElfImage& image, const std::filesystem::path& directory,
                   "current_pc) {\n"
                   "  switch (current_pc - state.memory_base) {\n";
         for (const auto& import : image.imports) {
-            const auto* symbol = code_map != nullptr
-                                     ? code_map->symbol_at(import.stub_address)
-                                     : nullptr;
-            if (symbol == nullptr || symbol->empty()) {
+            const auto symbol = import_symbol(import, code_map);
+            if (symbol.empty()) {
                 continue;
             }
             stream << "  case " << hex(import.stub_address) << ": ";
-            if (*symbol == "sceKernelCreateThread") {
+            if (symbol == "sceKernelCreateThread") {
                 stream << "create_guest_thread(state); ";
+            } else if (symbol == "sceKernelMaxFreeMemSize") {
+                stream << "state.gpr[2] = std::min<std::uint32_t>("
+                          "reinterpret_cast<std::uint32_t (*)()>(&"
+                       << symbol << ")(), " << hex(guest_free_memory_cap)
+                       << "); ";
             } else {
                 stream << "psprecomp_call_import(&state, "
                           "reinterpret_cast<PspImportFunction>(&"
-                       << *symbol << ")); ";
+                       << symbol << ")); ";
             }
             stream << "state.pc = state.gpr[31]; return true;\n";
         }
@@ -1694,9 +1772,9 @@ void emit_project(const ElfImage& image, const std::filesystem::path& directory,
         }
         stream << ".set noreorder\n"
                   ".text\n"
-                  ".globl psprecomp_call_import\n"
-                  ".ent psprecomp_call_import\n"
-                  "psprecomp_call_import:\n"
+                  ".globl psprecomp_call_import_raw\n"
+                  ".ent psprecomp_call_import_raw\n"
+                  "psprecomp_call_import_raw:\n"
                   "  addiu $sp, $sp, -32\n"
                   "  sw $ra, 28($sp)\n"
                   "  sw $s0, 24($sp)\n"
@@ -1730,7 +1808,7 @@ void emit_project(const ElfImage& image, const std::filesystem::path& directory,
                   "  addiu $sp, $sp, 32\n"
                   "  jr $ra\n"
                   "  nop\n"
-                  ".end psprecomp_call_import\n";
+                  ".end psprecomp_call_import_raw\n";
     }
 
     source_names.push_back("dispatch.cpp");
@@ -1744,6 +1822,7 @@ void emit_project(const ElfImage& image, const std::filesystem::path& directory,
             << "// Generated by psprecomp. Do not edit.\n"
                "#include \"generated.hpp\"\n"
                "#include <platform/platform.h>\n"
+               "#include <psprecomp/interpreter.hpp>\n"
                "\n"
                "namespace psprecomp::generated {\n"
                "#ifdef PSPRECOMP_PROFILE_DISPATCH\n"
@@ -1865,7 +1944,8 @@ void emit_project(const ElfImage& image, const std::filesystem::path& directory,
                "#ifdef PSPRECOMP_PROFILE_DISPATCH\n"
                "    profile_dispatch(current_pc, state.memory_base);\n"
                "#endif\n"
-               "    if (!dispatch_block(state, current_pc)) {\n"
+               "    if (!dispatch_block(state, current_pc) &&\n"
+               "        !interpret_allegrex(state, current_pc)) {\n"
                "      state.stop_reason = StopReason::invalid_pc;\n"
                "      state.fault_address = current_pc; return;\n"
                "    }\n"
@@ -1908,7 +1988,7 @@ void emit_project(const ElfImage& image, const std::filesystem::path& directory,
                << "\", 0, 1, 0);\n"
                   "PSP_MAIN_THREAD_ATTR(THREAD_ATTR_USER | THREAD_ATTR_VFPU);\n"
                   "PSP_MAIN_THREAD_STACK_SIZE_KB(256);\n"
-                  "PSP_HEAP_SIZE_KB(768);\n\n"
+                  "PSP_HEAP_SIZE_KB(1024);\n\n"
                   "extern \"C\" unsigned char guest_image_start[];\n"
                   "extern \"C\" unsigned char guest_relocations_start[];\n\n"
                   "namespace {\n"
@@ -1940,8 +2020,12 @@ void emit_project(const ElfImage& image, const std::filesystem::path& directory,
                "  auto* memory = guest_image_start;\n"
                "  const auto* embedded_relocations = "
                "guest_relocations_start;\n"
-               "  const auto base = static_cast<std::uint32_t>("
+               "  const auto embedded_base = static_cast<std::uint32_t>("
                "reinterpret_cast<std::uintptr_t>(memory));\n"
+               "  const auto base = "
+            << (image.preferred_base == 0U ? "embedded_base"
+                                           : hex(image.preferred_base))
+            << ";\n"
                "  const auto relocation_result = "
                "psprecomp::apply_psp_relocations(memory, embedded_image_size, "
                "base, segments, sizeof(segments) / sizeof(segments[0]), "
@@ -1989,6 +2073,11 @@ void emit_project(const ElfImage& image, const std::filesystem::path& directory,
         if (!stream) {
             throw std::runtime_error("cannot create generated macOS platform");
         }
+        auto image_start = image.memory_size();
+        for (const auto& segment : image.load_segments) {
+            image_start = std::min(image_start,
+                                   static_cast<std::uint32_t>(segment.address));
+        }
         stream
             << "// Generated by psprecomp. Extend these host implementations "
                "as the port grows.\n"
@@ -2008,6 +2097,9 @@ void emit_project(const ElfImage& image, const std::filesystem::path& directory,
                "  psprism::Configuration configuration;\n"
                "  configuration.image_size = generated::guest_memory_size + "
                "0x1000U;\n"
+               "  configuration.image_start = "
+            << image_start
+            << "U;\n"
                "  configuration.guest_executor = [](State& state) {\n"
                "    generated::run(state, 0xfffffff0U, "
                "0x7fffffffffffffffULL);\n"
@@ -2065,7 +2157,10 @@ void emit_project(const ElfImage& image, const std::filesystem::path& directory,
         }
         stream
             << "};\n"
-               "constexpr std::uint32_t guest_base = 0x08800000U;\n"
+               "constexpr std::uint32_t guest_base = "
+            << hex(image.preferred_base == 0 ? 0x08800000U
+                                             : image.preferred_base)
+            << ";\n"
                "constexpr std::uint32_t return_address = 0xfffffff0U;\n"
                "std::vector<std::uint8_t> read_file("
                "const std::filesystem::path& path) {\n"
@@ -2083,11 +2178,8 @@ void emit_project(const ElfImage& image, const std::filesystem::path& directory,
                "}\n"
                "} // namespace\n\n"
                "int main(int argc, char** argv) {\n"
-               "  bool verbose = false;\n"
-               "  for (int index = 1; index < argc; ++index)\n"
-               "    verbose = verbose || std::strcmp(argv[index], "
-               "\"--verbose\") == 0;\n"
-               "  psprism::Runtime::instance().set_verbose(verbose);\n"
+               "  (void)argc;\n"
+               "  psprism::Runtime::instance().set_verbose(true);\n"
                "  const auto executable = std::filesystem::absolute(argv[0]);\n"
                "  const auto resources = "
                "executable.parent_path().parent_path() "
@@ -2103,7 +2195,11 @@ void emit_project(const ElfImage& image, const std::filesystem::path& directory,
                "resources\\n\"); return 1;\n"
                "  }\n"
                "  const auto image_size = memory.size();\n"
-               "  memory.resize(24U * 1024U * 1024U);\n"
+               "  constexpr std::uint32_t guest_ram_end = 0x0a000000U;\n"
+               "  if (guest_base >= guest_ram_end || image_size > "
+               "guest_ram_end - guest_base) return 3;\n"
+               "  memory.resize(static_cast<std::size_t>(guest_ram_end - "
+               "guest_base));\n"
                "  const auto relocation_result = "
                "psprecomp::apply_psp_relocations(\n"
                "      memory.data(), image_size, guest_base, segments, "
@@ -2134,11 +2230,11 @@ void emit_project(const ElfImage& image, const std::filesystem::path& directory,
                "  psprecomp::platform::configure_runtime(memory.data(), "
                "memory.size(), guest_base);\n"
                "  if (!psprecomp::platform::patch_imports(state)) return 3;\n"
-               "  if (verbose) std::fprintf(stderr, "
+               "  std::fprintf(stderr, "
                "\"[psprecomp:macos] entering module_start\\n\");\n"
                "  psprecomp::generated::run(state, return_address, "
                "0x7fffffffffffffffULL);\n"
-               "  if (verbose) std::fprintf(stderr, "
+               "  std::fprintf(stderr, "
                "\"[psprecomp:macos] stopped: "
                "reason=%u pc=%08x\\n\", static_cast<unsigned>("
                "state.stop_reason), static_cast<unsigned>(state.pc));\n"
@@ -2177,12 +2273,7 @@ void emit_project(const ElfImage& image, const std::filesystem::path& directory,
             stream << "0x" << std::hex << std::setfill('0') << std::setw(8)
                    << import.stub_address << "\t0x" << std::setw(8)
                    << import.nid << "\t" << import.library << "\t";
-            if (code_map != nullptr) {
-                if (const auto* symbol =
-                        code_map->symbol_at(import.stub_address)) {
-                    stream << *symbol;
-                }
-            }
+            stream << import_symbol(import, code_map);
             stream << "\n";
         }
     }
@@ -2241,7 +2332,8 @@ void emit_project(const ElfImage& image, const std::filesystem::path& directory,
                   "-I$(PSPRECOMP_PROJECT_ROOT) -I.\n"
                   "CXXFLAGS = $(CFLAGS) -std=c++20 -fno-exceptions -fno-rtti\n"
                   "ASFLAGS = $(CFLAGS)\n"
-                  "LIBS = -lpsputility -lpspmpeg -lpspmpegbase -lpspatrac3 "
+                  "LIBS = -lpsputility -lpspmp3 -lpspdmac -lpspmpeg "
+                  "-lpspmpegbase -lpspatrac3 "
                   "-lpspsascore -lpspaudio -lpspctrl -lpspdisplay -lpspge "
                   "-lpsppower -lpspusb -lpspumd -lpspwlan "
                   "-lpspnet_adhocctl -lpspnet_adhoc -lpspnet\n\n"

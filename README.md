@@ -45,7 +45,7 @@ inspect traces, add missing imports and make game-specific psprism fixes.
 - Native function calls for known static edges, with dispatcher fallback
 - PSP PRX, `EBOOT.PBP`, rebuilt ISO and PPSSPP run-tree output
 - Native optimized macOS applications using Metal and psprism
-- Controller and keyboard input on macOS
+- Controller and keyboard input through the native host backend
 - Self-contained exports with their own runtime, build files and documentation
 
 ## Compatibility at a glance
@@ -101,10 +101,10 @@ the generated CPU code.
 | Kernel threads | 🟡 | Thread creation, startup, waiting, termination and Guest stacks |
 | Synchronization | 🟡 | Semaphores, event flags and fixed pools |
 | Memory | 🟡 | Partition blocks, fixed pools, scratchpad and emulated VRAM |
-| Controllers | ✅ | GameController devices plus keyboard fallback |
+| Controllers | ✅ | Native game controllers plus keyboard fallback |
 | File and directory I/O | 🟡 | Disc, memory-stick paths, sync and common async operations |
-| Savedata | 🟡 | Core state flow and basic file handling, no complete PSP UI emulation |
-| Message dialogs | 🟡 | Basic lifecycle stubs |
+| Savedata | 🟡 | Auto/list save, load, delete and metadata with a native host overlay |
+| Utility dialogs | 🟡 | Message dialogs and Unicode OSK with controller/keyboard input |
 | UMD state | 🟡 | Common checks and drive-state behavior |
 | Audio | ❌ | Major audio APIs are still unimplemented |
 | MPEG and video decode | ❌ | Game MPEG playback is not implemented by psprism |
@@ -140,6 +140,7 @@ without turning the shared runtime into a pile of title-specific conditions.
 - macOS
 - Xcode Command Line Tools or Xcode
 - CMake and Apple Clang
+- Qt 6 base for desktop system dialogs (`brew install qtbase`)
 - A Metal-capable Mac
 
 Ghidra is optional, but strongly recommended for real games. A code map gives
@@ -263,18 +264,8 @@ Use a Debug build when working on psprism itself:
 make macos-debug
 ```
 
-Runtime logs are quiet by default. Enable import, thread, GE and Guest traces
-with:
-
-```sh
-make macos-run MACOS_RUN_ARGS=--verbose
-```
-
-You can pass the flag to the app directly as well:
-
-```sh
-./build/macos/my_game.app/Contents/MacOS/my_game --verbose
-```
+Runtime logs are enabled by default for native runs, including import, thread, GE
+and guest traces.
 
 ## What gets generated
 
@@ -381,9 +372,9 @@ export PATH="$PSPDEV/bin:$PATH"
 
 ### A native game starts but an API is missing
 
-Run the native target with `--verbose`, find the one-time `unimplemented`
-message, then add the behavior to the exported project's `psprism/` copy. The
-PSP target can help establish what the original firmware call should do.
+Run the native target, find the one-time `unimplemented` message, then add the
+behavior to the exported project's `psprism/` copy. The PSP target can help
+establish what the original firmware call should do.
 
 ### A game is black or visually corrupted
 

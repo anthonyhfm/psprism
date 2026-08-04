@@ -1,16 +1,19 @@
 #include <psprism/psprism.hpp>
 
 #include "host/host.hpp"
+#include "utility_data.hpp"
 
 #include <algorithm>
 #include <array>
 #include <atomic>
 #include <bit>
 #include <cerrno>
+#include <chrono>
 #include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <fcntl.h>
 #include <filesystem>
 #include <fstream>
@@ -30,6 +33,8 @@ constexpr std::uint32_t unimplemented = 0x8002013aU;
 constexpr std::uint32_t io_error = 0x80010005U;
 constexpr std::uint32_t wait_timeout = 0x800201a8U;
 constexpr std::uint32_t out_of_memory = 0x80020190U;
+constexpr std::uint32_t utility_busy = 0x80110001U;
+constexpr std::uint32_t utility_cancelled = 0x80110302U;
 constexpr std::uint32_t return_address = 0xfffffff0U;
 
 thread_local int current_thread_id = 1;
@@ -331,6 +336,146 @@ DecodedTexture decode_texture(
   return result;
 }
 
+struct UtilityText {
+  const char* load;
+  const char* save;
+  const char* remove;
+  const char* message;
+  const char* keyboard;
+  const char* accept;
+  const char* back;
+  const char* yes;
+  const char* no;
+  const char* empty;
+};
+
+UtilityText utility_text(std::uint32_t language) {
+  static constexpr UtilityText translations[] = {
+      {"セーブデータをロード", "セーブデータを保存", "セーブデータを削除",
+       "メッセージ", "文字入力", "決定", "戻る", "はい", "いいえ", "空きスロット"},
+      {"Load saved data", "Save data", "Delete saved data", "Message",
+       "Text input", "OK", "Back", "Yes", "No", "Empty slot"},
+      {"Charger les données", "Sauvegarder", "Supprimer la sauvegarde",
+       "Message", "Saisie de texte", "OK", "Retour", "Oui", "Non", "Emplacement vide"},
+      {"Cargar datos", "Guardar datos", "Eliminar datos", "Mensaje",
+       "Entrada de texto", "Aceptar", "Atrás", "Sí", "No", "Ranura vacía"},
+      {"Spielstand laden", "Spielstand speichern", "Spielstand löschen",
+       "Meldung", "Texteingabe", "OK", "Zurück", "Ja", "Nein", "Leerer Speicherplatz"},
+      {"Carica dati", "Salva dati", "Elimina dati", "Messaggio",
+       "Inserimento testo", "OK", "Indietro", "Sì", "No", "Slot vuoto"},
+      {"Gegevens laden", "Gegevens opslaan", "Gegevens verwijderen",
+       "Bericht", "Tekstinvoer", "OK", "Terug", "Ja", "Nee", "Leeg slot"},
+      {"Carregar dados", "Guardar dados", "Eliminar dados", "Mensagem",
+       "Introdução de texto", "OK", "Voltar", "Sim", "Não", "Espaço vazio"},
+      {"Загрузить данные", "Сохранить данные", "Удалить данные", "Сообщение",
+       "Ввод текста", "ОК", "Назад", "Да", "Нет", "Пустая ячейка"},
+      {"저장 데이터 불러오기", "데이터 저장", "저장 데이터 삭제", "메시지",
+       "문자 입력", "확인", "뒤로", "예", "아니요", "빈 슬롯"},
+      {"載入保存資料", "保存資料", "刪除保存資料", "訊息", "文字輸入",
+       "確定", "返回", "是", "否", "空白欄位"},
+      {"载入保存数据", "保存数据", "删除保存数据", "消息", "文字输入",
+       "确定", "返回", "是", "否", "空白栏位"},
+  };
+  return translations[language < std::size(translations) ? language : 1U];
+}
+
+std::string fixed_string(const std::uint8_t* value, std::size_t size) {
+  const auto* end = static_cast<const std::uint8_t*>(
+      std::memchr(value, 0, size));
+  return std::string(reinterpret_cast<const char*>(value),
+                     end == nullptr ? size
+                                    : static_cast<std::size_t>(end - value));
+}
+
+std::u16string guest_utf16(psprecomp::State& state, std::uint32_t address,
+                           std::size_t maximum = 4096U) {
+  std::u16string result;
+  if (address == 0) return result;
+  for (std::size_t index = 0; index < maximum; ++index) {
+    const auto* value = psprecomp::mapped_address(
+        state, address + static_cast<std::uint32_t>(index * 2U), 2U);
+    if (value == nullptr) return {};
+    std::uint16_t character{};
+    std::memcpy(&character, value, sizeof(character));
+    if (character == 0) break;
+    result.push_back(static_cast<char16_t>(character));
+  }
+  return result;
+}
+
+std::string utf16_to_utf8(std::u16string_view value) {
+  std::string result;
+  for (std::size_t index = 0; index < value.size(); ++index) {
+    std::uint32_t character = value[index];
+    if (character >= 0xd800U && character <= 0xdbffU &&
+        index + 1U < value.size()) {
+      const auto low = static_cast<std::uint32_t>(value[index + 1U]);
+      if (low >= 0xdc00U && low <= 0xdfffU) {
+        character = 0x10000U + ((character - 0xd800U) << 10U) +
+                    (low - 0xdc00U);
+        ++index;
+      }
+    }
+    if (character <= 0x7fU) {
+      result.push_back(static_cast<char>(character));
+    } else if (character <= 0x7ffU) {
+      result.push_back(static_cast<char>(0xc0U | (character >> 6U)));
+      result.push_back(static_cast<char>(0x80U | (character & 0x3fU)));
+    } else if (character <= 0xffffU) {
+      result.push_back(static_cast<char>(0xe0U | (character >> 12U)));
+      result.push_back(static_cast<char>(0x80U | ((character >> 6U) & 0x3fU)));
+      result.push_back(static_cast<char>(0x80U | (character & 0x3fU)));
+    } else {
+      result.push_back(static_cast<char>(0xf0U | (character >> 18U)));
+      result.push_back(static_cast<char>(0x80U | ((character >> 12U) & 0x3fU)));
+      result.push_back(static_cast<char>(0x80U | ((character >> 6U) & 0x3fU)));
+      result.push_back(static_cast<char>(0x80U | (character & 0x3fU)));
+    }
+  }
+  return result;
+}
+
+std::vector<std::uint8_t> read_binary_file(const std::filesystem::path& path,
+                                           std::size_t maximum = 16U << 20U) {
+  std::error_code error;
+  const auto size = std::filesystem::file_size(path, error);
+  if (error || size > maximum) return {};
+  std::vector<std::uint8_t> result(static_cast<std::size_t>(size));
+  std::ifstream input(path, std::ios::binary);
+  if (!result.empty())
+    input.read(reinterpret_cast<char*>(result.data()), result.size());
+  return input ? result : std::vector<std::uint8_t>{};
+}
+
+std::string file_timestamp(const std::filesystem::path& path) {
+  std::error_code error;
+  const auto file_time = std::filesystem::last_write_time(path, error);
+  if (error) return {};
+  const auto system_time = std::chrono::time_point_cast<
+      std::chrono::system_clock::duration>(
+      file_time - decltype(file_time)::clock::now() +
+      std::chrono::system_clock::now());
+  const auto time = std::chrono::system_clock::to_time_t(system_time);
+  std::tm local{};
+  if (localtime_r(&time, &local) == nullptr) return {};
+  char formatted[32]{};
+  return std::strftime(formatted, sizeof(formatted), "%Y-%m-%d %H:%M", &local)
+             ? formatted
+             : std::string{};
+}
+
+std::string directory_size_label(const std::filesystem::path& path) {
+  std::error_code error;
+  std::uintmax_t bytes{};
+  for (std::filesystem::recursive_directory_iterator iterator(path, error), end;
+       iterator != end && !error; iterator.increment(error)) {
+    if (iterator->is_regular_file(error)) bytes += iterator->file_size(error);
+  }
+  if (error) return {};
+  const auto kibibytes = std::max<std::uintmax_t>(1U, (bytes + 1023U) / 1024U);
+  return std::to_string(kibibytes) + " KB";
+}
+
 } // namespace
 
 struct Runtime::Implementation {
@@ -372,9 +517,22 @@ struct Runtime::Implementation {
     std::vector<std::uint32_t> available;
   };
 
+  struct VariablePool {
+    std::mutex mutex;
+    std::condition_variable changed;
+    MemoryBlock backing;
+    std::vector<MemoryBlock> available;
+    std::unordered_map<std::uint32_t, std::uint32_t> allocated;
+  };
+
   struct Directory {
     std::vector<std::filesystem::directory_entry> entries;
     std::size_t next{};
+  };
+
+  struct Callback {
+    std::uint32_t entry{};
+    std::uint32_t common_argument{};
   };
 
   struct GraphicsState {
@@ -402,18 +560,24 @@ struct Runtime::Implementation {
   Configuration configuration;
   std::unordered_set<std::string> warned;
   std::unordered_map<int, int> files;
+  std::unordered_map<int, std::uint64_t> file_bases;
   std::unordered_map<int, std::int64_t> async_results;
   std::unordered_map<int, Directory> directories;
   std::filesystem::path current_directory;
+  std::filesystem::path disc_image;
+  std::unordered_map<std::string, std::uint32_t> disc_sectors;
   std::mutex objects_mutex;
   std::unordered_map<int, std::shared_ptr<GuestThread>> threads;
   std::unordered_map<int, std::shared_ptr<Semaphore>> semaphores;
   std::unordered_map<int, std::shared_ptr<EventFlag>> event_flags;
   std::unordered_map<int, MemoryBlock> memory_blocks;
   std::unordered_map<int, std::shared_ptr<FixedPool>> fixed_pools;
+  std::unordered_map<int, std::shared_ptr<VariablePool>> variable_pools;
+  std::unordered_map<int, Callback> callbacks;
   int next_file{3};
   int next_uid{0x100};
   std::uint32_t heap_cursor{};
+  std::vector<MemoryBlock> free_heap_blocks;
   std::uint32_t stack_cursor{};
   std::atomic<bool> exit_requested{};
   bool verbose{};
@@ -425,7 +589,17 @@ struct Runtime::Implementation {
   std::atomic<std::uint32_t> savedata_status{};
   std::uint32_t savedata_parameters{};
   bool savedata_operation_complete{};
+  std::uint64_t savedata_dialog_id{};
+  bool savedata_dialog_presented{};
+  std::vector<std::string> savedata_names;
   std::atomic<std::uint32_t> message_dialog_status{};
+  std::uint32_t message_dialog_parameters{};
+  std::uint64_t message_dialog_id{};
+  std::atomic<std::uint32_t> osk_status{};
+  std::uint32_t osk_parameters{};
+  std::uint64_t osk_dialog_id{};
+  std::atomic<std::uint32_t> active_utility{};
+  std::uint64_t next_dialog_id{1U};
 
   int allocate_uid() { return next_uid++; }
 
@@ -435,11 +609,46 @@ struct Runtime::Implementation {
 
   std::uint32_t allocate_heap(std::uint32_t size,
                               std::uint32_t alignment = 64) {
+    for (std::size_t index = 0; index < free_heap_blocks.size(); ++index) {
+      const auto block = free_heap_blocks[index];
+      const auto address = align_up(block.address, alignment);
+      if (address < block.address || address - block.address > block.size ||
+          size > block.size - (address - block.address))
+        continue;
+      free_heap_blocks.erase(free_heap_blocks.begin() + index);
+      if (address > block.address)
+        free_heap_blocks.push_back({block.address, address - block.address});
+      const auto end = address + size;
+      const auto block_end = block.address + block.size;
+      if (end < block_end)
+        free_heap_blocks.push_back({end, block_end - end});
+      return address;
+    }
     const auto address = align_up(heap_cursor, alignment);
     if (size > stack_cursor || address > stack_cursor - size)
       return 0;
     heap_cursor = address + size;
     return memory_base + address;
+  }
+
+  void free_heap(std::uint32_t address, std::uint32_t size) {
+    if (address == 0 || size == 0)
+      return;
+    free_heap_blocks.push_back({address, size});
+    std::sort(free_heap_blocks.begin(), free_heap_blocks.end(),
+              [](const MemoryBlock& left, const MemoryBlock& right) {
+                return left.address < right.address;
+              });
+    for (std::size_t index = 1; index < free_heap_blocks.size();) {
+      auto& previous = free_heap_blocks[index - 1U];
+      const auto& current = free_heap_blocks[index];
+      if (previous.address + previous.size == current.address) {
+        previous.size += current.size;
+        free_heap_blocks.erase(free_heap_blocks.begin() + index);
+      } else {
+        ++index;
+      }
+    }
   }
 
   std::uint32_t allocate_stack(std::uint32_t size) {
@@ -451,6 +660,9 @@ struct Runtime::Implementation {
   }
 
   std::filesystem::path resolve_path(std::string_view psp_path) const {
+    std::string normalized(psp_path);
+    std::replace(normalized.begin(), normalized.end(), '\\', '/');
+    psp_path = normalized;
     const auto suffix = [](std::string_view value, std::string_view prefix) {
       value.remove_prefix(prefix.size());
       while (!value.empty() && value.front() == '/')
@@ -513,6 +725,13 @@ void Runtime::configure(std::uint8_t* memory, std::size_t size,
   implementation_->heap_cursor =
       align_up(static_cast<std::uint32_t>(configuration.image_size), 64U);
   implementation_->stack_cursor = static_cast<std::uint32_t>(size);
+  constexpr std::uint32_t user_memory_start = 0x08800000U;
+  const auto image_start = base + configuration.image_start;
+  if (base <= user_memory_start && image_start > user_memory_start &&
+      image_start <= base + size) {
+    implementation_->free_heap_blocks.push_back(
+        {user_memory_start, image_start - user_memory_start});
+  }
   if (configuration.disc_root.empty()) {
     if (const auto* value = std::getenv("PSPRISM_DISC_ROOT")) {
       configuration.disc_root = value;
@@ -531,6 +750,29 @@ void Runtime::configure(std::uint8_t* memory, std::size_t size,
   std::filesystem::create_directories(configuration.writable_root);
   implementation_->configuration = std::move(configuration);
   implementation_->current_directory = implementation_->configuration.disc_root;
+  if (const auto* value = std::getenv("PSPRISM_DISC_IMAGE")) {
+    implementation_->disc_image = value;
+  } else {
+    implementation_->disc_image =
+        implementation_->configuration.disc_root.parent_path() / "original" /
+        "disc.iso";
+  }
+  {
+    std::ifstream sectors(implementation_->disc_image.parent_path() /
+                          "disc-sectors.tsv");
+    std::string line;
+    while (std::getline(sectors, line)) {
+      const auto separator = line.find('\t');
+      if (separator == std::string::npos)
+        continue;
+      try {
+        implementation_->disc_sectors.emplace(
+            line.substr(separator + 1U),
+            static_cast<std::uint32_t>(std::stoul(line.substr(0, separator))));
+      } catch (const std::exception&) {
+      }
+    }
+  }
   host::initialize_frontend();
   if (implementation_->verbose) {
     std::fprintf(stderr, "[psprism:macos] disc=%s writable=%s\n",
@@ -580,6 +822,33 @@ void Runtime::wait_for_guest_threads() {
 
 void Runtime::dispatch(psprecomp::State& state, std::string_view name) {
   state.gpr[2] = unimplemented;
+
+  const auto notify_callback = [&](int uid, std::uint32_t argument) {
+    Implementation::Callback callback;
+    std::uint32_t stack = 0;
+    {
+      std::lock_guard lock(implementation_->objects_mutex);
+      const auto found = implementation_->callbacks.find(uid);
+      if (found == implementation_->callbacks.end() ||
+          !implementation_->configuration.guest_executor)
+        return false;
+      callback = found->second;
+      stack = implementation_->allocate_stack(0x4000U);
+    }
+    if (stack == 0)
+      return false;
+    auto callback_state = state;
+    callback_state.pc = callback.entry;
+    std::fill_n(callback_state.gpr, 32U, 0U);
+    callback_state.gpr[4] = static_cast<std::uint32_t>(uid);
+    callback_state.gpr[5] = argument;
+    callback_state.gpr[6] = callback.common_argument;
+    callback_state.gpr[29] = stack + 0x4000U;
+    callback_state.gpr[31] = return_address;
+    callback_state.stop_reason = psprecomp::StopReason::running;
+    implementation_->configuration.guest_executor(callback_state);
+    return true;
+  };
 
   if (name == "sceKernelCreateThread") {
     const auto* thread_name = guest_string(state, state.gpr[4]);
@@ -875,10 +1144,13 @@ void Runtime::dispatch(psprecomp::State& state, std::string_view name) {
   }
   if (name == "sceKernelMaxFreeMemSize") {
     std::lock_guard lock(implementation_->objects_mutex);
-    state.gpr[2] =
+    auto largest =
         implementation_->stack_cursor > implementation_->heap_cursor
             ? implementation_->stack_cursor - implementation_->heap_cursor
             : 0U;
+    for (const auto& block : implementation_->free_heap_blocks)
+      largest = std::max(largest, block.size);
+    state.gpr[2] = largest;
     return;
   }
   if (name == "sceKernelCreateFpl") {
@@ -962,6 +1234,123 @@ void Runtime::dispatch(psprecomp::State& state, std::string_view name) {
         implementation_->fixed_pools.erase(static_cast<int>(state.gpr[4]))
             ? 0U
             : unimplemented;
+    return;
+  }
+
+  if (name == "sceKernelCreateVpl") {
+    const auto size = state.gpr[7];
+    if (size == 0) {
+      state.gpr[2] = out_of_memory;
+      return;
+    }
+    auto pool = std::make_shared<Implementation::VariablePool>();
+    std::lock_guard lock(implementation_->objects_mutex);
+    const auto address = implementation_->allocate_heap(size, 8U);
+    if (address == 0) {
+      state.gpr[2] = out_of_memory;
+      return;
+    }
+    pool->available.push_back({address, size});
+    pool->backing = {address, size};
+    const auto uid = implementation_->allocate_uid();
+    implementation_->variable_pools.emplace(uid, pool);
+    state.gpr[2] = static_cast<std::uint32_t>(uid);
+    if (implementation_->verbose)
+      std::fprintf(stderr,
+                   "[psprism:memory] vpl uid=%d size=%u address=%08x\n", uid,
+                   size, address);
+    return;
+  }
+  if (name == "sceKernelAllocateVpl" ||
+      name == "sceKernelAllocateVplCB" ||
+      name == "sceKernelTryAllocateVpl") {
+    std::shared_ptr<Implementation::VariablePool> pool;
+    {
+      std::lock_guard lock(implementation_->objects_mutex);
+      const auto found =
+          implementation_->variable_pools.find(static_cast<int>(state.gpr[4]));
+      if (found == implementation_->variable_pools.end())
+        return;
+      pool = found->second;
+    }
+    const auto requested = align_up(state.gpr[5], 8U);
+    std::unique_lock lock(pool->mutex);
+    const auto allocate = [&]() -> std::uint32_t {
+      for (auto i = pool->available.begin(); i != pool->available.end(); ++i) {
+        if (i->size < requested)
+          continue;
+        const auto address = i->address;
+        i->address += requested;
+        i->size -= requested;
+        if (i->size == 0)
+          pool->available.erase(i);
+        pool->allocated.emplace(address, requested);
+        return address;
+      }
+      return 0;
+    };
+    auto address = allocate();
+    while (address == 0 && name != "sceKernelTryAllocateVpl" &&
+           !implementation_->exit_requested) {
+      pool->changed.wait(lock);
+      address = allocate();
+    }
+    if (address == 0) {
+      state.gpr[2] = out_of_memory;
+      return;
+    }
+    if (auto* output = guest_pointer<std::uint32_t>(state, state.gpr[6]))
+      *output = address;
+    state.gpr[2] = 0;
+    return;
+  }
+  if (name == "sceKernelFreeVpl") {
+    std::shared_ptr<Implementation::VariablePool> pool;
+    {
+      std::lock_guard lock(implementation_->objects_mutex);
+      const auto found =
+          implementation_->variable_pools.find(static_cast<int>(state.gpr[4]));
+      if (found == implementation_->variable_pools.end())
+        return;
+      pool = found->second;
+    }
+    {
+      std::lock_guard lock(pool->mutex);
+      const auto allocation = pool->allocated.find(state.gpr[5]);
+      if (allocation == pool->allocated.end())
+        return;
+      pool->available.push_back({allocation->first, allocation->second});
+      pool->allocated.erase(allocation);
+      std::sort(pool->available.begin(), pool->available.end(),
+                [](const Implementation::MemoryBlock& left,
+                   const Implementation::MemoryBlock& right) {
+                  return left.address < right.address;
+                });
+      for (std::size_t i = 1; i < pool->available.size();) {
+        auto& previous = pool->available[i - 1U];
+        const auto& current = pool->available[i];
+        if (previous.address + previous.size == current.address) {
+          previous.size += current.size;
+          pool->available.erase(pool->available.begin() + i);
+        } else {
+          ++i;
+        }
+      }
+    }
+    pool->changed.notify_one();
+    state.gpr[2] = 0;
+    return;
+  }
+  if (name == "sceKernelDeleteVpl") {
+    std::lock_guard lock(implementation_->objects_mutex);
+    const auto found = implementation_->variable_pools.find(
+        static_cast<int>(state.gpr[4]));
+    if (found == implementation_->variable_pools.end())
+      return;
+    implementation_->free_heap(found->second->backing.address,
+                               found->second->backing.size);
+    implementation_->variable_pools.erase(found);
+    state.gpr[2] = 0U;
     return;
   }
 
@@ -1790,6 +2179,7 @@ void Runtime::dispatch(psprecomp::State& state, std::string_view name) {
         std::fputc('\n', stderr);
       }
       host::end_ge_frame();
+      host::present_ge_frame();
     }
     state.gpr[2] = next_list++;
     return;
@@ -1840,7 +2230,33 @@ void Runtime::dispatch(psprecomp::State& state, std::string_view name) {
   }
   if (name == "sceKernelCreateCallback") {
     std::lock_guard lock(implementation_->objects_mutex);
-    state.gpr[2] = static_cast<std::uint32_t>(implementation_->allocate_uid());
+    const auto uid = implementation_->allocate_uid();
+    implementation_->callbacks.emplace(
+        uid, Implementation::Callback{state.gpr[5], state.gpr[6]});
+    state.gpr[2] = static_cast<std::uint32_t>(uid);
+    return;
+  }
+  if (name == "sceKernelDeleteCallback") {
+    std::lock_guard lock(implementation_->objects_mutex);
+    state.gpr[2] =
+        implementation_->callbacks.erase(static_cast<int>(state.gpr[4]))
+            ? 0U
+            : unimplemented;
+    return;
+  }
+  if (name == "sceUmdRegisterUMDCallBack") {
+    notify_callback(static_cast<int>(state.gpr[4]), 0x32U);
+    state.gpr[2] = 0U;
+    return;
+  }
+  if (name == "sceIoDevctl") {
+    const auto* device = guest_string(state, state.gpr[4]);
+    if (device != nullptr && std::string_view(device) == "fatms0:" &&
+        state.gpr[5] == 0x02415821U) {
+      if (const auto* uid = guest_pointer<std::uint32_t>(state, state.gpr[6]))
+        notify_callback(static_cast<int>(*uid), 1U);
+      state.gpr[2] = 0U;
+    }
     return;
   }
   if (name == "sceKernelGetSystemTimeWide") {
@@ -1880,12 +2296,90 @@ void Runtime::dispatch(psprecomp::State& state, std::string_view name) {
     state.gpr[2] = seconds;
     return;
   }
+  if (name == "sceKernelGetSystemTimeLow") {
+    state.gpr[2] =
+        static_cast<std::uint32_t>(implementation_->elapsed_microseconds());
+    return;
+  }
+  if (name == "sceKernelVolatileMemTryLock" ||
+      name == "sceKernelVolatileMemLock") {
+    constexpr std::uint32_t volatile_address = 0x08400000U;
+    constexpr std::uint32_t volatile_size = 4U * 1024U * 1024U;
+    if (auto* output = guest_pointer<std::uint32_t>(state, state.gpr[5]))
+      *output = volatile_address;
+    if (auto* output = guest_pointer<std::uint32_t>(state, state.gpr[6]))
+      *output = volatile_size;
+    state.gpr[2] = 0U;
+    return;
+  }
+  if (name == "sceKernelVolatileMemUnlock" ||
+      name == "sceUtilityLoadModule" || name == "sceUtilityUnloadModule" ||
+      name == "sceKernelChangeCurrentThreadAttr" ||
+      name == "sceKernelCpuResumeIntr" || name == "sceKernelSetGPO" ||
+      name == "sceGeListUpdateStallAddr" ||
+      name == "scePowerRegisterCallback") {
+    state.gpr[2] = 0U;
+    return;
+  }
+  if (name == "sceKernelCpuSuspendIntr") {
+    state.gpr[2] = 1U;
+    return;
+  }
+  if (name == "sceKernelIsCpuIntrEnable") {
+    state.gpr[2] = 1U;
+    return;
+  }
+  if (name == "sceKernelStdout") {
+    state.gpr[2] = 1U;
+    return;
+  }
+  if (name == "sceKernelGetModuleIdByAddress") {
+    state.gpr[2] = 1U;
+    return;
+  }
+  if (name == "sceKernelGetGPI") {
+    state.gpr[2] = 0U;
+    return;
+  }
+  if (name == "scePowerGetCpuClockFrequencyInt") {
+    state.gpr[2] = 333U;
+    return;
+  }
+  if (name == "sceUtilityGetSystemParamInt") {
+    std::uint32_t value{};
+    switch (state.gpr[4]) {
+    case 2U: value = 0U; break;
+    case 3U: value = 1U; break;
+    case 4U: value = 2U; break;
+    case 5U: value = 0U; break;
+    case 6U: value = 0U; break;
+    case 7U: value = 0U; break;
+    case 8U: value = 1U; break;
+    case 9U: value = 1U; break;
+    case 10U: value = 0U; break;
+    default:
+      state.gpr[2] = 0x80110103U;
+      return;
+    }
+    if (auto* output = guest_pointer<std::uint32_t>(state, state.gpr[5])) {
+      *output = value;
+      state.gpr[2] = 0U;
+    }
+    return;
+  }
   if (name == "sceUtilitySavedataInitStart") {
     constexpr std::size_t minimum_parameter_size = 128U;
     auto* parameters =
         psprecomp::mapped_address(state, state.gpr[4], minimum_parameter_size);
-    if (parameters == nullptr)
+    if (parameters == nullptr) {
+      state.gpr[2] = 0x80110388U;
       return;
+    }
+    std::uint32_t expected{};
+    if (!implementation_->active_utility.compare_exchange_strong(expected, 1U)) {
+      state.gpr[2] = utility_busy;
+      return;
+    }
     std::uint32_t mode{};
     std::memcpy(&mode, parameters + 48U, sizeof(mode));
     char game_name[14]{};
@@ -1896,7 +2390,135 @@ void Runtime::dispatch(psprecomp::State& state, std::string_view name) {
     std::memcpy(file_name, parameters + 100U, 13U);
     implementation_->savedata_parameters = state.gpr[4];
     implementation_->savedata_operation_complete = false;
+    implementation_->savedata_dialog_presented = false;
+    implementation_->savedata_names.clear();
+    implementation_->savedata_dialog_id = implementation_->next_dialog_id++;
     implementation_->savedata_status = 1U;
+
+    std::uint32_t name_list_address{};
+    std::memcpy(&name_list_address, parameters + 96U,
+                sizeof(name_list_address));
+    if (name_list_address != 0U) {
+      for (std::size_t index = 0; index < 128U; ++index) {
+        const auto* entry = psprecomp::mapped_address(
+            state, name_list_address + static_cast<std::uint32_t>(index * 20U),
+            20U);
+        if (entry == nullptr) break;
+        const auto value = fixed_string(entry, 20U);
+        if (value.empty()) break;
+        implementation_->savedata_names.push_back(value);
+      }
+    }
+    if (implementation_->savedata_names.empty() && save_name[0] != '\0')
+      implementation_->savedata_names.emplace_back(save_name);
+
+    if (mode == 7U && implementation_->savedata_names.empty()) {
+      const auto root = implementation_->configuration.writable_root / "PSP" /
+                        "SAVEDATA";
+      std::error_code directory_error;
+      for (const auto& entry :
+           std::filesystem::directory_iterator(root, directory_error)) {
+        const auto value = entry.path().filename().string();
+        if (entry.is_directory() && value.starts_with(game_name))
+          implementation_->savedata_names.push_back(
+              value.substr(std::strlen(game_name)));
+      }
+    }
+
+    const bool interactive = mode >= 2U && mode <= 7U;
+    if (interactive) {
+      std::uint32_t language{};
+      std::uint32_t button_swap{};
+      std::memcpy(&language, parameters + 4U, sizeof(language));
+      std::memcpy(&button_swap, parameters + 8U, sizeof(button_swap));
+      const auto text = utility_text(language);
+      host::DialogModel dialog;
+      dialog.id = implementation_->savedata_dialog_id;
+      dialog.kind = mode == 2U || mode == 4U
+                        ? host::DialogKind::savedata_load
+                    : mode == 6U || mode == 7U
+                        ? host::DialogKind::savedata_delete
+                        : host::DialogKind::savedata_save;
+      dialog.title = dialog.kind == host::DialogKind::savedata_load
+                         ? text.load
+                     : dialog.kind == host::DialogKind::savedata_delete
+                         ? text.remove
+                         : text.save;
+      dialog.accept_label = dialog.kind == host::DialogKind::savedata_load
+                                ? text.load
+                            : dialog.kind == host::DialogKind::savedata_delete
+                                ? text.remove
+                                : text.save;
+      dialog.cancel_label = text.back;
+      dialog.confirm_with_cross = button_swap != 0U;
+      const auto save_root = implementation_->configuration.writable_root /
+                             "PSP" / "SAVEDATA";
+      for (const auto& entry_name : implementation_->savedata_names) {
+        host::DialogItem item;
+        const auto directory =
+            save_root / (std::string(game_name) + entry_name);
+        std::error_code item_error;
+        item.empty = !std::filesystem::is_directory(directory, item_error);
+        if (item.empty) {
+          item.title = text.empty;
+          item.detail = entry_name;
+        } else {
+          const auto sfo = read_binary_file(directory / "PARAM.SFO", 1U << 20U);
+          item.title = utility::sfo_string(sfo, "TITLE");
+          item.subtitle = utility::sfo_string(sfo, "SAVEDATA_TITLE");
+          if (item.title.empty()) item.title = item.subtitle;
+          if (item.title.empty()) item.title = entry_name;
+          item.detail = utility::sfo_string(sfo, "SAVEDATA_DETAIL");
+          item.timestamp = file_timestamp(directory);
+          item.size = directory_size_label(directory);
+          item.icon_png = read_binary_file(directory / "ICON0.PNG", 4U << 20U);
+          item.preview_png = read_binary_file(directory / "PIC1.PNG", 4U << 20U);
+        }
+        dialog.items.push_back(std::move(item));
+      }
+      if (dialog.items.empty() &&
+          dialog.kind == host::DialogKind::savedata_save) {
+        implementation_->savedata_names.emplace_back(save_name);
+        dialog.items.push_back(
+            {text.empty, {}, save_name, {}, {}, {}, {}, true});
+      }
+      std::uint32_t focus{};
+      if (auto* complete = psprecomp::mapped_address(
+              state, state.gpr[4], 1484U))
+        std::memcpy(&focus, complete + 1480U, sizeof(focus));
+      if (!dialog.items.empty()) {
+        if (focus == 2U || focus == 6U || focus == 8U)
+          dialog.selected_item = dialog.items.size() - 1U;
+        if (focus == 3U || focus == 4U) {
+          std::error_code newest_error;
+          std::filesystem::file_time_type chosen{};
+          for (std::size_t index = 0; index < dialog.items.size(); ++index) {
+            const auto directory = save_root /
+                (std::string(game_name) + implementation_->savedata_names[index]);
+            const auto time = std::filesystem::last_write_time(directory,
+                                                               newest_error);
+            if (!newest_error && (index == 0U ||
+                (focus == 3U ? time > chosen : time < chosen))) {
+              chosen = time;
+              dialog.selected_item = index;
+            }
+            newest_error.clear();
+          }
+        }
+        if (focus == 7U || focus == 8U) {
+          for (std::size_t index = 0; index < dialog.items.size(); ++index) {
+            const auto candidate = focus == 7U ? index
+                : dialog.items.size() - 1U - index;
+            if (dialog.items[candidate].empty) {
+              dialog.selected_item = candidate;
+              break;
+            }
+          }
+        }
+      }
+      host::present_dialog(std::move(dialog));
+      implementation_->savedata_dialog_presented = true;
+    }
     if (implementation_->verbose)
       std::fprintf(
           stderr,
@@ -1910,13 +2532,41 @@ void Runtime::dispatch(psprecomp::State& state, std::string_view name) {
     state.gpr[2] = status;
     if (status == 1U)
       implementation_->savedata_status = 2U;
-    else if (status == 4U)
+    else if (status == 4U) {
       implementation_->savedata_status = 0U;
+      implementation_->active_utility = 0U;
+    }
     return;
   }
   if (name == "sceUtilitySavedataUpdate") {
     if (implementation_->savedata_status == 2U &&
         !implementation_->savedata_operation_complete) {
+      if (implementation_->savedata_dialog_presented) {
+        const auto result = host::poll_dialog_result(
+            implementation_->savedata_dialog_id);
+        if (!result) {
+          state.gpr[2] = 0U;
+          return;
+        }
+        if (auto* parameters = psprecomp::mapped_address(
+                state, implementation_->savedata_parameters, 128U)) {
+          if (result->cancelled) {
+            std::memcpy(parameters + 28U, &utility_cancelled,
+                        sizeof(utility_cancelled));
+            implementation_->savedata_operation_complete = true;
+            implementation_->savedata_status = 3U;
+            state.gpr[2] = 0U;
+            return;
+          }
+          if (result->selected_item < implementation_->savedata_names.size()) {
+            std::memset(parameters + 76U, 0, 20U);
+            const auto& selected = implementation_->savedata_names[
+                result->selected_item];
+            std::memcpy(parameters + 76U, selected.data(),
+                        std::min<std::size_t>(selected.size(), 19U));
+          }
+        }
+      }
       implementation_->savedata_operation_complete = true;
       implementation_->savedata_status = 3U;
       if (auto* parameters = psprecomp::mapped_address(
@@ -1925,6 +2575,200 @@ void Runtime::dispatch(psprecomp::State& state, std::string_view name) {
         std::memcpy(parameters + 28U, &success, sizeof(success));
         std::uint32_t mode{};
         std::memcpy(&mode, parameters + 48U, sizeof(mode));
+        char game_name[14]{};
+        char save_name[21]{};
+        char file_name[14]{};
+        std::memcpy(game_name, parameters + 60U, 13U);
+        std::memcpy(save_name, parameters + 76U, 20U);
+        std::memcpy(file_name, parameters + 100U, 13U);
+        const auto safe_component = [](const char* value) {
+          return value[0] != '\0' && std::strcmp(value, ".") != 0 &&
+                 std::strcmp(value, "..") != 0 &&
+                 std::strchr(value, '/') == nullptr &&
+                 std::strchr(value, '\\') == nullptr;
+        };
+        const auto save_directory =
+            implementation_->configuration.writable_root / "PSP" / "SAVEDATA" /
+            (std::string(game_name) + save_name);
+        const auto save_file = save_directory / file_name;
+        const bool valid_directory = safe_component(game_name) &&
+                                     safe_component(save_name);
+        const bool valid_path = valid_directory && safe_component(file_name);
+        const bool load_mode = mode == 0U || mode == 2U || mode == 4U ||
+                               mode == 15U || mode == 16U;
+        const bool save_mode = mode == 1U || mode == 3U || mode == 5U ||
+                               mode == 13U || mode == 14U || mode == 17U ||
+                               mode == 18U;
+        const bool delete_mode = mode == 6U || mode == 7U || mode == 9U ||
+                                 mode == 10U || mode == 19U || mode == 20U ||
+                                 mode == 21U;
+        if (load_mode) {
+          std::uint32_t data_address{};
+          std::uint32_t buffer_size{};
+          std::memcpy(&data_address, parameters + 116U,
+                      sizeof(data_address));
+          std::memcpy(&buffer_size, parameters + 120U,
+                      sizeof(buffer_size));
+          std::error_code file_error;
+          const auto file_size = valid_path
+                                     ? std::filesystem::file_size(save_file,
+                                                                  file_error)
+                                     : 0U;
+          auto* destination = psprecomp::mapped_address(
+              state, data_address,
+              static_cast<std::size_t>(std::min<std::uintmax_t>(
+                  file_size, static_cast<std::uintmax_t>(buffer_size))));
+          if (!valid_path || file_error || destination == nullptr) {
+            const std::uint32_t no_data =
+                mode == 15U || mode == 16U ? 0x80110327U : 0x80110307U;
+            std::memcpy(parameters + 28U, &no_data, sizeof(no_data));
+          } else {
+            const auto read_size = static_cast<std::uint32_t>(
+                std::min<std::uintmax_t>(file_size, buffer_size));
+            std::ifstream input(save_file, std::ios::binary);
+            input.read(reinterpret_cast<char*>(destination), read_size);
+            std::memcpy(parameters + 124U, &read_size, sizeof(read_size));
+            if (!input) {
+              const std::uint32_t access_error = 0x80110305U;
+              std::memcpy(parameters + 28U, &access_error,
+                          sizeof(access_error));
+            } else {
+              const auto read_guest_file = [&](std::size_t offset,
+                                               const char* source_name) {
+                std::uint32_t address{};
+                std::uint32_t capacity{};
+                std::memcpy(&address, parameters + offset, sizeof(address));
+                std::memcpy(&capacity, parameters + offset + 4U,
+                            sizeof(capacity));
+                const auto bytes = read_binary_file(save_directory / source_name);
+                const auto copied = static_cast<std::uint32_t>(
+                    std::min<std::size_t>(bytes.size(), capacity));
+                auto* output = psprecomp::mapped_address(state, address, copied);
+                if (copied != 0U && output != nullptr)
+                  std::memcpy(output, bytes.data(), copied);
+                std::memcpy(parameters + offset + 8U, &copied,
+                            sizeof(copied));
+              };
+              read_guest_file(1412U, "ICON0.PNG");
+              read_guest_file(1428U, "ICON1.PMF");
+              read_guest_file(1444U, "PIC1.PNG");
+              read_guest_file(1460U, "SND0.AT3");
+              const auto sfo = read_binary_file(save_directory / "PARAM.SFO",
+                                                1U << 20U);
+              const auto copy_metadata = [&](std::size_t offset,
+                                             std::size_t capacity,
+                                             std::string_view key) {
+                const auto value = utility::sfo_string(sfo, key);
+                std::memset(parameters + offset, 0, capacity);
+                std::memcpy(parameters + offset, value.data(),
+                            std::min(value.size(), capacity - 1U));
+              };
+              copy_metadata(128U, 128U, "TITLE");
+              copy_metadata(256U, 128U, "SAVEDATA_TITLE");
+              copy_metadata(384U, 1024U, "SAVEDATA_DETAIL");
+            }
+          }
+        } else if (save_mode) {
+          std::uint32_t data_address{};
+          std::uint32_t data_size{};
+          std::memcpy(&data_address, parameters + 116U,
+                      sizeof(data_address));
+          std::memcpy(&data_size, parameters + 124U, sizeof(data_size));
+          const auto* source =
+              psprecomp::mapped_address(state, data_address, data_size);
+          if (!valid_path || source == nullptr) {
+            const std::uint32_t parameter_error = 0x80110388U;
+            std::memcpy(parameters + 28U, &parameter_error,
+                        sizeof(parameter_error));
+          } else {
+            const auto staging = save_directory.string() + ".psprism.tmp";
+            const auto backup = save_directory.string() + ".psprism.backup";
+            std::error_code directory_error;
+            std::filesystem::remove_all(staging, directory_error);
+            directory_error.clear();
+            std::filesystem::create_directories(staging, directory_error);
+            std::ofstream output(std::filesystem::path(staging) / file_name,
+                                 std::ios::binary | std::ios::trunc);
+            output.write(reinterpret_cast<const char*>(source), data_size);
+            const auto write_guest_file = [&](std::size_t offset,
+                                              const char* destination) {
+              std::uint32_t address{};
+              std::uint32_t size{};
+              std::memcpy(&address, parameters + offset, sizeof(address));
+              std::memcpy(&size, parameters + offset + 8U, sizeof(size));
+              const auto* bytes =
+                  psprecomp::mapped_address(state, address, size);
+              if (size == 0U) return true;
+              if (bytes == nullptr) return false;
+              std::ofstream asset(std::filesystem::path(staging) / destination,
+                                  std::ios::binary | std::ios::trunc);
+              asset.write(reinterpret_cast<const char*>(bytes), size);
+              return static_cast<bool>(asset);
+            };
+            const bool assets_ok =
+                write_guest_file(1412U, "ICON0.PNG") &&
+                write_guest_file(1428U, "ICON1.PMF") &&
+                write_guest_file(1444U, "PIC1.PNG") &&
+                write_guest_file(1460U, "SND0.AT3");
+            const auto sfo = utility::make_savedata_sfo(
+                fixed_string(parameters + 128U, 128U),
+                fixed_string(parameters + 256U, 128U),
+                fixed_string(parameters + 384U, 1024U));
+            std::ofstream sfo_output(
+                std::filesystem::path(staging) / "PARAM.SFO",
+                std::ios::binary | std::ios::trunc);
+            sfo_output.write(reinterpret_cast<const char*>(sfo.data()),
+                             sfo.size());
+            output.close();
+            sfo_output.close();
+            if (directory_error || !output || !sfo_output || !assets_ok) {
+              const std::uint32_t access_error = 0x80110385U;
+              std::memcpy(parameters + 28U, &access_error,
+                          sizeof(access_error));
+              std::filesystem::remove_all(staging, directory_error);
+            } else {
+              std::filesystem::remove_all(backup, directory_error);
+              directory_error.clear();
+              const bool had_existing =
+                  std::filesystem::exists(save_directory, directory_error);
+              if (had_existing)
+                std::filesystem::rename(save_directory, backup,
+                                        directory_error);
+              if (!directory_error)
+                std::filesystem::rename(staging, save_directory,
+                                        directory_error);
+              if (directory_error) {
+                std::error_code rollback_error;
+                std::filesystem::remove_all(save_directory, rollback_error);
+                if (had_existing)
+                  std::filesystem::rename(backup, save_directory,
+                                          rollback_error);
+                const std::uint32_t access_error = 0x80110385U;
+                std::memcpy(parameters + 28U, &access_error,
+                            sizeof(access_error));
+              } else {
+                std::filesystem::remove_all(backup, directory_error);
+              }
+            }
+          }
+        } else if (delete_mode) {
+          std::error_code delete_error;
+          if (mode == 7U) {
+            const auto save_root = implementation_->configuration.writable_root /
+                                   "PSP" / "SAVEDATA";
+            for (const auto& selected : implementation_->savedata_names)
+              std::filesystem::remove_all(
+                  save_root / (std::string(game_name) + selected),
+                  delete_error);
+          } else if (valid_directory) {
+            std::filesystem::remove_all(save_directory, delete_error);
+          }
+          if (delete_error) {
+            const std::uint32_t access_error = 0x80110385U;
+            std::memcpy(parameters + 28U, &access_error,
+                        sizeof(access_error));
+          }
+        }
         if (mode == 8U) {
           std::uint32_t free_info{};
           std::uint32_t data_info{};
@@ -1949,15 +2793,166 @@ void Runtime::dispatch(psprecomp::State& state, std::string_view name) {
             std::snprintf(reinterpret_cast<char*>(output + 12U), 8U, "%uMB",
                           free_kb / 1024U);
           }
-          if (auto* output = psprecomp::mapped_address(state, data_info, 64U))
-            std::memset(output, 0, 64U);
+          if (auto* output = psprecomp::mapped_address(state, data_info, 64U)) {
+            std::memset(output + 36U, 0, 28U);
+            char requested_game[14]{};
+            char requested_save[21]{};
+            std::memcpy(requested_game, output, 13U);
+            std::memcpy(requested_save, output + 16U, 20U);
+            const auto requested_directory =
+                implementation_->configuration.writable_root / "PSP" /
+                "SAVEDATA" /
+                (std::string(requested_game) + requested_save);
+            std::error_code directory_error;
+            if (!std::filesystem::is_directory(requested_directory,
+                                               directory_error)) {
+              const std::uint32_t no_data = 0x801103c7U;
+              std::memcpy(parameters + 28U, &no_data, sizeof(no_data));
+            }
+          }
           if (auto* output =
-                  psprecomp::mapped_address(state, utility_info, 28U))
+                  psprecomp::mapped_address(state, utility_info, 28U)) {
+            std::uint32_t data_size{};
+            std::memcpy(&data_size, parameters + 124U, sizeof(data_size));
+            std::uint64_t requested_bytes = 2U * 32768U;
+            const auto add_file = [&](std::uint32_t size) {
+              if (size != 0U)
+                requested_bytes += (static_cast<std::uint64_t>(size) +
+                                    32767U) & ~32767ULL;
+            };
+            add_file(data_size + (data_size == 0U ? 0U : 16U));
+            for (const auto offset : {1420U, 1436U, 1452U, 1468U}) {
+              std::uint32_t size{};
+              std::memcpy(&size, parameters + offset, sizeof(size));
+              add_file(size);
+            }
+            const auto used_kb = static_cast<std::uint32_t>(
+                std::min<std::uint64_t>(requested_bytes / 1024U,
+                                        0x7fffffffU));
+            const auto used_clusters = used_kb / 32U;
             std::memset(output, 0, 28U);
+            std::memcpy(output, &used_clusters, sizeof(used_clusters));
+            std::memcpy(output + 4U, &used_kb, sizeof(used_kb));
+            std::snprintf(reinterpret_cast<char*>(output + 8U), 8U, "%u KB",
+                          used_kb);
+            std::memcpy(output + 16U, &used_kb, sizeof(used_kb));
+            std::snprintf(reinterpret_cast<char*>(output + 20U), 8U, "%u KB",
+                          used_kb);
+          }
           if (implementation_->verbose)
             std::fprintf(
                 stderr, "[psprism:savedata] memory-stick free=%uKB\n",
                 free_kb);
+        }
+        if (mode == 11U) {
+          std::uint32_t list_address{};
+          std::memcpy(&list_address, parameters + 1524U,
+                      sizeof(list_address));
+          if (auto* list = psprecomp::mapped_address(state, list_address, 12U)) {
+            std::uint32_t maximum{};
+            std::uint32_t entries_address{};
+            std::memcpy(&maximum, list, sizeof(maximum));
+            std::memcpy(&entries_address, list + 8U, sizeof(entries_address));
+            maximum = std::min(maximum, 1024U);
+            std::uint32_t count{};
+            const auto root = implementation_->configuration.writable_root /
+                              "PSP" / "SAVEDATA";
+            std::error_code list_error;
+            for (const auto& entry :
+                 std::filesystem::directory_iterator(root, list_error)) {
+              const auto full_name = entry.path().filename().string();
+              if (!entry.is_directory() || !full_name.starts_with(game_name) ||
+                  count >= maximum)
+                continue;
+              auto* output = psprecomp::mapped_address(
+                  state, entries_address + count * 72U, 72U);
+              if (output == nullptr) break;
+              std::memset(output, 0, 72U);
+              const std::uint32_t directory_mode = 0x11ffU;
+              std::memcpy(output, &directory_mode, sizeof(directory_mode));
+              const auto suffix = full_name.substr(std::strlen(game_name));
+              std::memcpy(output + 52U, suffix.data(),
+                          std::min<std::size_t>(suffix.size(), 19U));
+              ++count;
+            }
+            std::memcpy(list + 4U, &count, sizeof(count));
+          }
+        }
+        if (mode == 12U) {
+          std::uint32_t list_address{};
+          std::memcpy(&list_address, parameters + 1528U,
+                      sizeof(list_address));
+          if (auto* list = psprecomp::mapped_address(state, list_address, 36U)) {
+            std::uint32_t max_normal{};
+            std::uint32_t max_system{};
+            std::uint32_t normal_address{};
+            std::uint32_t system_address{};
+            std::memcpy(&max_normal, list + 4U, sizeof(max_normal));
+            std::memcpy(&max_system, list + 8U, sizeof(max_system));
+            std::memcpy(&normal_address, list + 28U, sizeof(normal_address));
+            std::memcpy(&system_address, list + 32U, sizeof(system_address));
+            max_normal = std::min(max_normal, 1024U);
+            max_system = std::min(max_system, 1024U);
+            std::uint32_t normal_count{};
+            std::uint32_t system_count{};
+            std::error_code file_error;
+            for (const auto& entry :
+                 std::filesystem::directory_iterator(save_directory,
+                                                     file_error)) {
+              if (!entry.is_regular_file()) continue;
+              const auto filename = entry.path().filename().string();
+              const bool system = is_one_of(
+                  filename, {"PARAM.SFO", "ICON0.PNG", "ICON1.PMF",
+                             "PIC1.PNG", "SND0.AT3"});
+              auto& count = system ? system_count : normal_count;
+              const auto maximum = system ? max_system : max_normal;
+              const auto address = system ? system_address : normal_address;
+              if (count >= maximum) continue;
+              auto* output = psprecomp::mapped_address(
+                  state, address + count * 80U, 80U);
+              if (output == nullptr) continue;
+              std::memset(output, 0, 80U);
+              const std::uint32_t file_mode = 0x21ffU;
+              const auto size = static_cast<std::uint64_t>(entry.file_size());
+              std::memcpy(output, &file_mode, sizeof(file_mode));
+              std::memcpy(output + 8U, &size, sizeof(size));
+              std::memcpy(output + 64U, filename.data(),
+                          std::min<std::size_t>(filename.size(), 15U));
+              ++count;
+            }
+            std::memcpy(list + 16U, &normal_count, sizeof(normal_count));
+            std::memcpy(list + 20U, &system_count, sizeof(system_count));
+          }
+        }
+        if (mode == 22U) {
+          std::uint32_t info_address{};
+          std::memcpy(&info_address, parameters + 1532U,
+                      sizeof(info_address));
+          if (auto* info = psprecomp::mapped_address(state, info_address, 60U)) {
+            std::uint64_t used_bytes{};
+            std::error_code size_error;
+            for (const auto& entry : std::filesystem::directory_iterator(
+                     save_directory, size_error)) {
+              if (entry.is_regular_file()) used_bytes += entry.file_size();
+            }
+            const auto used_kb = static_cast<std::uint32_t>(
+                std::min<std::uint64_t>((used_bytes + 1023U) / 1024U,
+                                        0x7fffffffU));
+            const auto space = std::filesystem::space(
+                implementation_->configuration.writable_root, size_error);
+            const auto free_kb = size_error ? 0U :
+                static_cast<std::uint32_t>(std::min<std::uintmax_t>(
+                    space.available / 1024U, 0x7fffffffU));
+            std::memcpy(info + 24U, &free_kb, sizeof(free_kb));
+            std::snprintf(reinterpret_cast<char*>(info + 28U), 8U, "%u KB",
+                          free_kb);
+            std::memcpy(info + 36U, &used_kb, sizeof(used_kb));
+            std::snprintf(reinterpret_cast<char*>(info + 40U), 8U, "%u KB",
+                          used_kb);
+            std::memcpy(info + 48U, &used_kb, sizeof(used_kb));
+            std::snprintf(reinterpret_cast<char*>(info + 52U), 8U, "%u KB",
+                          used_kb);
+          }
         }
       }
     }
@@ -1965,12 +2960,57 @@ void Runtime::dispatch(psprecomp::State& state, std::string_view name) {
     return;
   }
   if (name == "sceUtilitySavedataShutdownStart") {
+    host::dismiss_dialog(implementation_->savedata_dialog_id);
     implementation_->savedata_status = 4U;
     state.gpr[2] = 0U;
     return;
   }
   if (name == "sceUtilityMsgDialogInitStart") {
+    auto* parameters = psprecomp::mapped_address(state, state.gpr[4], 572U);
+    if (parameters == nullptr) {
+      state.gpr[2] = 0x80110002U;
+      return;
+    }
+    std::uint32_t expected{};
+    if (!implementation_->active_utility.compare_exchange_strong(expected, 2U)) {
+      state.gpr[2] = utility_busy;
+      return;
+    }
+    implementation_->message_dialog_parameters = state.gpr[4];
+    implementation_->message_dialog_id = implementation_->next_dialog_id++;
     implementation_->message_dialog_status = 1U;
+    std::uint32_t size{};
+    std::uint32_t language{};
+    std::uint32_t button_swap{};
+    std::uint32_t mode{};
+    std::uint32_t error_value{};
+    std::memcpy(&size, parameters, sizeof(size));
+    std::memcpy(&language, parameters + 4U, sizeof(language));
+    std::memcpy(&button_swap, parameters + 8U, sizeof(button_swap));
+    std::memcpy(&mode, parameters + 52U, sizeof(mode));
+    std::memcpy(&error_value, parameters + 56U, sizeof(error_value));
+    std::uint32_t options{};
+    if (size >= 576U) std::memcpy(&options, parameters + 572U, sizeof(options));
+    const auto text = utility_text(language);
+    host::DialogModel dialog;
+    dialog.id = implementation_->message_dialog_id;
+    dialog.kind = host::DialogKind::message;
+    dialog.title = text.message;
+    if (mode == 0U) {
+      char formatted[64]{};
+      std::snprintf(formatted, sizeof(formatted), "Error 0x%08X", error_value);
+      dialog.message = formatted;
+    } else {
+      dialog.message = fixed_string(parameters + 60U, 512U);
+    }
+    dialog.confirm_with_cross = button_swap != 0U;
+    dialog.yes_no = (options & 0x10U) != 0U;
+    dialog.default_no = (options & 0x100U) != 0U;
+    dialog.accept_label = text.accept;
+    dialog.cancel_label = text.back;
+    dialog.yes_label = text.yes;
+    dialog.no_label = text.no;
+    host::present_dialog(std::move(dialog));
     state.gpr[2] = 0U;
     return;
   }
@@ -1979,18 +3019,211 @@ void Runtime::dispatch(psprecomp::State& state, std::string_view name) {
     state.gpr[2] = status;
     if (status == 1U)
       implementation_->message_dialog_status = 2U;
-    else if (status == 4U)
+    else if (status == 4U) {
       implementation_->message_dialog_status = 0U;
+      implementation_->active_utility = 0U;
+    }
     return;
   }
   if (name == "sceUtilityMsgDialogUpdate") {
-    if (implementation_->message_dialog_status == 2U)
+    if (implementation_->message_dialog_status == 2U) {
+      const auto dialog_result = host::poll_dialog_result(
+          implementation_->message_dialog_id);
+      if (!dialog_result) {
+        state.gpr[2] = 0U;
+        return;
+      }
+      if (auto* parameters = psprecomp::mapped_address(
+              state, implementation_->message_dialog_parameters, 572U)) {
+        std::uint32_t size{};
+        std::memcpy(&size, parameters, sizeof(size));
+        const std::uint32_t success{};
+        const auto common_result = dialog_result->cancelled
+                                       ? utility_cancelled
+                                       : success;
+        std::memcpy(parameters + 28U, &common_result, sizeof(common_result));
+        std::memcpy(parameters + 48U, &success, sizeof(success));
+        if (size >= 580U) {
+          const std::uint32_t button = dialog_result->cancelled
+                                           ? 3U
+                                       : dialog_result->affirmative ? 1U : 2U;
+          if (auto* complete = psprecomp::mapped_address(
+                  state, implementation_->message_dialog_parameters, size))
+            std::memcpy(complete + 576U, &button, sizeof(button));
+        }
+      }
       implementation_->message_dialog_status = 3U;
+    }
     state.gpr[2] = 0U;
     return;
   }
   if (name == "sceUtilityMsgDialogShutdownStart") {
+    host::dismiss_dialog(implementation_->message_dialog_id);
     implementation_->message_dialog_status = 4U;
+    state.gpr[2] = 0U;
+    return;
+  }
+  if (name == "sceUtilityMsgDialogAbort") {
+    if (implementation_->message_dialog_status == 0U) {
+      state.gpr[2] = 0x80110002U;
+      return;
+    }
+    host::dismiss_dialog(implementation_->message_dialog_id);
+    if (auto* parameters = psprecomp::mapped_address(
+            state, implementation_->message_dialog_parameters, 52U)) {
+      std::memcpy(parameters + 28U, &utility_cancelled,
+                  sizeof(utility_cancelled));
+    }
+    implementation_->message_dialog_status = 3U;
+    state.gpr[2] = 0U;
+    return;
+  }
+  if (name == "sceUtilityOskInitStart") {
+    auto* parameters = psprecomp::mapped_address(state, state.gpr[4], 64U);
+    if (parameters == nullptr) {
+      state.gpr[2] = 0x80110002U;
+      return;
+    }
+    std::uint32_t expected{};
+    if (!implementation_->active_utility.compare_exchange_strong(expected, 3U)) {
+      state.gpr[2] = utility_busy;
+      return;
+    }
+    std::uint32_t language{};
+    std::uint32_t button_swap{};
+    std::uint32_t count{};
+    std::uint32_t data_address{};
+    std::memcpy(&language, parameters + 4U, sizeof(language));
+    std::memcpy(&button_swap, parameters + 8U, sizeof(button_swap));
+    std::memcpy(&count, parameters + 48U, sizeof(count));
+    std::memcpy(&data_address, parameters + 52U, sizeof(data_address));
+    if (count == 0U || count > 16U || psprecomp::mapped_address(
+            state, data_address, static_cast<std::size_t>(count) * 52U) == nullptr) {
+      implementation_->active_utility = 0U;
+      state.gpr[2] = 0x80110002U;
+      return;
+    }
+    implementation_->osk_parameters = state.gpr[4];
+    implementation_->osk_dialog_id = implementation_->next_dialog_id++;
+    implementation_->osk_status = 1U;
+    const std::uint32_t local_state = 1U;
+    std::memcpy(parameters + 56U, &local_state, sizeof(local_state));
+    const auto text = utility_text(language);
+    host::DialogModel dialog;
+    dialog.id = implementation_->osk_dialog_id;
+    dialog.kind = host::DialogKind::osk;
+    dialog.title = text.keyboard;
+    dialog.confirm_with_cross = button_swap != 0U;
+    dialog.accept_label = text.accept;
+    dialog.cancel_label = text.back;
+    for (std::uint32_t index = 0; index < count; ++index) {
+      const auto entry_address = data_address + index * 52U;
+      auto* entry = psprecomp::mapped_address(state, entry_address, 52U);
+      std::uint32_t input_type{};
+      std::uint32_t description{};
+      std::uint32_t input{};
+      std::uint32_t output_length{};
+      std::uint32_t output_limit{};
+      std::memcpy(&input_type, entry + 16U, sizeof(input_type));
+      std::memcpy(&description, entry + 28U, sizeof(description));
+      std::memcpy(&input, entry + 32U, sizeof(input));
+      std::memcpy(&output_length, entry + 36U, sizeof(output_length));
+      std::memcpy(&output_limit, entry + 48U, sizeof(output_limit));
+      host::OskField field;
+      field.label = utf16_to_utf8(guest_utf16(state, description));
+      field.text = guest_utf16(state, input,
+                               std::min<std::uint32_t>(output_length, 4096U));
+      field.limit = std::min(output_limit,
+                             output_length == 0U ? output_limit
+                                                : output_length - 1U);
+      field.input_type = input_type;
+      dialog.fields.push_back(std::move(field));
+    }
+    host::present_dialog(std::move(dialog));
+    state.gpr[2] = 0U;
+    return;
+  }
+  if (name == "sceUtilityOskGetStatus") {
+    const auto status = implementation_->osk_status.load();
+    state.gpr[2] = status;
+    if (status == 1U) {
+      implementation_->osk_status = 2U;
+      if (auto* parameters = psprecomp::mapped_address(
+              state, implementation_->osk_parameters, 60U)) {
+        const std::uint32_t local_state = 3U;
+        std::memcpy(parameters + 56U, &local_state, sizeof(local_state));
+      }
+    } else if (status == 4U) {
+      implementation_->osk_status = 0U;
+      implementation_->active_utility = 0U;
+    }
+    return;
+  }
+  if (name == "sceUtilityOskUpdate") {
+    if (implementation_->osk_status != 2U) {
+      state.gpr[2] = 0U;
+      return;
+    }
+    const auto result = host::poll_dialog_result(implementation_->osk_dialog_id);
+    if (!result) {
+      state.gpr[2] = 0U;
+      return;
+    }
+    auto* parameters = psprecomp::mapped_address(
+        state, implementation_->osk_parameters, 60U);
+    if (parameters != nullptr) {
+      std::uint32_t count{};
+      std::uint32_t data_address{};
+      std::memcpy(&count, parameters + 48U, sizeof(count));
+      std::memcpy(&data_address, parameters + 52U, sizeof(data_address));
+      for (std::uint32_t index = 0;
+           index < count && index < result->field_text.size(); ++index) {
+        auto* entry = psprecomp::mapped_address(
+            state, data_address + index * 52U, 52U);
+        if (entry == nullptr) break;
+        std::uint32_t output_length{};
+        std::uint32_t output_address{};
+        std::uint32_t output_limit{};
+        std::uint32_t input_address{};
+        std::memcpy(&input_address, entry + 32U, sizeof(input_address));
+        std::memcpy(&output_length, entry + 36U, sizeof(output_length));
+        std::memcpy(&output_address, entry + 40U, sizeof(output_address));
+        std::memcpy(&output_limit, entry + 48U, sizeof(output_limit));
+        const auto maximum = std::min(output_length,
+            output_limit == 0U ? output_length : output_limit + 1U);
+        const auto original = guest_utf16(state, input_address, maximum);
+        auto* output = psprecomp::mapped_address(
+            state, output_address, static_cast<std::size_t>(maximum) * 2U);
+        if (output != nullptr && maximum != 0U) {
+          const auto length = std::min<std::size_t>(
+              result->field_text[index].size(), maximum - 1U);
+          std::memset(output, 0, static_cast<std::size_t>(maximum) * 2U);
+          std::memcpy(output, result->field_text[index].data(), length * 2U);
+        }
+        const std::uint32_t field_result = result->cancelled
+                                               ? 1U
+                                           : original == result->field_text[index]
+                                               ? 0U
+                                               : 2U;
+        std::memcpy(entry + 44U, &field_result, sizeof(field_result));
+      }
+      const std::uint32_t local_state = 4U;
+      std::memcpy(parameters + 56U, &local_state, sizeof(local_state));
+      const auto common_result = result->cancelled ? utility_cancelled : 0U;
+      std::memcpy(parameters + 28U, &common_result, sizeof(common_result));
+    }
+    implementation_->osk_status = 3U;
+    state.gpr[2] = 0U;
+    return;
+  }
+  if (name == "sceUtilityOskShutdownStart") {
+    host::dismiss_dialog(implementation_->osk_dialog_id);
+    if (auto* parameters = psprecomp::mapped_address(
+            state, implementation_->osk_parameters, 60U)) {
+      const std::uint32_t local_state = 5U;
+      std::memcpy(parameters + 56U, &local_state, sizeof(local_state));
+    }
+    implementation_->osk_status = 4U;
     state.gpr[2] = 0U;
     return;
   }
@@ -2009,7 +3242,9 @@ void Runtime::dispatch(psprecomp::State& state, std::string_view name) {
         implementation_->elapsed_microseconds() / 16683U);
     return;
   }
-  if (name == "sceDisplayWaitVblankStart") {
+  if (is_one_of(name, {"sceDisplayWaitVblank", "sceDisplayWaitVblankCB",
+                       "sceDisplayWaitVblankStart",
+                       "sceDisplayWaitVblankStartCB"})) {
     host::present_ge_frame();
     host::sleep_microseconds(16683U);
     state.gpr[2] = 0;
@@ -2023,6 +3258,39 @@ void Runtime::dispatch(psprecomp::State& state, std::string_view name) {
   }
   if (name == "sceUmdGetDriveStat") {
     state.gpr[2] = 0x32U; // present, ready, readable
+    return;
+  }
+  if (name == "sceKernelReferSystemStatus") {
+    constexpr std::uint32_t system_status_size = 28U;
+    auto* output = psprecomp::mapped_address(state, state.gpr[4],
+                                             system_status_size);
+    if (output == nullptr)
+      return;
+    std::memset(output, 0, system_status_size);
+    std::memcpy(output, &system_status_size, sizeof(system_status_size));
+    state.gpr[2] = 0U;
+    return;
+  }
+  if (name == "sceImposeGetLanguageMode") {
+    if (auto* language = guest_pointer<std::uint32_t>(state, state.gpr[4]))
+      *language = 1U; // English
+    if (auto* button = guest_pointer<std::uint32_t>(state, state.gpr[5]))
+      *button = 1U; // Cross confirms
+    state.gpr[2] = 0U;
+    return;
+  }
+  if (name == "sceImposeSetLanguageMode") {
+    state.gpr[2] = 0U;
+    return;
+  }
+  if (name == "sceRtcGetCurrentTick") {
+    constexpr std::uint64_t unix_epoch_psp_ticks = 62135596800000000ULL;
+    if (auto* output = guest_pointer<std::uint64_t>(state, state.gpr[4])) {
+      *output = unix_epoch_psp_ticks +
+                implementation_->start_unix_seconds * 1000000ULL +
+                implementation_->elapsed_microseconds();
+      state.gpr[2] = 0U;
+    }
     return;
   }
   if (is_one_of(name,
@@ -2054,19 +3322,53 @@ void Runtime::dispatch(psprecomp::State& state, std::string_view name) {
     const auto* path = guest_string(state, state.gpr[4]);
     if (path == nullptr)
       return;
-    const auto resolved = implementation_->resolve_path(path);
+    std::uint64_t raw_disc_base = 0;
+    const std::string_view psp_path(path);
+    const auto lbn_marker = psp_path.find("/sce_lbn0x");
+    const auto raw_disc =
+        (psp_path.starts_with("disc0:") || psp_path.starts_with("umd0:")) &&
+        lbn_marker != std::string_view::npos;
+    if (raw_disc) {
+      const auto begin = lbn_marker + std::string_view("/sce_lbn0x").size();
+      const auto end = psp_path.find("_size0x", begin);
+      if (end == std::string_view::npos) {
+        state.gpr[2] = io_error;
+        return;
+      }
+      const std::string lbn(psp_path.substr(begin, end - begin));
+      char* parsed_end = nullptr;
+      errno = 0;
+      const auto lbn_value = std::strtoull(lbn.c_str(), &parsed_end, 16);
+      if (errno != 0 || parsed_end == lbn.c_str() || *parsed_end != '\0') {
+        state.gpr[2] = io_error;
+        return;
+      }
+      raw_disc_base = lbn_value * 2048ULL;
+    }
+    const auto resolved = raw_disc ? implementation_->disc_image
+                                   : implementation_->resolve_path(path);
     if ((state.gpr[5] & 0x0200U) != 0) {
       std::error_code ignored;
       std::filesystem::create_directories(resolved.parent_path(), ignored);
     }
-    const auto descriptor =
+    auto descriptor =
         ::open(resolved.c_str(), host_open_flags(state.gpr[5]),
                static_cast<mode_t>(state.gpr[6]));
+    if (descriptor >= 0 && raw_disc &&
+        ::lseek(descriptor, static_cast<off_t>(raw_disc_base), SEEK_SET) < 0) {
+      ::close(descriptor);
+      descriptor = -1;
+    }
     if (descriptor < 0) {
       state.gpr[2] = io_error;
     } else {
       const auto psp_descriptor = implementation_->next_file++;
       implementation_->files.emplace(psp_descriptor, descriptor);
+      if (raw_disc)
+        implementation_->file_bases.emplace(psp_descriptor, raw_disc_base);
+      if (name == "sceIoOpenAsync")
+        implementation_->async_results.emplace(psp_descriptor,
+                                                psp_descriptor);
       state.gpr[2] = static_cast<std::uint32_t>(psp_descriptor);
     }
     return;
@@ -2130,6 +3432,16 @@ void Runtime::dispatch(psprecomp::State& state, std::string_view name) {
     std::memcpy(output, &mode, sizeof(mode));
     const auto size = entry.is_regular_file() ? entry.file_size() : 0U;
     std::memcpy(output + 8U, &size, sizeof(size));
+    std::error_code relative_error;
+    const auto relative = std::filesystem::relative(
+        entry.path(), implementation_->configuration.disc_root,
+        relative_error);
+    if (!relative_error) {
+      const auto sector = implementation_->disc_sectors.find(
+          relative.generic_string());
+      if (sector != implementation_->disc_sectors.end())
+        std::memcpy(output + 64U, &sector->second, sizeof(sector->second));
+    }
     std::memcpy(output + 88U, filename.c_str(),
                 std::min<std::size_t>(filename.size(), 255U));
     state.gpr[2] = 1;
@@ -2176,6 +3488,15 @@ void Runtime::dispatch(psprecomp::State& state, std::string_view name) {
                           ? std::filesystem::file_size(resolved, error)
                           : 0U;
     std::memcpy(output + 8U, &size, sizeof(size));
+    std::error_code relative_error;
+    const auto relative = std::filesystem::relative(
+        resolved, implementation_->configuration.disc_root, relative_error);
+    if (!relative_error) {
+      const auto sector = implementation_->disc_sectors.find(
+          relative.generic_string());
+      if (sector != implementation_->disc_sectors.end())
+        std::memcpy(output + 64U, &sector->second, sizeof(sector->second));
+    }
     state.gpr[2] = error ? io_error : 0U;
     return;
   }
@@ -2186,6 +3507,20 @@ void Runtime::dispatch(psprecomp::State& state, std::string_view name) {
       return;
     state.gpr[2] = ::close(found->second) == 0 ? 0U : io_error;
     implementation_->files.erase(found);
+    implementation_->file_bases.erase(static_cast<int>(state.gpr[4]));
+    return;
+  }
+  if (name == "sceIoCloseAsync") {
+    const auto psp_descriptor = static_cast<int>(state.gpr[4]);
+    const auto found = implementation_->files.find(psp_descriptor);
+    if (found == implementation_->files.end())
+      return;
+    const auto result = ::close(found->second) == 0 ? 0U : io_error;
+    implementation_->files.erase(found);
+    implementation_->file_bases.erase(psp_descriptor);
+    implementation_->async_results[psp_descriptor] =
+        static_cast<std::int64_t>(static_cast<std::int32_t>(result));
+    state.gpr[2] = 0U;
     return;
   }
   if (is_one_of(name, {"sceIoRead", "sceIoReadAsync", "sceIoWrite",
@@ -2215,10 +3550,16 @@ void Runtime::dispatch(psprecomp::State& state, std::string_view name) {
         implementation_->descriptor(static_cast<int>(state.gpr[4]));
     if (descriptor < 0)
       return;
-    const auto bits = static_cast<std::uint64_t>(state.gpr[5]) |
-                      static_cast<std::uint64_t>(state.gpr[6]) << 32U;
-    const auto result = ::lseek(descriptor, static_cast<std::int64_t>(bits),
-                                static_cast<int>(state.gpr[7]));
+    auto bits = static_cast<std::uint64_t>(state.gpr[5]) |
+                static_cast<std::uint64_t>(state.gpr[6]) << 32U;
+    const auto base = implementation_->file_bases.find(
+        static_cast<int>(state.gpr[4]));
+    if (base != implementation_->file_bases.end() && state.gpr[7] == SEEK_SET)
+      bits += base->second;
+    auto result = ::lseek(descriptor, static_cast<std::int64_t>(bits),
+                          static_cast<int>(state.gpr[7]));
+    if (result >= 0 && base != implementation_->file_bases.end())
+      result -= static_cast<off_t>(base->second);
     if (name == "sceIoLseekAsync") {
       implementation_->async_results[static_cast<int>(state.gpr[4])] =
           result < 0

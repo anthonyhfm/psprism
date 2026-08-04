@@ -1,4 +1,7 @@
 #include "host.hpp"
+#if defined(PSPRISM_HAS_DESKTOP_DIALOGS)
+#include "desktop_dialogs.hpp"
+#endif
 
 #if !defined(__APPLE__)
 #error "This psprism frontend requires macOS"
@@ -167,10 +170,15 @@ bool update_keyboard_key(unsigned short key_code, bool pressed) {
   return true;
 }
 
+#if defined(PSPRISM_HAS_DESKTOP_DIALOGS)
+psprism::desktop::DialogFrame current_dialog_frame();
+#endif
+
 @interface PsprismRenderer : NSObject <MTKViewDelegate>
 @property(nonatomic, strong) id<MTLDevice> device;
 @property(nonatomic, strong) id<MTLCommandQueue> queue;
 @property(nonatomic, strong) id<MTLRenderPipelineState> pipeline;
+@property(nonatomic, strong) id<MTLRenderPipelineState> dialogPipeline;
 @property(nonatomic, strong) id<MTLRenderPipelineState> geometryPipeline;
 @property(nonatomic, strong) id<MTLRenderPipelineState> texturedGeometryPipeline;
 @property(nonatomic, strong) id<MTLRenderPipelineState> blendedGeometryPipeline;
@@ -178,6 +186,7 @@ bool update_keyboard_key(unsigned short key_code, bool pressed) {
 @property(nonatomic, strong) id<MTLLibrary> shaderLibrary;
 @property(nonatomic, strong) NSMutableDictionary<NSNumber*, id<MTLRenderPipelineState>>* blendPipelines;
 @property(nonatomic, strong) id<MTLTexture> texture;
+@property(nonatomic, strong) id<MTLTexture> dialogTexture;
 @property(nonatomic, strong) NSArray<id<MTLDepthStencilState>>* depthStates;
 @property(nonatomic, strong) NSArray<id<MTLSamplerState>>* samplerStates;
 @property(nonatomic, strong) NSMutableDictionary<NSNumber*, id<MTLTexture>>* renderTargets;
@@ -207,6 +216,12 @@ bool update_keyboard_key(unsigned short key_code, bool pressed) {
                                      texture2d<float> image [[texture(0)]]) {
       constexpr sampler nearest(filter::nearest, address::clamp_to_edge);
       return image.sample(nearest, in.uv);
+    }
+    vertex VertexOut psprism_dialog_vertex(
+        uint id [[vertex_id]], constant float2& clip_scale [[buffer(0)]]) {
+      constexpr float2 positions[] = {{-1.0,-1.0},{3.0,-1.0},{-1.0,3.0}};
+      constexpr float2 texcoords[] = {{0.0,1.0},{2.0,1.0},{0.0,-1.0}};
+      return {float4(positions[id] * clip_scale, 0.0, 1.0), texcoords[id]};
     }
     struct GeometryVertex {
       packed_float4 position;
@@ -324,6 +339,21 @@ bool update_keyboard_key(unsigned short key_code, bool pressed) {
   self.pipeline = [self.device newRenderPipelineStateWithDescriptor:descriptor
                                                                error:&error];
   if (self.pipeline == nil) NSLog(@"psprism: Metal pipeline error: %@", error);
+  descriptor.vertexFunction = [library newFunctionWithName:@"psprism_dialog_vertex"];
+  descriptor.colorAttachments[0].blendingEnabled = YES;
+  descriptor.colorAttachments[0].sourceRGBBlendFactor = MTLBlendFactorOne;
+  descriptor.colorAttachments[0].destinationRGBBlendFactor =
+      MTLBlendFactorOneMinusSourceAlpha;
+  descriptor.colorAttachments[0].rgbBlendOperation = MTLBlendOperationAdd;
+  descriptor.colorAttachments[0].sourceAlphaBlendFactor = MTLBlendFactorOne;
+  descriptor.colorAttachments[0].destinationAlphaBlendFactor =
+      MTLBlendFactorOneMinusSourceAlpha;
+  descriptor.colorAttachments[0].alphaBlendOperation = MTLBlendOperationAdd;
+  self.dialogPipeline = [self.device newRenderPipelineStateWithDescriptor:descriptor
+                                                                      error:&error];
+  if (self.dialogPipeline == nil)
+    NSLog(@"psprism: Metal dialog pipeline error: %@", error);
+  descriptor.colorAttachments[0].blendingEnabled = NO;
   descriptor.vertexFunction =
       [library newFunctionWithName:@"psprism_geometry_vertex"];
   descriptor.fragmentFunction =
@@ -652,6 +682,41 @@ bool update_keyboard_key(unsigned short key_code, bool pressed) {
                         vertexStart:0
                         vertexCount:3];
   }
+#if defined(PSPRISM_HAS_DESKTOP_DIALOGS)
+  const auto dialog_frame = current_dialog_frame();
+  if (!dialog_frame.pixels.empty() && self.dialogPipeline != nil) {
+    if (self.dialogTexture == nil || self.dialogTexture.width != dialog_frame.width ||
+        self.dialogTexture.height != dialog_frame.height) {
+      MTLTextureDescriptor* descriptor = [MTLTextureDescriptor
+          texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                       width:dialog_frame.width
+                                      height:dialog_frame.height
+                                   mipmapped:NO];
+      self.dialogTexture = [self.device newTextureWithDescriptor:descriptor];
+    }
+    [self.dialogTexture replaceRegion:MTLRegionMake2D(0, 0, dialog_frame.width,
+                                                        dialog_frame.height)
+                         mipmapLevel:0
+                           withBytes:dialog_frame.pixels.data()
+                         bytesPerRow:dialog_frame.width * 4U];
+    const auto view_aspect = static_cast<float>(view.drawableSize.width /
+                                                view.drawableSize.height);
+    const auto dialog_aspect = static_cast<float>(dialog_frame.width) /
+                               static_cast<float>(dialog_frame.height);
+    constexpr float dialog_extent = 0.90F;
+    const float dialog_scale[2]{
+        dialog_aspect > view_aspect
+            ? dialog_extent
+            : dialog_extent * dialog_aspect / view_aspect,
+        dialog_aspect > view_aspect
+            ? dialog_extent * view_aspect / dialog_aspect
+            : dialog_extent};
+    [display_encoder setRenderPipelineState:self.dialogPipeline];
+    [display_encoder setVertexBytes:dialog_scale length:sizeof(dialog_scale) atIndex:0];
+    [display_encoder setFragmentTexture:self.dialogTexture atIndex:0];
+    [display_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+  }
+#endif
   [display_encoder endEncoding];
   [commands presentDrawable:drawable];
   [commands addCompletedHandler:^(id<MTLCommandBuffer> buffer) {
@@ -688,6 +753,48 @@ PsprismRenderer* renderer;
 PsprismApplicationDelegate* application_delegate;
 GCController* active_controller;
 std::once_flag frontend_once;
+#if defined(PSPRISM_HAS_DESKTOP_DIALOGS)
+std::unique_ptr<psprism::desktop::DialogFrontend> desktop_dialogs;
+NSTimer* dialog_timer;
+std::uint32_t previous_dialog_buttons{};
+bool dialog_controller_armed{};
+
+psprism::desktop::DialogFrame current_dialog_frame() {
+  return desktop_dialogs != nullptr ? desktop_dialogs->rendered_frame()
+                                    : psprism::desktop::DialogFrame{};
+}
+#endif
+
+std::uint32_t gamepad_buttons(GCExtendedGamepad* pad) {
+  if (pad == nil) return 0U;
+  std::uint32_t result{};
+  if (pad.dpad.up.isPressed) result |= psp_up;
+  if (pad.dpad.right.isPressed) result |= psp_right;
+  if (pad.dpad.down.isPressed) result |= psp_down;
+  if (pad.dpad.left.isPressed) result |= psp_left;
+  if (pad.leftShoulder.isPressed) result |= psp_l;
+  if (pad.rightShoulder.isPressed) result |= psp_r;
+  if (pad.buttonA.isPressed) result |= psp_cross;
+  if (pad.buttonB.isPressed) result |= psp_circle;
+  if (pad.buttonX.isPressed) result |= psp_square;
+  if (pad.buttonY.isPressed) result |= psp_triangle;
+  if (pad.buttonMenu.isPressed) result |= psp_start;
+  if ([pad respondsToSelector:@selector(buttonOptions)] &&
+      pad.buttonOptions.isPressed)
+    result |= psp_select;
+  return result;
+}
+
+#if defined(PSPRISM_HAS_DESKTOP_DIALOGS)
+std::u16string event_text(NSEvent* event) {
+  NSString* characters = event.characters;
+  std::u16string result(characters.length, u'\0');
+  if (!result.empty())
+    [characters getCharacters:reinterpret_cast<unichar*>(result.data())
+                        range:NSMakeRange(0, characters.length)];
+  return result;
+}
+#endif
 
 std::uint8_t expand4(std::uint32_t value) {
   return static_cast<std::uint8_t>((value << 4U) | value);
@@ -805,12 +912,83 @@ void initialize_frontend() {
                 }];
     if (GCController.controllers.count != 0)
       active_controller = GCController.controllers.firstObject;
+#if defined(PSPRISM_HAS_DESKTOP_DIALOGS)
+    dialog_timer = [NSTimer
+        scheduledTimerWithTimeInterval:1.0 / 60.0
+                                repeats:YES
+                                  block:^(NSTimer* timer) {
+                                    static_cast<void>(timer);
+                                    psprism::desktop::process_desktop_dialog_events();
+                                    if (desktop_dialogs == nullptr ||
+                                        !desktop_dialogs->visible()) {
+                                      previous_dialog_buttons = 0;
+                                      dialog_controller_armed = false;
+                                      return;
+                                    }
+                                    const auto buttons = gamepad_buttons(
+                                        active_controller.extendedGamepad);
+                                    if (!dialog_controller_armed) {
+                                      previous_dialog_buttons = buttons;
+                                      dialog_controller_armed = buttons == 0U;
+                                    } else {
+                                      const auto pressed =
+                                          buttons & ~previous_dialog_buttons;
+                                      previous_dialog_buttons = buttons;
+                                      if (pressed != 0U)
+                                        desktop_dialogs->handle_buttons(pressed);
+                                    }
+                                  }];
+#endif
     keyboard_event_monitor = [NSEvent
         addLocalMonitorForEventsMatchingMask:NSEventMaskKeyDown |
                                               NSEventMaskKeyUp
                                     handler:^NSEvent*(NSEvent* event) {
                                       const auto pressed =
                                           event.type == NSEventTypeKeyDown;
+#if defined(PSPRISM_HAS_DESKTOP_DIALOGS)
+                                      if (desktop_dialogs != nullptr &&
+                                          desktop_dialogs->visible()) {
+                                        if (!pressed) return nil;
+                                        switch (event.keyCode) {
+                                          case 53:
+                                            desktop_dialogs->cancel();
+                                            break;
+                                          case 36:
+                                          case 76:
+                                            desktop_dialogs->accept();
+                                            break;
+                                          case 51:
+                                            desktop_dialogs->handle_backspace();
+                                            break;
+                                          case 123:
+                                            desktop_dialogs->handle_buttons(psp_left);
+                                            break;
+                                          case 124:
+                                            desktop_dialogs->handle_buttons(psp_right);
+                                            break;
+                                          case 125:
+                                            desktop_dialogs->handle_buttons(psp_down);
+                                            break;
+                                          case 126:
+                                            desktop_dialogs->handle_buttons(psp_up);
+                                            break;
+                                          case 40:
+                                            desktop_dialogs->handle_buttons(psp_cross);
+                                            break;
+                                          case 37:
+                                            desktop_dialogs->handle_buttons(psp_circle);
+                                            break;
+                                          case 38:
+                                            desktop_dialogs->handle_buttons(psp_square);
+                                            break;
+                                          default:
+                                            desktop_dialogs->handle_text(
+                                                event_text(event));
+                                            break;
+                                        }
+                                        return nil;
+                                      }
+#endif
                                       const auto handled = update_keyboard_key(
                                           event.keyCode, pressed);
                                       if (handled && pressed &&
@@ -933,6 +1111,9 @@ void submit_ge_primitive(std::uint32_t type,
 
 ControllerState controller_state() {
   ControllerState result;
+#if defined(PSPRISM_HAS_DESKTOP_DIALOGS)
+  if (desktop_dialogs != nullptr && desktop_dialogs->visible()) return result;
+#endif
   result.buttons = keyboard_buttons.load(std::memory_order_relaxed) |
                    keyboard_latched_buttons.exchange(0,
                                                      std::memory_order_relaxed);
@@ -946,24 +1127,59 @@ ControllerState controller_state() {
   result.analog_y = static_cast<std::uint8_t>(128 + vertical * 127);
   GCExtendedGamepad* pad = active_controller.extendedGamepad;
   if (pad == nil) return result;
-  if (pad.dpad.up.isPressed) result.buttons |= psp_up;
-  if (pad.dpad.right.isPressed) result.buttons |= psp_right;
-  if (pad.dpad.down.isPressed) result.buttons |= psp_down;
-  if (pad.dpad.left.isPressed) result.buttons |= psp_left;
-  if (pad.leftShoulder.isPressed) result.buttons |= psp_l;
-  if (pad.rightShoulder.isPressed) result.buttons |= psp_r;
-  if (pad.buttonA.isPressed) result.buttons |= psp_cross;
-  if (pad.buttonB.isPressed) result.buttons |= psp_circle;
-  if (pad.buttonX.isPressed) result.buttons |= psp_square;
-  if (pad.buttonY.isPressed) result.buttons |= psp_triangle;
-  if (pad.buttonMenu.isPressed) result.buttons |= psp_start;
-  if ([pad respondsToSelector:@selector(buttonOptions)] && pad.buttonOptions.isPressed)
-    result.buttons |= psp_select;
+  result.buttons |= gamepad_buttons(pad);
   if (directions == 0) {
     result.analog_x = axis_to_byte(pad.leftThumbstick.xAxis.value);
     result.analog_y = axis_to_byte(-pad.leftThumbstick.yAxis.value);
   }
   return result;
+}
+
+void present_dialog(DialogModel model) {
+#if defined(PSPRISM_HAS_DESKTOP_DIALOGS)
+  auto shared = std::make_shared<DialogModel>(std::move(model));
+  dispatch_async(dispatch_get_main_queue(), ^{
+    if (desktop_dialogs == nullptr)
+      desktop_dialogs = std::make_unique<psprism::desktop::DialogFrontend>();
+    keyboard_buttons.store(0, std::memory_order_relaxed);
+    keyboard_latched_buttons.store(0, std::memory_order_relaxed);
+    keyboard_analog_directions.store(0, std::memory_order_relaxed);
+    previous_dialog_buttons = 0;
+    dialog_controller_armed = false;
+    desktop_dialogs->present(std::move(*shared));
+  });
+#else
+  static_cast<void>(model);
+#endif
+}
+
+std::optional<DialogResult> poll_dialog_result(std::uint64_t id) {
+#if defined(PSPRISM_HAS_DESKTOP_DIALOGS)
+  return desktop_dialogs != nullptr ? desktop_dialogs->take_result(id)
+                                    : std::nullopt;
+#else
+  static_cast<void>(id);
+  return std::nullopt;
+#endif
+}
+
+void dismiss_dialog(std::uint64_t id) {
+#if defined(PSPRISM_HAS_DESKTOP_DIALOGS)
+  dispatch_async(dispatch_get_main_queue(), ^{
+    if (desktop_dialogs == nullptr) return;
+    desktop_dialogs->dismiss(id);
+  });
+#else
+  static_cast<void>(id);
+#endif
+}
+
+bool dialog_visible() {
+#if defined(PSPRISM_HAS_DESKTOP_DIALOGS)
+  return desktop_dialogs != nullptr && desktop_dialogs->visible();
+#else
+  return false;
+#endif
 }
 
 } // namespace psprism::host

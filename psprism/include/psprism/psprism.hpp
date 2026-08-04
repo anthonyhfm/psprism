@@ -14,6 +14,7 @@ struct Configuration {
   std::filesystem::path disc_root;
   std::filesystem::path writable_root;
   std::size_t image_size{};
+  std::uint32_t image_start{};
   std::function<void(psprecomp::State&)> guest_executor;
 };
 

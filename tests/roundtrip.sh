@@ -44,6 +44,9 @@ test -s "$ROUNDTRIP_TMP/EBOOT.PBP"
     "$ROUNDTRIP_TMP/arithmetic.o" -o "$ROUNDTRIP_TMP/project.elf"
 "$RECOMPILER" "$ROUNDTRIP_TMP/project.elf" \
     --output-dir "$ROUNDTRIP_TMP/project"
+post_delay_entry=$(${PSP_GCC%/*}/psp-nm "$ROUNDTRIP_TMP/project.elf" |
+    awk '$3 == "recomp_post_delay_entry" { printf "%08x", ("0x" $1) + 8 }')
+grep -q "case 0x${post_delay_entry}U" "$ROUNDTRIP_TMP/project/"shard_*.cpp
 "$PSP_GXX" -std=c++20 -O2 -fno-exceptions -fno-rtti \
     -I"$SOURCE_DIR/include" -I"$ROUNDTRIP_TMP/project" \
     -c "$ROUNDTRIP_TMP/project/dispatch.cpp" \
@@ -129,7 +132,7 @@ grep -q '^macos-debug:' "$ROUNDTRIP_TMP/exported/Makefile"
 grep -q '^macos-run:' "$ROUNDTRIP_TMP/exported/Makefile"
 grep -q 'MACOS_BUILD_TYPE ?= Release' "$ROUNDTRIP_TMP/exported/Makefile"
 grep -q 'MACOS_RUN_ARGS ?=' "$ROUNDTRIP_TMP/exported/Makefile"
-grep -q 'set_verbose(verbose)' \
+grep -q 'set_verbose(true)' \
     "$ROUNDTRIP_TMP/exported/platform/macos/main.cpp"
 if grep -E 'sce[A-Z]|pspkernel[.]h' "$ROUNDTRIP_TMP/exported/src/generated/"*.cpp; then
     echo "portable generated core contains a direct PSP API dependency" >&2

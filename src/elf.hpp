@@ -36,6 +36,7 @@ struct Import {
 
 struct ElfImage {
     std::uint32_t entry{};
+    std::uint32_t preferred_base{};
     std::vector<ExecutableSection> executable_sections;
     std::vector<LoadSegment> load_segments;
     std::vector<Relocation> relocations;

@@ -13,7 +13,20 @@ delays, controller-neutral input, UMD status and synchronous/async-style file
 I/O against the exported `disc/` and `.psprism/ms0/` trees. Unknown imports are
 reported once and return PSP's `SCE_KERNEL_ERROR_LIBRARY_NOT_YET_LINKED` value.
 
-The macOS frontend accepts standard game controllers. Its keyboard fallback is
-arrows for the D-pad, WASD for the analog stick, I/J/K/L for
+Savedata, message dialogs and the on-screen keyboard use asynchronous Qt 6
+widget trees rendered into the game window. This keeps fullscreen gameplay
+uninterrupted while retaining a desktop-quality dialog UI. Savedata is
+presented as a horizontal carousel with visible neighboring slots, PSP metadata
+and `PIC1.PNG`/`ICON0.PNG` artwork. Secure savedata modes currently preserve
+payloads without reproducing the PSP encryption layer.
+
+Qt is an optional system-dialog renderer for desktop targets only. It does not
+own the game window, graphics backend, filesystem, controller implementation or
+portable runtime API. Non-desktop targets such as PSP or future Wii/homebrew
+ports select their own host dialog backend and build with
+`PSPRISM_DESKTOP_DIALOGS=OFF`.
+
+The macOS game window accepts standard game controllers. Its keyboard fallback
+is arrows for the D-pad, WASD for the analog stick, I/J/K/L for
 Triangle/Square/Cross/Circle, Q/E for L/R, Return for Start and Right Shift for
 Select.

@@ -134,10 +134,11 @@ std::string generated_readme(const ExportConfig& config, InputKind kind,
          "make macos      # build a native Release .app (-O3)\n"
          "make macos-debug # build a native Debug .app\n"
          "make macos-run  # build and run the native Release app\n"
-         "make macos-run MACOS_RUN_ARGS=--verbose # enable runtime logs\n"
          "```\n\n"
          "The PSP targets require PSPSDK and `psp-config` in `PATH`. The "
-         "macOS target requires CMake and Apple Clang.\n\n"
+         "macOS target requires CMake, Apple Clang and Qt 6 base for desktop "
+         "system dialogs. Homebrew users can install it with "
+         "`brew install qtbase`.\n\n"
          "## Controls\n\n"
          "Native macOS builds support standard game controllers and a "
          "keyboard fallback: arrows = D-pad, WASD = analog stick, I/J/K/L = "
@@ -168,7 +169,8 @@ std::string generated_readme(const ExportConfig& config, InputKind kind,
 }
 
 std::string root_makefile(const ExportConfig& config, bool has_disc,
-                          std::string_view disc_executable) {
+                          std::string_view disc_executable,
+                          bool preserve_original_psp) {
   std::ostringstream out;
   out << "PPSSPP ?= ppsspp\n"
          "CMAKE ?= cmake\n"
@@ -183,7 +185,8 @@ std::string root_makefile(const ExportConfig& config, bool has_disc,
          "psp-binary:\n"
          "\t$(MAKE) -C src/generated\n\n";
   if (has_disc) {
-    out << "psp: psp-binary\n"
+    out << "psp:" << (preserve_original_psp ? "\n" : " psp-binary\n")
+        <<
            "\tsh tools/prepare_psp_run.sh\n"
            "\tsh tools/build_psp_iso.sh \"$(CURDIR)/.psprecomp/run\" "
            "\"$(CURDIR)/dist/"
@@ -206,6 +209,7 @@ std::string root_makefile(const ExportConfig& config, bool has_disc,
          "\t$(MAKE) macos MACOS_BUILD_TYPE=Debug\n\n"
          "macos-run: macos\n"
          "\tPSPRISM_DISC_ROOT=\"$(CURDIR)/disc\" "
+         "PSPRISM_DISC_IMAGE=\"$(CURDIR)/original/disc.iso\" "
          "PSPRISM_WRITABLE_ROOT=\"$(CURDIR)/.psprism/ms0\" "
          "\"$(CURDIR)/build/macos/"
       << config.project_name << ".app/Contents/MacOS/" << config.project_name
@@ -216,15 +220,18 @@ std::string root_makefile(const ExportConfig& config, bool has_disc,
          "\t$(CMAKE) -E rm -rf build/macos\n\n"
          "rebuild: clean all\n\n";
   if (has_disc) {
-    out << "disc-tree: psp-binary\n"
+    out << "disc-tree:"
+        << (preserve_original_psp ? "\n" : " psp-binary\n")
+        <<
            "\trm -rf dist/disc\n"
            "\tmkdir -p dist\n"
            "\tcp -R disc dist/disc\n"
-           "\tcp src/generated/"
-        << config.project_name << ".prx dist/disc/" << disc_executable
-        << "\n"
-           "\tcp src/generated/PARAM.SFO dist/disc/PSP_GAME/PARAM.SFO\n"
-           "\t@echo \"Prepared dist/disc with the recompiled executable.\"\n\n";
+        << (preserve_original_psp
+                ? "\t@echo \"Prepared dist/disc with the original fixed-address PSP executable.\"\n\n"
+                : "\tcp src/generated/" + config.project_name +
+                      ".prx dist/disc/" + std::string(disc_executable) +
+                      "\n\tcp src/generated/PARAM.SFO dist/disc/PSP_GAME/PARAM.SFO\n"
+                      "\t@echo \"Prepared dist/disc with the recompiled executable.\"\n\n");
   } else {
     out << "disc-tree:\n"
            "\t@echo \"disc-tree requires an ISO export.\"\n"
@@ -238,13 +245,13 @@ std::string root_makefile(const ExportConfig& config, bool has_disc,
          "\t@echo \"make macos      Build a native Release .app (-O3)\"\n"
          "\t@echo \"make macos-debug Build a native Debug .app\"\n"
          "\t@echo \"make macos-run  Build and launch the Release .app\"\n"
-         "\t@echo \"  Add MACOS_RUN_ARGS=--verbose for runtime logs\"\n"
          "\t@echo \"make clean      Remove compiler output\"\n";
   return out.str();
 }
 
 std::string psp_run_script(const ExportConfig& config,
-                           std::string_view disc_executable) {
+                           std::string_view disc_executable,
+                           bool preserve_original_psp) {
   const auto executable_name =
       std::filesystem::path(disc_executable).filename().string();
   std::ostringstream out;
@@ -282,12 +289,19 @@ std::string psp_run_script(const ExportConfig& config,
       << executable_name
       << "\" ] || ln -s \"$source\" \"$RUN/PSP_GAME/SYSDIR/${source##*/}\"\n"
          "done\n\n"
-         "cp \"$ROOT/src/generated/"
-      << config.project_name << ".prx\" \"$RUN/"
-      << std::filesystem::path(disc_executable).generic_string()
-      << "\"\n"
-         "cp \"$ROOT/src/generated/PARAM.SFO\" \"$RUN/PSP_GAME/PARAM.SFO\"\n"
-         "echo \"Prepared lightweight PPSSPP run tree at $RUN\"\n";
+      << (preserve_original_psp
+              ? "ln -s \"$DISC/" +
+                    std::filesystem::path(disc_executable).generic_string() +
+                    "\" \"$RUN/" +
+                    std::filesystem::path(disc_executable).generic_string() +
+                    "\"\nln -s \"$DISC/PSP_GAME/PARAM.SFO\" "
+                    "\"$RUN/PSP_GAME/PARAM.SFO\"\n"
+              : "cp \"$ROOT/src/generated/" + config.project_name +
+                    ".prx\" \"$RUN/" +
+                    std::filesystem::path(disc_executable).generic_string() +
+                    "\"\ncp \"$ROOT/src/generated/PARAM.SFO\" "
+                    "\"$RUN/PSP_GAME/PARAM.SFO\"\n")
+      << "echo \"Prepared lightweight PPSSPP run tree at $RUN\"\n";
   return out.str();
 }
 
@@ -500,6 +514,23 @@ ExportSummary export_codebase(const ExportConfig& config) {
           config.progress("Extracting the disc filesystem");
         }
         iso.extract_all(staging / "disc");
+        std::filesystem::create_directories(staging / "original");
+        std::filesystem::copy_file(config.input,
+                                   staging / "original" / "disc.iso");
+        std::ofstream sectors(staging / "original" / "disc-sectors.tsv",
+                              std::ios::binary | std::ios::trunc);
+        if (!sectors) {
+          throw std::runtime_error("cannot create disc sector metadata");
+        }
+        for (const auto& entry : iso.entries()) {
+          if (!entry.directory) {
+            sectors << entry.extent << '\t' << entry.path.generic_string()
+                    << '\n';
+          }
+        }
+        if (!sectors) {
+          throw std::runtime_error("cannot write disc sector metadata");
+        }
         if (executable.empty()) {
           executable = staging / "disc" / iso_executable->path;
         }
@@ -567,12 +598,15 @@ ExportSummary export_codebase(const ExportConfig& config) {
       config.progress("Writing project files");
     }
     const bool has_disc = info.kind == InputKind::iso && config.extract_disc;
+    const bool preserve_original_psp = elf.preferred_base != 0U;
     write_text(staging / "Makefile",
-               root_makefile(config, has_disc, info.executable_path));
+               root_makefile(config, has_disc, info.executable_path,
+                             preserve_original_psp));
     write_text(staging / "CMakeLists.txt", macos_cmake(config));
     if (has_disc) {
       write_text(staging / "tools" / "prepare_psp_run.sh",
-                 psp_run_script(config, info.executable_path));
+                 psp_run_script(config, info.executable_path,
+                                preserve_original_psp));
       write_text(staging / "tools" / "build_psp_iso.sh", psp_iso_script());
     }
     write_text(staging / ".gitignore",

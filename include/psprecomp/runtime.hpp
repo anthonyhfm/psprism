@@ -105,6 +105,9 @@ inline bool direct_address_ok(State& state, std::uint32_t address,
 }
 
 inline std::uint8_t load8(State& state, std::uint32_t address) {
+    if (auto* pointer = mapped_address(state, address, 1)) {
+        return *pointer;
+    }
     if (state.direct_memory_access) {
         if (!direct_address_ok(state, address, 1)) {
             return 0;
@@ -129,6 +132,10 @@ inline std::uint16_t load16(State& state, std::uint32_t address) {
         if (state.fault_pc == 0)
             state.fault_pc = state.pc;
         return 0;
+    }
+    if (auto* pointer = mapped_address(state, address, 2)) {
+        return static_cast<std::uint16_t>(pointer[0]) |
+               static_cast<std::uint16_t>(pointer[1]) << 8U;
     }
     if (state.direct_memory_access) {
         if (!direct_address_ok(state, address, 2)) {
@@ -163,6 +170,12 @@ inline std::uint32_t load32(State& state, std::uint32_t address) {
         if (state.fault_pc == 0)
             state.fault_pc = state.pc;
         return 0;
+    }
+    if (auto* pointer = mapped_address(state, address, 4)) {
+        return static_cast<std::uint32_t>(pointer[0]) |
+               static_cast<std::uint32_t>(pointer[1]) << 8U |
+               static_cast<std::uint32_t>(pointer[2]) << 16U |
+               static_cast<std::uint32_t>(pointer[3]) << 24U;
     }
     if (state.direct_memory_access) {
         if (!direct_address_ok(state, address, 4)) {
@@ -248,6 +261,10 @@ inline std::uint32_t instruction_jump_target(const State& state,
 }
 
 inline void store8(State& state, std::uint32_t address, std::uint8_t value) {
+    if (auto* pointer = mapped_address(state, address, 1)) {
+        *pointer = value;
+        return;
+    }
     if (state.direct_memory_access) {
         if (!direct_address_ok(state, address, 1)) {
             return;
@@ -272,6 +289,11 @@ inline void store16(State& state, std::uint32_t address, std::uint16_t value) {
         state.fault_address = address;
         if (state.fault_pc == 0)
             state.fault_pc = state.pc;
+        return;
+    }
+    if (auto* pointer = mapped_address(state, address, 2)) {
+        pointer[0] = static_cast<std::uint8_t>(value);
+        pointer[1] = static_cast<std::uint8_t>(value >> 8U);
         return;
     }
     if (state.direct_memory_access) {
@@ -307,6 +329,13 @@ inline void store32(State& state, std::uint32_t address, std::uint32_t value) {
         state.fault_address = address;
         if (state.fault_pc == 0)
             state.fault_pc = state.pc;
+        return;
+    }
+    if (auto* pointer = mapped_address(state, address, 4)) {
+        pointer[0] = static_cast<std::uint8_t>(value);
+        pointer[1] = static_cast<std::uint8_t>(value >> 8U);
+        pointer[2] = static_cast<std::uint8_t>(value >> 16U);
+        pointer[3] = static_cast<std::uint8_t>(value >> 24U);
         return;
     }
     if (state.direct_memory_access) {
@@ -365,15 +394,15 @@ inline void direct_store32(std::uint32_t address, std::uint32_t value) {
     *reinterpret_cast<volatile std::uint32_t*>(
         static_cast<std::uintptr_t>(address)) = value;
 }
-#define PSPRECOMP_LOAD8(state, address) ::psprecomp::direct_load8(address)
-#define PSPRECOMP_LOAD16(state, address) ::psprecomp::direct_load16(address)
-#define PSPRECOMP_LOAD32(state, address) ::psprecomp::direct_load32(address)
+#define PSPRECOMP_LOAD8(state, address) ::psprecomp::load8(state, address)
+#define PSPRECOMP_LOAD16(state, address) ::psprecomp::load16(state, address)
+#define PSPRECOMP_LOAD32(state, address) ::psprecomp::load32(state, address)
 #define PSPRECOMP_STORE8(state, address, value)                                \
-    ::psprecomp::direct_store8(address, value)
+    ::psprecomp::store8(state, address, value)
 #define PSPRECOMP_STORE16(state, address, value)                               \
-    ::psprecomp::direct_store16(address, value)
+    ::psprecomp::store16(state, address, value)
 #define PSPRECOMP_STORE32(state, address, value)                               \
-    ::psprecomp::direct_store32(address, value)
+    ::psprecomp::store32(state, address, value)
 #else
 #define PSPRECOMP_LOAD8(state, address) ::psprecomp::load8(state, address)
 #define PSPRECOMP_LOAD16(state, address) ::psprecomp::load16(state, address)
@@ -385,6 +414,36 @@ inline void direct_store32(std::uint32_t address, std::uint32_t value) {
 #define PSPRECOMP_STORE32(state, address, value)                               \
     ::psprecomp::store32(state, address, value)
 #endif
+
+inline std::uint32_t load_word_left(State& state, std::uint32_t address,
+                                    std::uint32_t value) {
+    const auto offset = address & 3U;
+    const auto aligned = address & ~3U;
+    for (std::uint32_t i = 0; i <= offset; ++i) {
+        const auto shift = 8U * (3U - offset + i);
+        const auto mask = 0xffU << shift;
+        value = (value & ~mask) |
+                (static_cast<std::uint32_t>(
+                     PSPRECOMP_LOAD8(state, aligned + i))
+                 << shift);
+    }
+    return value;
+}
+
+inline std::uint32_t load_word_right(State& state, std::uint32_t address,
+                                     std::uint32_t value) {
+    const auto offset = address & 3U;
+    const auto aligned = address & ~3U;
+    for (std::uint32_t i = offset; i < 4U; ++i) {
+        const auto shift = 8U * (i - offset);
+        const auto mask = 0xffU << shift;
+        value = (value & ~mask) |
+                (static_cast<std::uint32_t>(
+                     PSPRECOMP_LOAD8(state, aligned + i))
+                 << shift);
+    }
+    return value;
+}
 
 inline void store_word_left(State& state, std::uint32_t address,
                             std::uint32_t value) {

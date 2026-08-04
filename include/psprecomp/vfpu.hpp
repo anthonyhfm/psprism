@@ -7,6 +7,7 @@
 #include <bit>
 #include <cmath>
 #include <cstdint>
+#include <limits>
 
 namespace psprecomp {
 
@@ -21,13 +22,16 @@ inline constexpr bool vfpu_opcode_supported(std::uint32_t instruction) {
         return sub3 == 0 || sub3 == 1;
     }
     if (op == 0x19) {
-        return sub3 == 1 || sub3 == 2;
+        return sub3 <= 2 ||
+               (instruction & 0xff808080U) == 0x66808000U;
     }
     if (op == 0x1b) {
-        return sub3 == 0 || sub3 == 2 || sub3 == 3;
+        return sub3 == 0 || sub3 == 2 || sub3 == 3 ||
+               (instruction & 0xff808080U) == 0x6e808000U ||
+               (instruction & 0xff808080U) == 0x6f808080U;
     }
-    if (op == 0x32 || op == 0x36 || op == 0x3a || op == 0x3e ||
-        op == 0x3f) {
+    if (op == 0x32 || op == 0x35 || op == 0x36 || op == 0x3a ||
+        op == 0x3d || op == 0x3e || op == 0x3f) {
         return true;
     }
     if (op == 0x37) {
@@ -37,21 +41,31 @@ inline constexpr bool vfpu_opcode_supported(std::uint32_t instruction) {
         const auto group = (instruction >> 21U) & 31U;
         const auto type = (instruction >> 16U) & 31U;
         if (group == 0) {
-            return type == 0 || type == 1 || type == 2 || type == 6 ||
-                   type == 7 || (type >= 16 && type <= 19);
+            return type == 0 || type == 1 || type == 2 || type == 4 ||
+                   type == 5 || type == 6 ||
+                   type == 7 || (type >= 16 && type <= 22);
         }
         if (group == 1) {
-            return type == 28 || type == 29;
+            return type >= 24;
         }
         if (group == 2) {
-            return type == 25;
+            return type == 1 || type == 6 || type == 9 || type == 10 ||
+                   type == 25;
         }
-        return group >= 16 && group <= 19;
+        if (group == 3) {
+            return type <= 19;
+        }
+        return group >= 16 && group <= 20;
     }
     if (op == 0x3c) {
         const auto group = (instruction >> 21U) & 31U;
         return group <= 3 || (group >= 12 && group <= 15) ||
-               (group >= 20 && group <= 23);
+               (group >= 20 && group <= 23) ||
+               (instruction & 0xff808080U) == 0xf1008000U ||
+               (instruction & 0xff808080U) == 0xf2008080U ||
+               (instruction & 0xffff0000U) == 0xf3800000U ||
+               (instruction & 0xffffff80U) == 0xf3838080U ||
+               (instruction & 0xffffff80U) == 0xf3868080U;
     }
     return false;
 }
@@ -283,6 +297,42 @@ inline void execute_vfpu(State& state, std::uint32_t instruction,
         }
         return;
     }
+    if (op == 0x35 || op == 0x3d) {
+        const auto base = (instruction >> 21U) & 31U;
+        const auto reg = ((instruction >> 16U) & 31U) |
+                         ((instruction & 1U) << 5U);
+        const auto offset = static_cast<std::int32_t>(
+            static_cast<std::int16_t>(instruction & 0xfffcU));
+        const auto address = state.gpr[base] + static_cast<std::uint32_t>(offset);
+        const auto word_offset = (address >> 2U) & 3U;
+        float values[4]{};
+        vfpu_read_vector(state, reg, 4, values);
+        if (op == 0x35) {
+            if ((instruction & 2U) == 0U) {
+                for (std::uint32_t i = 0; i <= word_offset; ++i) {
+                    values[3U - i] = std::bit_cast<float>(
+                        PSPRECOMP_LOAD32(state, address - i * 4U));
+                }
+            } else {
+                for (std::uint32_t i = 0; i <= 3U - word_offset; ++i) {
+                    values[i] = std::bit_cast<float>(
+                        PSPRECOMP_LOAD32(state, address + i * 4U));
+                }
+            }
+            vfpu_write_vector(state, reg, 4, values);
+        } else if ((instruction & 2U) == 0U) {
+            for (std::uint32_t i = 0; i <= word_offset; ++i) {
+                PSPRECOMP_STORE32(state, address - i * 4U,
+                                  std::bit_cast<std::uint32_t>(values[3U - i]));
+            }
+        } else {
+            for (std::uint32_t i = 0; i <= 3U - word_offset; ++i) {
+                PSPRECOMP_STORE32(state, address + i * 4U,
+                                  std::bit_cast<std::uint32_t>(values[i]));
+            }
+        }
+        return;
+    }
     if (op == 0x36 || op == 0x3e) {
         const auto base = (instruction >> 21U) & 31U;
         const auto reg = ((instruction >> 16U) & 31U) | ((instruction & 1U) << 5U);
@@ -340,7 +390,15 @@ inline void execute_vfpu(State& state, std::uint32_t instruction,
         }
     } else if (op == 0x19) {
         const auto type = (instruction >> 23U) & 7U;
-        if (type == 1) {
+        if ((instruction & 0xff808080U) == 0x66808000U) {
+            result[0] = source[1] * target[2];
+            result[1] = source[2] * target[0];
+            result[2] = source[0] * target[1];
+        } else if (type == 0) {
+            for (int i = 0; i < size; ++i) {
+                result[i] = source[i] * target[i];
+            }
+        } else if (type == 1) {
             for (int i = 0; i < size; ++i) {
                 result[0] += source[i] * target[i];
             }
@@ -348,16 +406,27 @@ inline void execute_vfpu(State& state, std::uint32_t instruction,
             vfpu_write_vector(state, vd, 1, result);
             vfpu_eat_prefixes(state);
             return;
-        }
-        float scalar[4]{};
-        vfpu_read_vector(state, vt, 1, scalar);
-        vfpu_apply_prefix(scalar, 1, state.vfpu_ctrl[1]);
-        for (int i = 0; i < size; ++i) {
-            result[i] = source[i] * scalar[0];
+        } else {
+            float scalar[4]{};
+            vfpu_read_vector(state, vt, 1, scalar);
+            vfpu_apply_prefix(scalar, 1, state.vfpu_ctrl[1]);
+            for (int i = 0; i < size; ++i) {
+                result[i] = source[i] * scalar[0];
+            }
         }
     } else if (op == 0x1b) {
         const auto type = (instruction >> 23U) & 7U;
-        if (type == 0) {
+        if ((instruction & 0xff808080U) == 0x6e808000U) {
+            for (int i = 0; i < size; ++i) {
+                result[i] = source[i] > target[i] ? 1.0F
+                            : source[i] < target[i] ? -1.0F
+                                                    : 0.0F;
+            }
+        } else if ((instruction & 0xff808080U) == 0x6f808080U) {
+            for (int i = 0; i < size; ++i) {
+                result[i] = source[i] < target[i] ? 1.0F : 0.0F;
+            }
+        } else if (type == 0) {
             const auto condition_code = instruction & 15U;
             std::uint32_t cc = 0;
             bool any = false;
@@ -400,17 +469,131 @@ inline void execute_vfpu(State& state, std::uint32_t instruction,
     } else if (op == 0x34) {
         const auto group = (instruction >> 21U) & 31U;
         const auto type = (instruction >> 16U) & 31U;
-        if (group == 0) {
+        if (group == 3 && type <= 19) {
+            constexpr std::array<float, 20> constants = {
+                0.0F,
+                std::numeric_limits<float>::max(),
+                1.4142135623730951F,
+                0.7071067811865476F,
+                1.1283791670955126F,
+                0.6366197723675813F,
+                0.3183098861837907F,
+                0.7853981633974483F,
+                1.5707963267948966F,
+                3.1415926535897932F,
+                2.7182818284590452F,
+                1.4426950408889634F,
+                0.4342944819032518F,
+                0.6931471805599453F,
+                2.302585092994046F,
+                6.2831853071795865F,
+                0.5235987755982989F,
+                0.3010299956639812F,
+                3.3219280948873623F,
+                0.8660254037844386F,
+            };
+            for (int i = 0; i < size; ++i) {
+                result[i] = constants[type];
+            }
+        } else if (group == 2 && type == 10) {
+            for (int i = 0; i < size; ++i) {
+                result[i] = source[i] > 0.0F ? 1.0F
+                            : source[i] < 0.0F ? -1.0F
+                                               : 0.0F;
+            }
+        } else if (group == 2 && type == 6) {
+            for (int i = 0; i < size; ++i) {
+                result[0] += source[i];
+            }
+            vfpu_apply_destination_prefix(state, result, 1);
+            vfpu_write_vector(state, vd, 1, result);
+            vfpu_eat_prefixes(state);
+            return;
+        } else if (group == 2 && type == 1) {
+            result[0] = std::min(source[0], source[3]);
+            result[1] = std::min(source[1], source[2]);
+            result[2] = std::max(source[1], source[2]);
+            result[3] = std::max(source[0], source[3]);
+        } else if (group == 2 && type == 9) {
+            result[0] = std::max(source[0], source[3]);
+            result[1] = std::max(source[1], source[2]);
+            result[2] = std::min(source[1], source[2]);
+            result[3] = std::min(source[0], source[3]);
+        } else if (group == 1 && (type == 26 || type == 27)) {
+            const auto input_size = std::min(size, 2);
+            const auto output_size = input_size * 2;
+            for (int i = 0; i < input_size; ++i) {
+                const auto packed = std::bit_cast<std::uint32_t>(source[i]);
+                if (type == 26) {
+                    result[i * 2] = std::bit_cast<float>((packed & 0xffffU) << 15U);
+                    result[i * 2 + 1] =
+                        std::bit_cast<float>((packed & 0xffff0000U) >> 1U);
+                } else {
+                    result[i * 2] = std::bit_cast<float>((packed & 0xffffU) << 16U);
+                    result[i * 2 + 1] =
+                        std::bit_cast<float>(packed & 0xffff0000U);
+                }
+            }
+            vfpu_apply_destination_prefix(state, result, output_size, false);
+            vfpu_write_vector(state, vd, output_size, result);
+            vfpu_eat_prefixes(state);
+            return;
+        } else if (group == 1 && (type == 30 || type == 31)) {
+            const auto output_size = (size + 1) / 2;
+            for (int i = 0; i < output_size; ++i) {
+                const auto low_bits = std::bit_cast<std::uint32_t>(source[i * 2]);
+                const auto high_bits = i * 2 + 1 < size
+                                           ? std::bit_cast<std::uint32_t>(
+                                                 source[i * 2 + 1])
+                                           : 0U;
+                std::uint32_t low{};
+                std::uint32_t high{};
+                if (type == 30) {
+                    low = std::bit_cast<std::int32_t>(low_bits) < 0
+                              ? 0U
+                              : low_bits >> 15U;
+                    high = std::bit_cast<std::int32_t>(high_bits) < 0
+                               ? 0U
+                               : high_bits >> 15U;
+                } else {
+                    low = low_bits >> 16U;
+                    high = high_bits >> 16U;
+                }
+                result[i] = std::bit_cast<float>(low | (high << 16U));
+            }
+            vfpu_apply_destination_prefix(state, result, output_size, false);
+            vfpu_write_vector(state, vd, output_size, result);
+            vfpu_eat_prefixes(state);
+            return;
+        } else if (group == 1 && (type == 24 || type == 25)) {
+            const auto packed = std::bit_cast<std::uint32_t>(source[0]);
+            for (int i = 0; i < 4; ++i) {
+                const auto byte = (packed >> (i * 8)) & 0xffU;
+                const auto expanded = type == 24
+                                          ? (byte * 0x01010101U) >> 1U
+                                          : byte << 24U;
+                result[i] = std::bit_cast<float>(expanded);
+            }
+            vfpu_apply_destination_prefix(state, result, 4, false);
+            vfpu_write_vector(state, vd, 4, result);
+            vfpu_eat_prefixes(state);
+            return;
+        } else if (group == 0) {
             for (int i = 0; i < size; ++i) {
                 if (type == 0) result[i] = source[i];
                 else if (type == 1) result[i] = std::fabs(source[i]);
                 else if (type == 2) result[i] = -source[i];
+                else if (type == 4) result[i] = std::clamp(source[i], 0.0F, 1.0F);
+                else if (type == 5) result[i] = std::clamp(source[i], -1.0F, 1.0F);
                 else if (type == 6) result[i] = 0.0F;
                 else if (type == 7) result[i] = 1.0F;
                 else if (type == 16) result[i] = 1.0F / source[i];
                 else if (type == 17) result[i] = 1.0F / std::sqrt(source[i]);
                 else if (type == 18) result[i] = std::sin(source[i] * 1.5707963267948966F);
                 else if (type == 19) result[i] = std::cos(source[i] * 1.5707963267948966F);
+                else if (type == 20) result[i] = std::exp2(source[i]);
+                else if (type == 21) result[i] = std::log2(source[i]);
+                else if (type == 22) result[i] = std::sqrt(source[i]);
             }
         } else if (group >= 16 && group <= 19) {
             const auto scale = std::ldexp(1.0F, static_cast<int>(type));
@@ -421,6 +604,13 @@ inline void execute_vfpu(State& state, std::uint32_t instruction,
                     static_cast<std::uint32_t>(static_cast<std::int32_t>(value)));
             }
             vfpu_apply_destination_prefix(state, result, size, false);
+        } else if (group == 20) {
+            const auto scale = std::ldexp(1.0F, -static_cast<int>(type));
+            for (int i = 0; i < size; ++i) {
+                result[i] = static_cast<float>(
+                                std::bit_cast<std::int32_t>(source[i])) *
+                            scale;
+            }
         } else if (group == 1 && (type == 28 || type == 29)) {
             std::uint32_t packed = 0;
             for (int i = 0; i < 4; ++i) {
@@ -457,6 +647,40 @@ inline void execute_vfpu(State& state, std::uint32_t instruction,
         }
     } else if (op == 0x3c) {
         const auto group = (instruction >> 21U) & 31U;
+        if ((instruction & 0xffff0000U) == 0xf3800000U && size >= 2) {
+            float matrix[16]{};
+            vfpu_read_matrix(state, vs, size, matrix);
+            vfpu_write_matrix(state, vd, size, matrix);
+            vfpu_eat_prefixes(state);
+            return;
+        }
+        if ((instruction & 0xff808080U) == 0xf2008080U) {
+            float matrix[16]{}, scalar[4]{};
+            vfpu_read_matrix(state, vs, 4, matrix);
+            vfpu_read_vector(state, vt, 1, scalar);
+            vfpu_apply_prefix(scalar, 1, state.vfpu_ctrl[1]);
+            for (float& value : matrix) {
+                value *= scalar[0];
+            }
+            vfpu_write_matrix(state, vd, 4, matrix);
+            vfpu_eat_prefixes(state);
+            return;
+        }
+        if ((instruction & 0xffffff80U) == 0xf3838080U) {
+            float matrix[16]{};
+            for (int i = 0; i < 4; ++i) {
+                matrix[i * 4 + i] = 1.0F;
+            }
+            vfpu_write_matrix(state, vd, 4, matrix);
+            vfpu_eat_prefixes(state);
+            return;
+        }
+        if ((instruction & 0xffffff80U) == 0xf3868080U) {
+            float matrix[16]{};
+            vfpu_write_matrix(state, vd, 4, matrix);
+            vfpu_eat_prefixes(state);
+            return;
+        }
         if (group <= 3) {
             float left[16]{}, right[16]{}, product[16]{};
             vfpu_read_matrix(state, vs, size, left);
@@ -470,6 +694,19 @@ inline void execute_vfpu(State& state, std::uint32_t instruction,
                 }
             }
             vfpu_write_matrix(state, vd, size, product);
+            vfpu_eat_prefixes(state);
+            return;
+        }
+        if ((instruction & 0xff808080U) == 0xf1008000U) {
+            float matrix[16]{}, vector[4]{}, transformed[4]{};
+            vfpu_read_matrix(state, vs, 3, matrix);
+            vfpu_read_vector(state, vt, 3, vector);
+            for (int row = 0; row < 3; ++row) {
+                for (int i = 0; i < 3; ++i) {
+                    transformed[row] += matrix[row * 4 + i] * vector[i];
+                }
+            }
+            vfpu_write_vector(state, vd, 3, transformed);
             vfpu_eat_prefixes(state);
             return;
         }

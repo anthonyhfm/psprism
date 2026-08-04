@@ -156,6 +156,25 @@ ElfImage load_elf(const std::filesystem::path& path) {
                                        data.begin() + file_offset + file_size)});
     }
 
+    constexpr std::uint32_t psp_user_base = 0x08000000U;
+    constexpr std::uint32_t psp_user_end = 0x0c000000U;
+    if (!image.load_segments.empty() &&
+        std::all_of(image.load_segments.begin(), image.load_segments.end(),
+                    [](const LoadSegment& segment) {
+                        return segment.address >= psp_user_base &&
+                               segment.address < psp_user_end &&
+                               segment.memory_size <= psp_user_end - segment.address;
+                    })) {
+        image.preferred_base = psp_user_base;
+        if (image.entry < image.preferred_base) {
+            throw std::runtime_error("fixed PSP ELF entry is below user memory");
+        }
+        image.entry -= image.preferred_base;
+        for (auto& segment : image.load_segments) {
+            segment.address -= image.preferred_base;
+        }
+    }
+
     const auto section_offset = u32(data, 32);
     const auto section_entry_size = u16(data, 46);
     const auto section_count = u16(data, 48);
@@ -191,10 +210,12 @@ ElfImage load_elf(const std::filesystem::path& path) {
         data.begin() + string_header.offset + string_header.size);
 
     constexpr std::uint32_t sht_progbits = 1;
+    constexpr std::uint32_t shf_write = 1;
     constexpr std::uint32_t shf_execinstr = 4;
     for (const auto& header : headers) {
         if (header.type != sht_progbits ||
-            (header.flags & shf_execinstr) == 0 || header.size == 0) {
+            (header.flags & (shf_execinstr | shf_write)) == 0 ||
+            header.size == 0) {
             continue;
         }
         if (header.offset > data.size() ||
@@ -205,7 +226,8 @@ ElfImage load_elf(const std::filesystem::path& path) {
             throw std::runtime_error("executable section is not word-aligned");
         }
         image.executable_sections.push_back(
-            {string_at(names, header.name), header.address,
+            {string_at(names, header.name),
+             header.address - image.preferred_base,
              std::vector<std::uint8_t>(data.begin() + header.offset,
                                        data.begin() + header.offset +
                                            header.size)});
@@ -235,10 +257,17 @@ ElfImage load_elf(const std::filesystem::path& path) {
     }
 
     const auto flat_image = image.memory_image();
+    const auto image_offset = [&](std::uint32_t address) {
+        if (address < image.preferred_base) {
+            throw std::runtime_error("PSP address is below the image base");
+        }
+        return address - image.preferred_base;
+    };
     const auto image_u32 = [&](std::uint32_t address) {
-        return u32(flat_image, address);
+        return u32(flat_image, image_offset(address));
     };
     const auto image_string = [&](std::uint32_t address) {
+        address = image_offset(address);
         if (address >= flat_image.size()) {
             throw std::runtime_error("PSP import string is outside load image");
         }
@@ -259,8 +288,8 @@ ElfImage load_elf(const std::filesystem::path& path) {
             header.size < 0x34) {
             continue;
         }
-        const auto stub_begin = image_u32(header.address + 0x2c);
-        const auto stub_end = image_u32(header.address + 0x30);
+        const auto stub_begin = image_offset(image_u32(header.address + 0x2c));
+        const auto stub_end = image_offset(image_u32(header.address + 0x30));
         if (stub_begin > stub_end || stub_end > flat_image.size()) {
             throw std::runtime_error("invalid PSP module import-table range");
         }
@@ -269,11 +298,11 @@ ElfImage load_elf(const std::filesystem::path& path) {
             if (cursor > flat_image.size() || flat_image.size() - cursor < 20) {
                 throw std::runtime_error("truncated PSP import table");
             }
-            const auto library_address = image_u32(cursor);
+            const auto library_address = u32(flat_image, cursor);
             const auto length_words = flat_image[cursor + 8];
             const auto function_count = u16(flat_image, cursor + 10);
-            const auto nid_table = image_u32(cursor + 12);
-            const auto stub_table = image_u32(cursor + 16);
+            const auto nid_table = u32(flat_image, cursor + 12);
+            const auto stub_table = u32(flat_image, cursor + 16);
             if (length_words < 5 ||
                 static_cast<std::uint32_t>(length_words) * 4U > stub_end - cursor) {
                 throw std::runtime_error("invalid PSP import-table length");
@@ -282,7 +311,8 @@ ElfImage load_elf(const std::filesystem::path& path) {
             for (std::uint16_t i = 0; i < function_count; ++i) {
                 image.imports.push_back(
                     {library, image_u32(nid_table + i * 4U),
-                     stub_table + static_cast<std::uint32_t>(i) * 8U});
+                     image_offset(stub_table) +
+                         static_cast<std::uint32_t>(i) * 8U});
             }
             cursor += static_cast<std::uint32_t>(length_words) * 4U;
         }
