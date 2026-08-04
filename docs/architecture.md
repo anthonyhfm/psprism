@@ -13,8 +13,8 @@ ISO 9660 or ELF/PRX
     -> Allegrex instruction decoder
     -> address and function metadata
     -> portable C++ emitter
-    -> CPU runtime and platform bridge
-    -> PSPSDK PRX today, additional backends later
+    -> CPU runtime and generated platform contract
+    -> platform/psp (PSPSDK PRX/ISO) or platform/macos (native Debug app)
 ```
 
 ## Loader and relocated image
@@ -84,14 +84,22 @@ Guest memory image.
 ## Portability boundary
 
 Instruction semantics and generated CPU code must not depend on PSPSDK headers.
-PSP-specific module metadata, import calls, thread creation and direct-address
-behavior belong to generated platform glue. A future desktop backend can keep
-the same Guest state and generated functions while replacing those services
-with an HLE/platform implementation.
+Every discovered import becomes an `ImportId` in `platform/platform.h`.
+Generated dispatch code calls the small `configure_runtime`, `patch_imports`,
+`dispatch_import` and logging interface from that header; it never names an SCE
+function directly.
+
+`platform/psp` owns module metadata, the MIPS ABI bridge, native thread
+trampolines and bindings for every resolved SCE import. `platform/macos` owns a
+native `.app` entry point and the parallel host implementation. Imports that do
+not yet have desktop behavior are explicit logging stubs returning a PSP-style
+unsupported-operation result, making missing platform work visible without
+leaking PSP SDK dependencies back into translated CPU code.
 
 ## Export boundary
 
-The low-level emitter only creates translated sources and PSP platform glue.
+The low-level emitter creates translated sources plus PSP and macOS platform
+glue.
 The project exporter wraps that output in a stable, beginner-facing codebase:
 it vendors the portable headers, records inputs and choices in `project.toml`,
 copies the optional code map, writes build documentation, and includes the disc
@@ -105,6 +113,7 @@ does not leave a plausible-looking partial project.
 - Compile synthetic C with PSPSDK, recompile it to C++, and compare it with the
   native reference implementation.
 - Compile the same generated C++ back to a PSP PRX and package an EBOOT.
+- Build the self-contained export as a native macOS Debug application.
 - Compare register, memory and import traces between original and recompiled
   programs.
 - Treat PPSSPP and physical PSP hardware as independent validation targets.

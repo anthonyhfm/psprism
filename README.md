@@ -67,11 +67,15 @@ the remaining project choices and produces a self-contained codebase:
 ```text
 my_game/
 ├── Makefile                 one-command build entry point
+├── CMakeLists.txt           native macOS Debug app build
 ├── README.md                generated project guide
 ├── project.toml             reproducible project metadata
 ├── config/code.map          optional copied function metadata
 ├── include/psprecomp/       vendored portable runtime
-├── src/generated/           generated C++ functions and PSP glue
+├── platform/platform.h      imported PSP API contract
+├── platform/psp/            PSP entry point and SCE implementations
+├── platform/macos/          native entry point and host implementations
+├── src/generated/           platform-independent generated C++ functions
 ├── disc/                    complete extracted ISO filesystem
 └── original/                input executable for non-ISO exports
 ```
@@ -80,12 +84,13 @@ Build it without referring back to this repository:
 
 ```sh
 cd my_game
-make ppsspp
+make psp-run
 ```
 
-That command builds the recompilation, prepares a lightweight run tree for ISO
-exports and launches it through the `ppsspp` CLI. Use `make -j` to build
-without launching the emulator.
+Use `make psp` to produce the PSP PRX, EBOOT and rebuilt ISO without launching
+the emulator. `make macos` builds a native Debug `.app`; `make macos-run` builds
+and executes that app. Platform-specific replacements for imported PSP APIs
+live outside the generated CPU code under `platform/`.
 
 For scripts and automation, use the same workflow without prompts:
 

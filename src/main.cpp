@@ -274,7 +274,7 @@ int run_init(InitArguments arguments) {
   }
   std::cout << "\nNext steps:\n"
             << "  cd \"" << summary.output_directory.string() << "\"\n"
-            << "  make -j\n";
+            << "  make psp-run\n";
   return 0;
 }
 

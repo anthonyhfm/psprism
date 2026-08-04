@@ -7,14 +7,14 @@ extern "C" unsigned recomp_test(unsigned a, unsigned b);
 
 namespace psprecomp::generated {
 void run(State&, std::uint32_t return_address, std::uint64_t max_steps);
+}
 
-// Project-mode dispatch normally resolves PSP imports in imports.cpp.  The
-// arithmetic fixture has no imports, so its native runner provides the empty
-// bridge and can exercise the fast generated shard directly.
-bool dispatch_import(State&, std::uint32_t) {
-    return false;
-}
-}
+// Project-mode dispatch normally resolves imports through platform/platform.h.
+// The arithmetic fixture has no imports, so its native runner supplies the
+// empty platform bridge and can exercise the generated shard directly.
+namespace psprecomp::platform {
+bool dispatch_import(State&, std::uint32_t) { return false; }
+} // namespace psprecomp::platform
 
 int main() {
 #ifndef PSPRECOMP_TEST_ENTRY
@@ -23,8 +23,11 @@ int main() {
     constexpr std::uint32_t entry = PSPRECOMP_TEST_ENTRY;
     constexpr std::uint32_t return_address = 0xfffffff0U;
     constexpr std::uint32_t inputs[][2] = {
-        {0, 0}, {1, 2}, {0xffffffffU, 0x12345678U},
-        {0xdeadbeefU, 0xc001d00dU}, {42, 9001},
+        {0, 0},
+        {1, 2},
+        {0xffffffffU, 0x12345678U},
+        {0xdeadbeefU, 0xc001d00dU},
+        {42, 9001},
     };
 
     for (const auto& input : inputs) {

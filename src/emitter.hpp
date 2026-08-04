@@ -12,6 +12,7 @@ struct GeneratedProjectOptions {
   std::string module_name{"psp_recompiled"};
   std::string target_name{"psp_recompiled"};
   std::string include_path{"../../include"};
+  std::filesystem::path platform_directory;
   std::uint32_t shard_size{0x4000U};
 };
 

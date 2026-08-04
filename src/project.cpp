@@ -127,17 +127,24 @@ std::string generated_readme(const ExportConfig &config, InputKind kind,
          "This is a complete PSPRecomp export. It contains the generated C++ "
          "code, a vendored runtime, project metadata and build helpers.\n\n"
          "## Build\n\n"
-         "Install PSPSDK and make sure `psp-config` is in `PATH`, then run:\n\n"
-         "```sh\nmake ppsspp\n```\n\n"
-         "This builds the game, prepares a lightweight PPSSPP run tree and "
-         "launches it with the `ppsspp` command. Use `make -j` when you only "
-         "want to build.\n\n"
+         "The generated codebase has one command per target platform:\n\n"
+         "```sh\n"
+         "make psp        # build PSP output (plus ISO for disc exports)\n"
+         "make psp-run    # build and launch through the PPSSPP CLI\n"
+         "make macos      # build a native Debug .app\n"
+         "make macos-run  # build and run the native Debug app\n"
+         "```\n\n"
+         "The PSP targets require PSPSDK and `psp-config` in `PATH`. The "
+         "macOS target requires CMake and Apple Clang.\n\n"
          "The resulting `EBOOT.PBP` and PRX are written below "
          "`src/generated/`. Run `make disc-tree` to create a copy of the "
          "extracted disc with its executable replaced by the recompiled "
          "PRX.\n\n"
          "## Layout\n\n"
-         "- `src/generated/`: generated functions, dispatcher and PSP entry\n"
+         "- `src/generated/`: platform-independent functions and dispatcher\n"
+         "- `platform/platform.h`: complete imported-API contract\n"
+         "- `platform/psp/`: PSP entry point, ABI bridge and real SCE calls\n"
+         "- `platform/macos/`: native entry point and replaceable host stubs\n"
          "- `include/psprecomp/`: portable runtime used by generated code\n"
          "- `config/`: the optional code map used for this export\n"
          "- `disc/`: extracted original disc filesystem (ISO inputs only)\n"
@@ -155,18 +162,45 @@ std::string generated_readme(const ExportConfig &config, InputKind kind,
 std::string root_makefile(const ExportConfig &config, bool has_disc,
                           std::string_view disc_executable) {
   std::ostringstream out;
-  out << "PPSSPP ?= ppsspp\n\n"
-         ".PHONY: all clean rebuild ppsspp disc-tree help\n\n"
-         "all:\n"
-         "\t$(MAKE) -C src/generated\n\n"
+  out << "PPSSPP ?= ppsspp\n"
+         "CMAKE ?= cmake\n"
+         "\n"
+         ".PHONY: all psp-binary psp psp-run macos macos-run clean rebuild "
+         "ppsspp "
+         "disc-tree help\n\n"
+         "all: psp\n\n"
+         "psp-binary:\n"
+         "\t$(MAKE) -C src/generated\n\n";
+  if (has_disc) {
+    out << "psp: psp-binary\n"
+           "\tsh tools/prepare_psp_run.sh\n"
+           "\tsh tools/build_psp_iso.sh \"$(CURDIR)/.psprecomp/run\" "
+           "\"$(CURDIR)/dist/"
+        << config.project_name
+        << ".iso\"\n\n"
+           "psp-run: psp\n"
+           "\t$(PPSSPP) \"$(CURDIR)/.psprecomp/run\"\n\n";
+  } else {
+    out << "psp: psp-binary\n"
+           "\t@echo \"Built src/generated/EBOOT.PBP (an ISO input is "
+           "required to create a disc image).\"\n\n"
+           "psp-run: psp\n"
+           "\t$(PPSSPP) \"$(CURDIR)/src/generated/EBOOT.PBP\"\n\n";
+  }
+  out << "macos:\n"
+         "\t$(CMAKE) -S . -B build/macos -DCMAKE_BUILD_TYPE=Debug\n"
+         "\t$(CMAKE) --build build/macos -j\n\n"
+         "macos-run: macos\n"
+         "\t\"$(CURDIR)/build/macos/"
+      << config.project_name << ".app/Contents/MacOS/" << config.project_name
+      << "\"\n\n"
+         "ppsspp: psp-run\n\n"
          "clean:\n"
-         "\t$(MAKE) -C src/generated clean\n\n"
+         "\t$(MAKE) -C src/generated clean\n"
+         "\t$(CMAKE) -E rm -rf build/macos\n\n"
          "rebuild: clean all\n\n";
   if (has_disc) {
-    out << "ppsspp: all\n"
-           "\tsh tools/prepare_ppsspp_run.sh\n"
-           "\t$(PPSSPP) \"$(CURDIR)/.psprecomp/run\"\n\n"
-           "disc-tree: all\n"
+    out << "disc-tree: psp-binary\n"
            "\trm -rf dist/disc\n"
            "\tmkdir -p dist\n"
            "\tcp -R disc dist/disc\n"
@@ -176,22 +210,23 @@ std::string root_makefile(const ExportConfig &config, bool has_disc,
            "\tcp src/generated/PARAM.SFO dist/disc/PSP_GAME/PARAM.SFO\n"
            "\t@echo \"Prepared dist/disc with the recompiled executable.\"\n\n";
   } else {
-    out << "ppsspp: all\n"
-           "\t$(PPSSPP) \"$(CURDIR)/src/generated/EBOOT.PBP\"\n\n"
-           "disc-tree:\n"
+    out << "disc-tree:\n"
            "\t@echo \"disc-tree requires an ISO export.\"\n"
            "\t@false\n\n";
   }
   out << "help:\n"
-         "\t@echo \"make          Build PRX and EBOOT.PBP\"\n"
-         "\t@echo \"make ppsspp   Build and launch the game in PPSSPP\"\n"
-         "\t@echo \"make clean    Remove compiler output\"\n"
-         "\t@echo \"make disc-tree  Prepare a rebuilt disc tree\"\n";
+         "\t@echo \"make psp        Build the PSP PRX and EBOOT"
+      << (has_disc ? " plus ISO" : "")
+      << "\"\n"
+         "\t@echo \"make psp-run    Build PSP and launch it in PPSSPP\"\n"
+         "\t@echo \"make macos      Build a native Debug .app\"\n"
+         "\t@echo \"make macos-run  Build and launch the Debug .app\"\n"
+         "\t@echo \"make clean      Remove compiler output\"\n";
   return out.str();
 }
 
-std::string ppsspp_run_script(const ExportConfig &config,
-                              std::string_view disc_executable) {
+std::string psp_run_script(const ExportConfig &config,
+                           std::string_view disc_executable) {
   const auto executable_name =
       std::filesystem::path(disc_executable).filename().string();
   std::ostringstream out;
@@ -235,6 +270,82 @@ std::string ppsspp_run_script(const ExportConfig &config,
       << "\"\n"
          "cp \"$ROOT/src/generated/PARAM.SFO\" \"$RUN/PSP_GAME/PARAM.SFO\"\n"
          "echo \"Prepared lightweight PPSSPP run tree at $RUN\"\n";
+  return out.str();
+}
+
+std::string psp_iso_script() {
+  return R"SH(#!/bin/sh
+set -eu
+
+SOURCE=$1
+OUTPUT=$2
+mkdir -p "$(dirname -- "$OUTPUT")"
+
+if command -v xorriso >/dev/null 2>&1; then
+  xorriso -as mkisofs -follow-links -iso-level 3 -V PSP_RECOMP \
+    -o "$OUTPUT" "$SOURCE"
+elif command -v mkisofs >/dev/null 2>&1; then
+  mkisofs -follow-links -iso-level 3 -V PSP_RECOMP -o "$OUTPUT" "$SOURCE"
+elif command -v hdiutil >/dev/null 2>&1; then
+  STATE=$(dirname -- "$SOURCE")
+  STAGE=$STATE/iso-tree
+  if [ -e "$STAGE" ] && [ ! -f "$STATE/iso-tree.marker" ]; then
+    echo "psprecomp: refusing to replace an unowned ISO staging tree" >&2
+    exit 1
+  fi
+  rm -rf "$STAGE"
+  cp -cRL "$SOURCE" "$STAGE"
+  : > "$STATE/iso-tree.marker"
+  hdiutil makehybrid -quiet -ov -iso -joliet -iso-volume-name PSP_RECOMP \
+    -o "$OUTPUT" "$STAGE"
+else
+  echo "psprecomp: install xorriso/mkisofs, or build on macOS with hdiutil" >&2
+  exit 1
+fi
+
+echo "Built PSP ISO: $OUTPUT"
+)SH";
+}
+
+std::string macos_cmake(const ExportConfig &config) {
+  std::ostringstream out;
+  out << "cmake_minimum_required(VERSION 3.20)\n"
+         "project("
+      << config.project_name
+      << " LANGUAGES CXX)\n\n"
+         "set(CMAKE_CXX_STANDARD 20)\n"
+         "set(CMAKE_CXX_STANDARD_REQUIRED ON)\n"
+         "set(CMAKE_CXX_EXTENSIONS OFF)\n"
+         "include(src/generated/generated_sources.cmake)\n\n"
+         "add_executable("
+      << config.project_name
+      << " MACOSX_BUNDLE\n"
+         "  ${PSPRECOMP_GENERATED_SOURCES}\n"
+         "  platform/macos/main.cpp\n"
+         "  platform/macos/platform.cpp\n"
+         "  src/generated/guest_image.bin\n"
+         "  src/generated/relocations.bin\n"
+         ")\n"
+         "target_include_directories("
+      << config.project_name
+      << " PRIVATE . include src/generated)\n"
+         "target_compile_options("
+      << config.project_name
+      << " PRIVATE -Wno-tautological-compare)\n"
+         "set_source_files_properties(\n"
+         "  src/generated/guest_image.bin src/generated/relocations.bin\n"
+         "  PROPERTIES MACOSX_PACKAGE_LOCATION Resources\n"
+         ")\n"
+         "set_target_properties("
+      << config.project_name
+      << " PROPERTIES\n"
+         "  MACOSX_BUNDLE_BUNDLE_NAME "
+      << toml_string(config.display_name)
+      << "\n"
+         "  MACOSX_BUNDLE_GUI_IDENTIFIER \"dev.psprecomp."
+      << config.project_name
+      << "\"\n"
+         ")\n";
   return out.str();
 }
 
@@ -408,6 +519,7 @@ ExportSummary export_codebase(const ExportConfig &config) {
     emitter_options.module_name = config.project_name.substr(0, 27U);
     emitter_options.target_name = config.project_name;
     emitter_options.include_path = "../../include";
+    emitter_options.platform_directory = staging / "platform";
     if (config.progress) {
       config.progress("Translating Allegrex code to C++");
     }
@@ -420,15 +532,17 @@ ExportSummary export_codebase(const ExportConfig &config) {
     const bool has_disc = info.kind == InputKind::iso && config.extract_disc;
     write_text(staging / "Makefile",
                root_makefile(config, has_disc, info.executable_path));
+    write_text(staging / "CMakeLists.txt", macos_cmake(config));
     if (has_disc) {
-      write_text(staging / "tools" / "prepare_ppsspp_run.sh",
-                 ppsspp_run_script(config, info.executable_path));
+      write_text(staging / "tools" / "prepare_psp_run.sh",
+                 psp_run_script(config, info.executable_path));
+      write_text(staging / "tools" / "build_psp_iso.sh", psp_iso_script());
     }
     write_text(staging / ".gitignore",
                "src/generated/*.o\nsrc/generated/*.elf\n"
                "src/generated/*.prx\nsrc/generated/*.PBP\n"
                "src/generated/PARAM.SFO\nsrc/generated/SND0.AT3\n"
-               "disc/\noriginal/\ndist/\n.psprecomp/\n.DS_Store\n");
+               "disc/\noriginal/\ndist/\nbuild/\n.psprecomp/\n.DS_Store\n");
     write_text(
         staging / "README.md",
         generated_readme(

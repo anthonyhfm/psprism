@@ -58,18 +58,28 @@ values. Use `--no-extract-disc` when only the executable is needed.
 The root `Makefile` is the normal entry point:
 
 ```sh
-make ppsspp      # build, prepare the game and launch PPSSPP
-make -j          # only build PRX and EBOOT.PBP
+make psp         # build PRX, EBOOT.PBP and a rebuilt ISO
+make psp-run     # build PSP output and launch its writable PPSSPP run tree
+make macos       # build a native Debug .app
+make macos-run   # build and execute the native Debug app
 make clean       # remove compiler products
-make disc-tree   # copy the disc tree and replace its executable and PARAM.SFO
 ```
 
-For ISO exports, `make ppsspp` creates a lightweight run tree under
+For ISO exports, the PSP targets create a lightweight run tree under
 `.psprecomp/run`. Game assets are symlinked from `disc/`, while the generated
 PRX and `PARAM.SFO` are copied into place. This avoids duplicating the full
 disc for every launch and enables the PSP high-memory layout required by large
-recompiled executables. Set `PPSSPP=/path/to/ppsspp` if the command is not in
-`PATH`.
+recompiled executables. `make psp` additionally authors `dist/<project>.iso`;
+`make psp-run` launches the writable run tree because some games open disc
+assets with permissive flags that an immutable ISO cannot provide in PPSSPP.
+Set `PPSSPP=/path/to/ppsspp` if the command is not in `PATH`.
+
+`platform/platform.h` is the generated contract for every imported PSP call.
+`platform/psp` satisfies it using the original SCE ABI and owns the PSP entry
+point. `platform/macos` owns the native entry point and contains explicit host
+implementations or visible fallback stubs for the same imports. The translated
+CPU code under `src/generated` therefore has no direct dependency on PSP SDK
+headers or SCE functions.
 
 Generated C++ lives in `src/generated`. With a code map, Guest functions are
 the semantic compilation units and groups of them are bundled into `unit_*.cpp`
@@ -96,6 +106,8 @@ or an explicit environment variable:
 PSPRECOMP_PPSSPP=/path/to/PPSSPPSDL psprecomp game.iso
 ```
 
-The `disc-tree` target prepares files under `dist/disc`, but it does not author
-a new ISO image. ISO mastering is intentionally kept separate until PSP LBA and
-filesystem-layout compatibility can be handled safely.
+`make psp` masters the rebuilt tree with `xorriso`, `mkisofs`, or macOS
+`hdiutil`. On APFS, the hdiutil path uses a copy-on-write staging clone so
+symlinked assets become real ISO files without permanently duplicating all
+disc data. `disc-tree` remains available when an unpacked rebuilt tree is more
+useful than an ISO.

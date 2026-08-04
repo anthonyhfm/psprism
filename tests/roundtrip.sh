@@ -70,8 +70,23 @@ test -s "$ROUNDTRIP_TMP/EBOOT.PBP"
     --yes
 test -s "$ROUNDTRIP_TMP/exported/project.toml"
 test -s "$ROUNDTRIP_TMP/exported/include/psprecomp/runtime.hpp"
-grep -q '^ppsspp:' "$ROUNDTRIP_TMP/exported/Makefile"
-grep -q 'PPSSPP ?= ppsspp' "$ROUNDTRIP_TMP/exported/Makefile"
-make -C "$ROUNDTRIP_TMP/exported" -j2
+test -s "$ROUNDTRIP_TMP/exported/platform/platform.h"
+test -s "$ROUNDTRIP_TMP/exported/platform/psp/main.cpp"
+test -s "$ROUNDTRIP_TMP/exported/platform/psp/platform.cpp"
+test -s "$ROUNDTRIP_TMP/exported/platform/macos/main.cpp"
+test -s "$ROUNDTRIP_TMP/exported/platform/macos/platform.cpp"
+grep -q '^psp:' "$ROUNDTRIP_TMP/exported/Makefile"
+grep -q '^psp-run:' "$ROUNDTRIP_TMP/exported/Makefile"
+grep -q '^macos:' "$ROUNDTRIP_TMP/exported/Makefile"
+grep -q '^macos-run:' "$ROUNDTRIP_TMP/exported/Makefile"
+if grep -E 'sce[A-Z]|pspkernel[.]h' "$ROUNDTRIP_TMP/exported/src/generated/"*.cpp; then
+    echo "portable generated core contains a direct PSP API dependency" >&2
+    exit 1
+fi
+make -C "$ROUNDTRIP_TMP/exported" psp -j2
 test -s "$ROUNDTRIP_TMP/exported/src/generated/roundtrip_export.prx"
 test -s "$ROUNDTRIP_TMP/exported/src/generated/EBOOT.PBP"
+if [ "$(uname -s)" = Darwin ]; then
+    make -C "$ROUNDTRIP_TMP/exported" macos
+    test -x "$ROUNDTRIP_TMP/exported/build/macos/roundtrip_export.app/Contents/MacOS/roundtrip_export"
+fi
