@@ -19,6 +19,7 @@ struct ControllerState {
 struct GeometryVertex {
   float position[4]{};
   float color[4]{1.0F, 1.0F, 1.0F, 1.0F};
+  float texture[2]{};
 };
 
 void initialize_frontend();
@@ -29,7 +30,10 @@ void present_frame(const std::uint8_t* pixels, std::uint32_t stride,
                    std::uint32_t format);
 void begin_ge_frame();
 void submit_ge_primitive(std::uint32_t type,
-                         std::vector<GeometryVertex> vertices);
+                         std::vector<GeometryVertex> vertices,
+                         std::vector<std::uint8_t> texture = {},
+                         std::uint32_t texture_width = 0,
+                         std::uint32_t texture_height = 0);
 ControllerState controller_state();
 
 } // namespace psprism::host

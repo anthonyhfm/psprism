@@ -176,6 +176,85 @@ void transform44(const std::array<float, 16>& matrix, const float input[3],
               matrix[11] * input[2] + matrix[15];
 }
 
+struct DecodedTexture {
+  std::vector<std::uint8_t> pixels;
+  std::uint32_t width{};
+  std::uint32_t height{};
+};
+
+DecodedTexture
+decode_clut8_texture(psprecomp::State& state,
+                     const std::array<std::uint32_t, 256>& commands) {
+  DecodedTexture result;
+  if ((commands[0x1eU] & 1U) == 0 || (commands[0xc3U] & 0xfU) != 5U)
+    return result;
+  result.width = 1U << (commands[0xb8U] & 0xfU);
+  result.height = 1U << ((commands[0xb8U] >> 8U) & 0xfU);
+  const auto buffer_width = commands[0xa8U] & 0x3ffU;
+  if (result.width == 0 || result.height == 0 || buffer_width == 0 ||
+      result.width > 1024U || result.height > 1024U)
+    return {};
+  const auto texture_address =
+      (commands[0xa0U] & 0x00fffff0U) | ((commands[0xa8U] << 8U) & 0x0f000000U);
+  const auto blocks_per_row = (buffer_width + 15U) / 16U;
+  const auto block_rows = (result.height + 7U) / 8U;
+  const auto source_size =
+      static_cast<std::size_t>(blocks_per_row) * block_rows * 128U;
+  const auto* source =
+      psprecomp::mapped_address(state, texture_address, source_size);
+  const auto clut_address =
+      (commands[0xb0U] & 0x00fffff0U) | ((commands[0xb1U] << 8U) & 0x0f000000U);
+  const auto palette_format = commands[0xc5U] & 3U;
+  const auto palette_entry_size = palette_format == 3U ? 4U : 2U;
+  const auto* palette =
+      psprecomp::mapped_address(state, clut_address, 256U * palette_entry_size);
+  if (source == nullptr || palette == nullptr)
+    return {};
+  const auto shift = (commands[0xc5U] >> 2U) & 0x1fU;
+  const auto mask = (commands[0xc5U] >> 8U) & 0xffU;
+  const auto start = ((commands[0xc5U] >> 16U) & 0x1fU) << 4U;
+  const auto swizzled = (commands[0xc2U] & 1U) != 0;
+  result.pixels.resize(static_cast<std::size_t>(result.width) * result.height *
+                       4U);
+  for (std::uint32_t y = 0; y < result.height; ++y) {
+    for (std::uint32_t x = 0; x < result.width; ++x) {
+      const auto source_offset =
+          swizzled ? ((y / 8U) * blocks_per_row + x / 16U) * 128U +
+                         (y & 7U) * 16U + (x & 15U)
+                   : y * buffer_width + x;
+      const auto palette_index =
+          ((source[source_offset] >> shift) & mask) | (start & 0xffU);
+      std::uint32_t color{};
+      if (palette_format == 3U) {
+        std::memcpy(&color, palette + palette_index * 4U, sizeof(color));
+      } else {
+        std::uint16_t packed{};
+        std::memcpy(&packed, palette + palette_index * 2U, sizeof(packed));
+        if (palette_format == 0U) {
+          color = ((packed & 31U) << 3U) |
+                  (((packed >> 5U) & 63U) * 255U / 63U << 8U) |
+                  (((packed >> 11U) & 31U) << 19U) | 0xff000000U;
+        } else if (palette_format == 1U) {
+          color = ((packed & 31U) << 3U) | (((packed >> 5U) & 31U) << 11U) |
+                  (((packed >> 10U) & 31U) << 19U) |
+                  ((packed & 0x8000U) != 0 ? 0xff000000U : 0U);
+        } else {
+          color = ((packed & 15U) * 17U) |
+                  (((packed >> 4U) & 15U) * 17U << 8U) |
+                  (((packed >> 8U) & 15U) * 17U << 16U) |
+                  (((packed >> 12U) & 15U) * 17U << 24U);
+        }
+      }
+      const auto output = (static_cast<std::size_t>(y) * result.width + x) * 4U;
+      result.pixels[output] = static_cast<std::uint8_t>(color);
+      result.pixels[output + 1U] = static_cast<std::uint8_t>(color >> 8U);
+      result.pixels[output + 2U] = static_cast<std::uint8_t>(color >> 16U);
+      result.pixels[output + 3U] = static_cast<std::uint8_t>(color >> 24U);
+    }
+  }
+  return result;
+}
+
 } // namespace
 
 struct Runtime::Implementation {
@@ -877,9 +956,16 @@ void Runtime::dispatch(psprecomp::State& state, std::string_view name) {
           if (submission < 2U && primitives < 32U) {
             std::fprintf(stderr,
                          "[psprism:ge] prim=%u type=%u count=%u vtype=%06x "
-                         "vaddr=%08x iaddr=%08x\n",
+                         "vaddr=%08x iaddr=%08x tex=%u texaddr=%06x "
+                         "texbuf=%06x texsize=%06x texfmt=%u texmode=%06x\n",
                          primitives, primitive_type, vertex_count, vertex_type,
-                         graphics.vertex_address, graphics.index_address);
+                         graphics.vertex_address, graphics.index_address,
+                         graphics.commands[0x1eU] & 1U,
+                         graphics.commands[0xa0U] & 0x00ffffffU,
+                         graphics.commands[0xa8U] & 0x00ffffffU,
+                         graphics.commands[0xb8U] & 0x00ffffffU,
+                         graphics.commands[0xc3U] & 0xfU,
+                         graphics.commands[0xc2U] & 0x00ffffffU);
           }
           const auto layout = vertex_layout(vertex_type);
           const auto indexed = (vertex_type & (3U << 11U)) != 0;
@@ -889,6 +975,7 @@ void Runtime::dispatch(psprecomp::State& state, std::string_view name) {
             if (const auto* source = psprecomp::mapped_address(
                     state, graphics.vertex_address, byte_count)) {
               std::vector<host::GeometryVertex> vertices(vertex_count);
+              auto texture = decode_clut8_texture(state, graphics.commands);
               const auto material_color = graphics.commands[0x55U];
               for (std::uint32_t index = 0; index < vertex_count; ++index) {
                 const auto* input = source + index * layout.stride;
@@ -965,8 +1052,49 @@ void Runtime::dispatch(psprecomp::State& state, std::string_view name) {
                     static_cast<float>((color >> 16U) & 0xffU) / 255.0F;
                 output.color[3] =
                     static_cast<float>((color >> 24U) & 0xffU) / 255.0F;
+                if (layout.texture_type != 0 && texture.width != 0 &&
+                    texture.height != 0) {
+                  const auto* coordinates = input + layout.texture_offset;
+                  float u{};
+                  float v{};
+                  if (layout.texture_type == 1U) {
+                    u = static_cast<float>(coordinates[0]);
+                    v = static_cast<float>(coordinates[1]);
+                    if (!through) {
+                      u /= 128.0F;
+                      v /= 128.0F;
+                    }
+                  } else if (layout.texture_type == 2U) {
+                    std::uint16_t packed_u{};
+                    std::uint16_t packed_v{};
+                    std::memcpy(&packed_u, coordinates, sizeof(packed_u));
+                    std::memcpy(&packed_v, coordinates + 2U, sizeof(packed_v));
+                    u = static_cast<float>(packed_u);
+                    v = static_cast<float>(packed_v);
+                    if (!through) {
+                      u /= 32768.0F;
+                      v /= 32768.0F;
+                    }
+                  } else {
+                    std::memcpy(&u, coordinates, sizeof(u));
+                    std::memcpy(&v, coordinates + 4U, sizeof(v));
+                  }
+                  if (through) {
+                    u /= static_cast<float>(texture.width);
+                    v /= static_cast<float>(texture.height);
+                  } else {
+                    u = u * float24(graphics.commands[0x48U]) +
+                        float24(graphics.commands[0x4aU]);
+                    v = v * float24(graphics.commands[0x49U]) +
+                        float24(graphics.commands[0x4bU]);
+                  }
+                  output.texture[0] = u;
+                  output.texture[1] = v;
+                }
               }
-              host::submit_ge_primitive(primitive_type, std::move(vertices));
+              host::submit_ge_primitive(primitive_type, std::move(vertices),
+                                        std::move(texture.pixels),
+                                        texture.width, texture.height);
             }
             graphics.vertex_address += static_cast<std::uint32_t>(byte_count);
           }

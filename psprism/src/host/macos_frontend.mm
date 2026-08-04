@@ -32,6 +32,9 @@ constexpr std::uint32_t psp_square = 0x008000U;
 struct GeometryBatch {
   MTLPrimitiveType type;
   std::vector<psprism::host::GeometryVertex> vertices;
+  std::vector<std::uint8_t> texture;
+  std::uint32_t texture_width{};
+  std::uint32_t texture_height{};
 };
 
 std::mutex geometry_mutex;
@@ -42,6 +45,7 @@ std::vector<GeometryBatch> geometry_batches;
 @property(nonatomic, strong) id<MTLCommandQueue> queue;
 @property(nonatomic, strong) id<MTLRenderPipelineState> pipeline;
 @property(nonatomic, strong) id<MTLRenderPipelineState> geometryPipeline;
+@property(nonatomic, strong) id<MTLRenderPipelineState> texturedGeometryPipeline;
 @property(nonatomic, strong) id<MTLTexture> texture;
 @end
 
@@ -65,14 +69,27 @@ std::vector<GeometryBatch> geometry_batches;
       constexpr sampler nearest(filter::nearest, address::clamp_to_edge);
       return image.sample(nearest, in.uv);
     }
-    struct GeometryVertex { packed_float4 position; packed_float4 color; };
-    struct GeometryOut { float4 position [[position]]; float4 color; };
+    struct GeometryVertex {
+      packed_float4 position;
+      packed_float4 color;
+      packed_float2 texture;
+    };
+    struct GeometryOut {
+      float4 position [[position]];
+      float4 color;
+      float2 texture;
+    };
     vertex GeometryOut psprism_geometry_vertex(
         uint id [[vertex_id]], device const GeometryVertex* vertices [[buffer(0)]]) {
-      return {vertices[id].position, vertices[id].color};
+      return {vertices[id].position, vertices[id].color, vertices[id].texture};
     }
     fragment float4 psprism_geometry_fragment(GeometryOut in [[stage_in]]) {
       return in.color;
+    }
+    fragment float4 psprism_textured_geometry_fragment(
+        GeometryOut in [[stage_in]], texture2d<float> image [[texture(0)]]) {
+      constexpr sampler linear_sampler(filter::linear, address::clamp_to_edge);
+      return image.sample(linear_sampler, in.texture) * in.color;
     }
   )METAL";
   NSError* error = nil;
@@ -100,6 +117,12 @@ std::vector<GeometryBatch> geometry_batches;
       [self.device newRenderPipelineStateWithDescriptor:descriptor error:&error];
   if (self.geometryPipeline == nil)
     NSLog(@"psprism: Metal geometry pipeline error: %@", error);
+  descriptor.fragmentFunction =
+      [library newFunctionWithName:@"psprism_textured_geometry_fragment"];
+  self.texturedGeometryPipeline =
+      [self.device newRenderPipelineStateWithDescriptor:descriptor error:&error];
+  if (self.texturedGeometryPipeline == nil)
+    NSLog(@"psprism: Metal textured pipeline error: %@", error);
   return self;
 }
 
@@ -115,9 +138,26 @@ std::vector<GeometryBatch> geometry_batches;
   [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
   if (self.geometryPipeline != nil) {
     std::lock_guard lock(geometry_mutex);
-    [encoder setRenderPipelineState:self.geometryPipeline];
     for (const auto& batch : geometry_batches) {
       if (batch.vertices.empty()) continue;
+      if (batch.texture.empty()) {
+        [encoder setRenderPipelineState:self.geometryPipeline];
+      } else {
+        [encoder setRenderPipelineState:self.texturedGeometryPipeline];
+        MTLTextureDescriptor* descriptor = [MTLTextureDescriptor
+            texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                         width:batch.texture_width
+                                        height:batch.texture_height
+                                     mipmapped:NO];
+        id<MTLTexture> texture =
+            [self.device newTextureWithDescriptor:descriptor];
+        [texture replaceRegion:MTLRegionMake2D(0, 0, batch.texture_width,
+                                               batch.texture_height)
+                  mipmapLevel:0
+                    withBytes:batch.texture.data()
+                  bytesPerRow:batch.texture_width * 4U];
+        [encoder setFragmentTexture:texture atIndex:0];
+      }
       [encoder setVertexBytes:batch.vertices.data()
                        length:batch.vertices.size() * sizeof(psprism::host::GeometryVertex)
                       atIndex:0];
@@ -307,7 +347,10 @@ void begin_ge_frame() {
 }
 
 void submit_ge_primitive(std::uint32_t type,
-                         std::vector<GeometryVertex> vertices) {
+                         std::vector<GeometryVertex> vertices,
+                         std::vector<std::uint8_t> texture,
+                         std::uint32_t texture_width,
+                         std::uint32_t texture_height) {
   MTLPrimitiveType metal_type;
   switch (type) {
     case 0:
@@ -330,7 +373,9 @@ void submit_ge_primitive(std::uint32_t type,
   }
   {
     std::lock_guard lock(geometry_mutex);
-    geometry_batches.push_back({metal_type, std::move(vertices)});
+    geometry_batches.push_back({metal_type, std::move(vertices),
+                                std::move(texture), texture_width,
+                                texture_height});
   }
   dispatch_async(dispatch_get_main_queue(), ^{ [metal_view setNeedsDisplay:YES]; });
 }
