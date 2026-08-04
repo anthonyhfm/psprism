@@ -70,6 +70,8 @@ test -s "$ROUNDTRIP_TMP/EBOOT.PBP"
     --yes
 test -s "$ROUNDTRIP_TMP/exported/project.toml"
 test -s "$ROUNDTRIP_TMP/exported/include/psprecomp/runtime.hpp"
+grep -q '^ppsspp:' "$ROUNDTRIP_TMP/exported/Makefile"
+grep -q 'PPSSPP ?= ppsspp' "$ROUNDTRIP_TMP/exported/Makefile"
 make -C "$ROUNDTRIP_TMP/exported" -j2
 test -s "$ROUNDTRIP_TMP/exported/src/generated/roundtrip_export.prx"
 test -s "$ROUNDTRIP_TMP/exported/src/generated/EBOOT.PBP"

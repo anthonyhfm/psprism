@@ -80,8 +80,12 @@ Build it without referring back to this repository:
 
 ```sh
 cd my_game
-make -j
+make ppsspp
 ```
+
+That command builds the recompilation, prepares a lightweight run tree for ISO
+exports and launches it through the `ppsspp` CLI. Use `make -j` to build
+without launching the emulator.
 
 For scripts and automation, use the same workflow without prompts:
 

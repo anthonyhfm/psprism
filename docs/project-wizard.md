@@ -58,10 +58,18 @@ values. Use `--no-extract-disc` when only the executable is needed.
 The root `Makefile` is the normal entry point:
 
 ```sh
-make -j          # build PRX and EBOOT.PBP
+make ppsspp      # build, prepare the game and launch PPSSPP
+make -j          # only build PRX and EBOOT.PBP
 make clean       # remove compiler products
-make disc-tree   # copy the disc tree and replace its executable
+make disc-tree   # copy the disc tree and replace its executable and PARAM.SFO
 ```
+
+For ISO exports, `make ppsspp` creates a lightweight run tree under
+`.psprecomp/run`. Game assets are symlinked from `disc/`, while the generated
+PRX and `PARAM.SFO` are copied into place. This avoids duplicating the full
+disc for every launch and enables the PSP high-memory layout required by large
+recompiled executables. Set `PPSSPP=/path/to/ppsspp` if the command is not in
+`PATH`.
 
 Generated C++ lives in `src/generated`. With a code map, Guest functions are
 the semantic compilation units and groups of them are bundled into `unit_*.cpp`

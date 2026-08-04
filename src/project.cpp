@@ -128,7 +128,10 @@ std::string generated_readme(const ExportConfig &config, InputKind kind,
          "code, a vendored runtime, project metadata and build helpers.\n\n"
          "## Build\n\n"
          "Install PSPSDK and make sure `psp-config` is in `PATH`, then run:\n\n"
-         "```sh\nmake -j\n```\n\n"
+         "```sh\nmake ppsspp\n```\n\n"
+         "This builds the game, prepares a lightweight PPSSPP run tree and "
+         "launches it with the `ppsspp` command. Use `make -j` when you only "
+         "want to build.\n\n"
          "The resulting `EBOOT.PBP` and PRX are written below "
          "`src/generated/`. Run `make disc-tree` to create a copy of the "
          "extracted disc with its executable replaced by the recompiled "
@@ -152,30 +155,86 @@ std::string generated_readme(const ExportConfig &config, InputKind kind,
 std::string root_makefile(const ExportConfig &config, bool has_disc,
                           std::string_view disc_executable) {
   std::ostringstream out;
-  out << ".PHONY: all clean rebuild disc-tree help\n\n"
+  out << "PPSSPP ?= ppsspp\n\n"
+         ".PHONY: all clean rebuild ppsspp disc-tree help\n\n"
          "all:\n"
          "\t$(MAKE) -C src/generated\n\n"
          "clean:\n"
          "\t$(MAKE) -C src/generated clean\n\n"
          "rebuild: clean all\n\n";
   if (has_disc) {
-    out << "disc-tree: all\n"
+    out << "ppsspp: all\n"
+           "\tsh tools/prepare_ppsspp_run.sh\n"
+           "\t$(PPSSPP) \"$(CURDIR)/.psprecomp/run\"\n\n"
+           "disc-tree: all\n"
            "\trm -rf dist/disc\n"
            "\tmkdir -p dist\n"
            "\tcp -R disc dist/disc\n"
            "\tcp src/generated/"
         << config.project_name << ".prx dist/disc/" << disc_executable
         << "\n"
+           "\tcp src/generated/PARAM.SFO dist/disc/PSP_GAME/PARAM.SFO\n"
            "\t@echo \"Prepared dist/disc with the recompiled executable.\"\n\n";
   } else {
-    out << "disc-tree:\n"
+    out << "ppsspp: all\n"
+           "\t$(PPSSPP) \"$(CURDIR)/src/generated/EBOOT.PBP\"\n\n"
+           "disc-tree:\n"
            "\t@echo \"disc-tree requires an ISO export.\"\n"
            "\t@false\n\n";
   }
   out << "help:\n"
          "\t@echo \"make          Build PRX and EBOOT.PBP\"\n"
+         "\t@echo \"make ppsspp   Build and launch the game in PPSSPP\"\n"
          "\t@echo \"make clean    Remove compiler output\"\n"
          "\t@echo \"make disc-tree  Prepare a rebuilt disc tree\"\n";
+  return out.str();
+}
+
+std::string ppsspp_run_script(const ExportConfig &config,
+                              std::string_view disc_executable) {
+  const auto executable_name =
+      std::filesystem::path(disc_executable).filename().string();
+  std::ostringstream out;
+  out << "#!/bin/sh\n"
+         "set -eu\n\n"
+         "ROOT=$(CDPATH= cd -- \"$(dirname -- \"$0\")/..\" && pwd)\n"
+         "DISC=$ROOT/disc\n"
+         "STATE=$ROOT/.psprecomp\n"
+         "RUN=$STATE/run\n\n"
+         "if [ ! -d \"$DISC/PSP_GAME\" ]; then\n"
+         "  echo \"psprecomp: extracted disc tree is missing\" >&2\n"
+         "  exit 1\n"
+         "fi\n"
+         "if [ -e \"$RUN\" ] && [ ! -f \"$STATE/run.marker\" ]; then\n"
+         "  echo \"psprecomp: refusing to replace an unowned run directory: "
+         "$RUN\" >&2\n"
+         "  exit 1\n"
+         "fi\n\n"
+         "rm -rf \"$RUN\"\n"
+         "mkdir -p \"$RUN/PSP_GAME/SYSDIR\"\n"
+         ": > \"$STATE/run.marker\"\n\n"
+         "for source in \"$DISC\"/*; do\n"
+         "  [ -e \"$source\" ] || continue\n"
+         "  [ \"${source##*/}\" = PSP_GAME ] || ln -s \"$source\" "
+         "\"$RUN/${source##*/}\"\n"
+         "done\n"
+         "for source in \"$DISC/PSP_GAME\"/*; do\n"
+         "  [ -e \"$source\" ] || continue\n"
+         "  case ${source##*/} in PARAM.SFO|SYSDIR) continue ;; esac\n"
+         "  ln -s \"$source\" \"$RUN/PSP_GAME/${source##*/}\"\n"
+         "done\n"
+         "for source in \"$DISC/PSP_GAME/SYSDIR\"/*; do\n"
+         "  [ -e \"$source\" ] || continue\n"
+         "  [ \"${source##*/}\" = \""
+      << executable_name
+      << "\" ] || ln -s \"$source\" \"$RUN/PSP_GAME/SYSDIR/${source##*/}\"\n"
+         "done\n\n"
+         "cp \"$ROOT/src/generated/"
+      << config.project_name << ".prx\" \"$RUN/"
+      << std::filesystem::path(disc_executable).generic_string()
+      << "\"\n"
+         "cp \"$ROOT/src/generated/PARAM.SFO\" \"$RUN/PSP_GAME/PARAM.SFO\"\n"
+         "echo \"Prepared lightweight PPSSPP run tree at $RUN\"\n";
   return out.str();
 }
 
@@ -361,11 +420,15 @@ ExportSummary export_codebase(const ExportConfig &config) {
     const bool has_disc = info.kind == InputKind::iso && config.extract_disc;
     write_text(staging / "Makefile",
                root_makefile(config, has_disc, info.executable_path));
+    if (has_disc) {
+      write_text(staging / "tools" / "prepare_ppsspp_run.sh",
+                 ppsspp_run_script(config, info.executable_path));
+    }
     write_text(staging / ".gitignore",
                "src/generated/*.o\nsrc/generated/*.elf\n"
                "src/generated/*.prx\nsrc/generated/*.PBP\n"
                "src/generated/PARAM.SFO\nsrc/generated/SND0.AT3\n"
-               "disc/\noriginal/\ndist/\n.DS_Store\n");
+               "disc/\noriginal/\ndist/\n.psprecomp/\n.DS_Store\n");
     write_text(
         staging / "README.md",
         generated_readme(
