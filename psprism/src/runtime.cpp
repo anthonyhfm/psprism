@@ -2,32 +2,48 @@
 
 #include "host/host.hpp"
 
+#include <algorithm>
+#include <atomic>
 #include <cerrno>
+#include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
 #include <filesystem>
+#include <memory>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <unistd.h>
 #include <unordered_map>
 #include <unordered_set>
+#include <vector>
 
 namespace psprism {
 namespace {
 
 constexpr std::uint32_t unimplemented = 0x8002013aU;
 constexpr std::uint32_t io_error = 0x80010005U;
+constexpr std::uint32_t wait_timeout = 0x800201a8U;
+constexpr std::uint32_t out_of_memory = 0x80020190U;
+constexpr std::uint32_t return_address = 0xfffffff0U;
+
+thread_local int current_thread_id = 1;
+
+std::uint32_t align_up(std::uint32_t value, std::uint32_t alignment) {
+  return (value + alignment - 1U) & ~(alignment - 1U);
+}
 
 template <typename T>
-T *guest_pointer(psprecomp::State &state, std::uint32_t address) {
+T* guest_pointer(psprecomp::State& state, std::uint32_t address) {
   if (!psprecomp::address_ok(state, address, sizeof(T))) {
     return nullptr;
   }
-  return reinterpret_cast<T *>(state.memory + address - state.memory_base);
+  return reinterpret_cast<T*>(state.memory + address - state.memory_base);
 }
 
-char *guest_string(psprecomp::State &state, std::uint32_t address) {
+char* guest_string(psprecomp::State& state, std::uint32_t address) {
   if (address < state.memory_base) {
     return nullptr;
   }
@@ -37,7 +53,7 @@ char *guest_string(psprecomp::State &state, std::uint32_t address) {
           nullptr) {
     return nullptr;
   }
-  return reinterpret_cast<char *>(state.memory + offset);
+  return reinterpret_cast<char*>(state.memory + offset);
 }
 
 bool is_one_of(std::string_view value,
@@ -68,13 +84,82 @@ int host_open_flags(std::uint32_t flags) {
 } // namespace
 
 struct Runtime::Implementation {
-  std::uint8_t *memory{};
+  struct GuestThread {
+    int uid{};
+    std::string name;
+    std::uint32_t entry{};
+    std::uint32_t priority{};
+    std::uint32_t stack_address{};
+    std::uint32_t stack_size{};
+    std::uint32_t tls_address{};
+    std::shared_ptr<psprecomp::State> state;
+    std::thread host_thread;
+    std::atomic<bool> finished{};
+    std::int32_t result{};
+  };
+
+  struct Semaphore {
+    std::mutex mutex;
+    std::condition_variable changed;
+    int count{};
+    int maximum{};
+  };
+
+  struct EventFlag {
+    std::mutex mutex;
+    std::condition_variable changed;
+    std::uint32_t bits{};
+  };
+
+  struct MemoryBlock {
+    std::uint32_t address{};
+    std::uint32_t size{};
+  };
+
+  struct FixedPool {
+    std::mutex mutex;
+    std::condition_variable changed;
+    std::vector<std::uint32_t> available;
+  };
+
+  std::uint8_t* memory{};
   std::size_t memory_size{};
   std::uint32_t memory_base{};
+  std::vector<std::uint8_t> scratchpad;
+  std::vector<std::uint8_t> video_memory;
   Configuration configuration;
   std::unordered_set<std::string> warned;
   std::unordered_map<int, int> files;
+  std::mutex objects_mutex;
+  std::unordered_map<int, std::shared_ptr<GuestThread>> threads;
+  std::unordered_map<int, std::shared_ptr<Semaphore>> semaphores;
+  std::unordered_map<int, std::shared_ptr<EventFlag>> event_flags;
+  std::unordered_map<int, MemoryBlock> memory_blocks;
+  std::unordered_map<int, std::shared_ptr<FixedPool>> fixed_pools;
   int next_file{3};
+  int next_uid{0x100};
+  std::uint32_t heap_cursor{};
+  std::uint32_t stack_cursor{};
+  std::atomic<bool> exit_requested{};
+
+  int allocate_uid() { return next_uid++; }
+
+  std::uint32_t allocate_heap(std::uint32_t size,
+                              std::uint32_t alignment = 64) {
+    const auto address = align_up(heap_cursor, alignment);
+    if (size > stack_cursor || address > stack_cursor - size)
+      return 0;
+    heap_cursor = address + size;
+    return memory_base + address;
+  }
+
+  std::uint32_t allocate_stack(std::uint32_t size) {
+    size = align_up(size, 64);
+    if (size > stack_cursor || stack_cursor - size < heap_cursor)
+      return 0;
+    stack_cursor -= size;
+    return memory_base + stack_cursor;
+  }
 
   std::filesystem::path resolve_path(std::string_view psp_path) const {
     const auto suffix = [](std::string_view value, std::string_view prefix) {
@@ -101,7 +186,7 @@ struct Runtime::Implementation {
   }
 };
 
-Runtime &Runtime::instance() {
+Runtime& Runtime::instance() {
   static Runtime runtime;
   return runtime;
 }
@@ -109,27 +194,33 @@ Runtime &Runtime::instance() {
 Runtime::Runtime() : implementation_(new Implementation) {}
 
 Runtime::~Runtime() {
-  for (const auto &[psp_descriptor, host_descriptor] : implementation_->files) {
+  wait_for_guest_threads();
+  for (const auto& [psp_descriptor, host_descriptor] : implementation_->files) {
     static_cast<void>(psp_descriptor);
     ::close(host_descriptor);
   }
   delete implementation_;
 }
 
-void Runtime::configure(std::uint8_t *memory, std::size_t size,
+void Runtime::configure(std::uint8_t* memory, std::size_t size,
                         std::uint32_t base, Configuration configuration) {
   implementation_->memory = memory;
   implementation_->memory_size = size;
   implementation_->memory_base = base;
+  implementation_->scratchpad.assign(16U * 1024U, 0);
+  implementation_->video_memory.assign(2U * 1024U * 1024U, 0);
+  implementation_->heap_cursor =
+      align_up(static_cast<std::uint32_t>(configuration.image_size), 64U);
+  implementation_->stack_cursor = static_cast<std::uint32_t>(size);
   if (configuration.disc_root.empty()) {
-    if (const auto *value = std::getenv("PSPRISM_DISC_ROOT")) {
+    if (const auto* value = std::getenv("PSPRISM_DISC_ROOT")) {
       configuration.disc_root = value;
     } else {
       configuration.disc_root = std::filesystem::current_path() / "disc";
     }
   }
   if (configuration.writable_root.empty()) {
-    if (const auto *value = std::getenv("PSPRISM_WRITABLE_ROOT")) {
+    if (const auto* value = std::getenv("PSPRISM_WRITABLE_ROOT")) {
       configuration.writable_root = value;
     } else {
       configuration.writable_root =
@@ -143,13 +234,412 @@ void Runtime::configure(std::uint8_t *memory, std::size_t size,
                implementation_->configuration.writable_root.c_str());
 }
 
-void Runtime::log(const char *format, std::uint32_t first,
+void Runtime::log(const char* format, std::uint32_t first,
                   std::uint32_t second) {
   std::fprintf(stderr, format, first, second);
 }
 
-void Runtime::dispatch(psprecomp::State &state, std::string_view name) {
+void Runtime::prepare_state(psprecomp::State& state) {
+  state.scratchpad = implementation_->scratchpad.data();
+  state.scratchpad_size = implementation_->scratchpad.size();
+  state.video_memory = implementation_->video_memory.data();
+  state.video_memory_size = implementation_->video_memory.size();
+}
+
+void Runtime::wait_for_guest_threads() {
+  for (;;) {
+    std::vector<std::shared_ptr<Implementation::GuestThread>> pending;
+    {
+      std::lock_guard lock(implementation_->objects_mutex);
+      for (const auto& [uid, thread] : implementation_->threads) {
+        static_cast<void>(uid);
+        if (thread->host_thread.joinable())
+          pending.push_back(thread);
+      }
+    }
+    if (pending.empty())
+      return;
+    for (const auto& thread : pending) {
+      if (thread->host_thread.joinable())
+        thread->host_thread.join();
+    }
+  }
+}
+
+void Runtime::dispatch(psprecomp::State& state, std::string_view name) {
   state.gpr[2] = unimplemented;
+
+  if (name == "sceKernelCreateThread") {
+    const auto* thread_name = guest_string(state, state.gpr[4]);
+    const auto requested_stack = std::max<std::uint32_t>(state.gpr[7], 0x4000U);
+    std::lock_guard lock(implementation_->objects_mutex);
+    const auto stack = implementation_->allocate_stack(requested_stack);
+    const auto tls = implementation_->allocate_heap(0x100U, 64U);
+    if (stack == 0 || tls == 0 ||
+        !implementation_->configuration.guest_executor) {
+      state.gpr[2] = out_of_memory;
+      return;
+    }
+    auto thread = std::make_shared<Implementation::GuestThread>();
+    thread->uid = implementation_->allocate_uid();
+    thread->name = thread_name != nullptr ? thread_name : "guest-thread";
+    thread->entry = state.gpr[5];
+    thread->priority = state.gpr[6];
+    thread->stack_address = stack;
+    thread->stack_size = requested_stack;
+    thread->tls_address = tls;
+    implementation_->threads.emplace(thread->uid, thread);
+    state.gpr[2] = static_cast<std::uint32_t>(thread->uid);
+    std::fprintf(stderr, "[psprism:thread] create uid=%d name=%s entry=%08x\n",
+                 thread->uid, thread->name.c_str(), thread->entry);
+    return;
+  }
+  if (name == "sceKernelStartThread") {
+    std::shared_ptr<Implementation::GuestThread> thread;
+    {
+      std::lock_guard lock(implementation_->objects_mutex);
+      const auto found =
+          implementation_->threads.find(static_cast<int>(state.gpr[4]));
+      if (found == implementation_->threads.end() ||
+          found->second->host_thread.joinable())
+        return;
+      thread = found->second;
+    }
+    const auto argument_size = state.gpr[5];
+    const auto argument_pointer = state.gpr[6];
+    std::fprintf(stderr, "[psprism:thread] launch uid=%d args=%u argp=%08x\n",
+                 thread->uid, argument_size, argument_pointer);
+    thread->state = std::make_shared<psprecomp::State>();
+    thread->state->memory = implementation_->memory;
+    thread->state->memory_size = implementation_->memory_size;
+    thread->state->memory_base = implementation_->memory_base;
+    thread->state->direct_memory_access = false;
+    prepare_state(*thread->state);
+    thread->state->pc = thread->entry;
+    thread->state->gpr[4] = argument_size;
+    thread->state->gpr[5] = argument_pointer;
+    thread->state->gpr[26] = thread->tls_address;
+    thread->state->gpr[27] = thread->tls_address + 0x80U;
+    thread->state->gpr[29] = thread->stack_address + thread->stack_size - 64U;
+    thread->state->gpr[31] = return_address;
+    const auto executor = implementation_->configuration.guest_executor;
+    thread->host_thread = std::thread([thread, executor] {
+      current_thread_id = thread->uid;
+      std::fprintf(stderr, "[psprism:thread] start uid=%d name=%s\n",
+                   thread->uid, thread->name.c_str());
+      executor(*thread->state);
+      thread->result = static_cast<std::int32_t>(thread->state->gpr[2]);
+      thread->finished = true;
+      std::fprintf(
+          stderr,
+          "[psprism:thread] stop uid=%d reason=%u pc=%08x result=%d "
+          "fault=%08x fault_pc=%08x insn=%08x sp=%08x ra=%08x "
+          "a0=%08x a1=%08x a2=%08x a3=%08x\n",
+          thread->uid, static_cast<unsigned>(thread->state->stop_reason),
+          thread->state->pc, thread->result, thread->state->fault_address,
+          thread->state->fault_pc, thread->state->fault_instruction,
+          thread->state->gpr[29], thread->state->gpr[31], thread->state->gpr[4],
+          thread->state->gpr[5], thread->state->gpr[6], thread->state->gpr[7]);
+    });
+    state.gpr[2] = 0;
+    return;
+  }
+  if (name == "sceKernelGetThreadId") {
+    state.gpr[2] = static_cast<std::uint32_t>(current_thread_id);
+    return;
+  }
+  if (name == "sceKernelWaitThreadEnd") {
+    std::shared_ptr<Implementation::GuestThread> thread;
+    {
+      std::lock_guard lock(implementation_->objects_mutex);
+      const auto found =
+          implementation_->threads.find(static_cast<int>(state.gpr[4]));
+      if (found == implementation_->threads.end())
+        return;
+      thread = found->second;
+    }
+    if (thread->host_thread.joinable() && thread->uid != current_thread_id)
+      thread->host_thread.join();
+    state.gpr[2] = 0;
+    return;
+  }
+  if (is_one_of(name, {"sceKernelTerminateThread",
+                       "sceKernelTerminateDeleteThread"})) {
+    std::lock_guard lock(implementation_->objects_mutex);
+    const auto found =
+        implementation_->threads.find(static_cast<int>(state.gpr[4]));
+    if (found == implementation_->threads.end())
+      return;
+    if (found->second->state)
+      found->second->state->stop_reason = psprecomp::StopReason::returned;
+    state.gpr[2] = 0;
+    return;
+  }
+  if (name == "sceKernelDeleteThread") {
+    std::lock_guard lock(implementation_->objects_mutex);
+    const auto found =
+        implementation_->threads.find(static_cast<int>(state.gpr[4]));
+    if (found == implementation_->threads.end() ||
+        found->second->host_thread.joinable())
+      return;
+    implementation_->threads.erase(found);
+    state.gpr[2] = 0;
+    return;
+  }
+
+  if (name == "sceKernelCreateSema") {
+    auto semaphore = std::make_shared<Implementation::Semaphore>();
+    semaphore->count = static_cast<int>(state.gpr[6]);
+    semaphore->maximum = static_cast<int>(state.gpr[7]);
+    std::lock_guard lock(implementation_->objects_mutex);
+    const auto uid = implementation_->allocate_uid();
+    implementation_->semaphores.emplace(uid, semaphore);
+    state.gpr[2] = static_cast<std::uint32_t>(uid);
+    return;
+  }
+  if (is_one_of(name, {"sceKernelWaitSema", "sceKernelWaitSemaCB",
+                       "sceKernelPollSema"})) {
+    std::shared_ptr<Implementation::Semaphore> semaphore;
+    {
+      std::lock_guard lock(implementation_->objects_mutex);
+      const auto found =
+          implementation_->semaphores.find(static_cast<int>(state.gpr[4]));
+      if (found == implementation_->semaphores.end())
+        return;
+      semaphore = found->second;
+    }
+    const auto amount = static_cast<int>(state.gpr[5]);
+    std::unique_lock lock(semaphore->mutex);
+    if (name == "sceKernelPollSema" && semaphore->count < amount) {
+      state.gpr[2] = wait_timeout;
+      return;
+    }
+    semaphore->changed.wait(lock, [&] {
+      return semaphore->count >= amount || implementation_->exit_requested;
+    });
+    if (!implementation_->exit_requested)
+      semaphore->count -= amount;
+    state.gpr[2] = 0;
+    return;
+  }
+  if (name == "sceKernelSignalSema") {
+    std::shared_ptr<Implementation::Semaphore> semaphore;
+    {
+      std::lock_guard lock(implementation_->objects_mutex);
+      const auto found =
+          implementation_->semaphores.find(static_cast<int>(state.gpr[4]));
+      if (found == implementation_->semaphores.end())
+        return;
+      semaphore = found->second;
+    }
+    {
+      std::lock_guard lock(semaphore->mutex);
+      semaphore->count =
+          std::min(semaphore->maximum,
+                   semaphore->count + static_cast<int>(state.gpr[5]));
+    }
+    semaphore->changed.notify_all();
+    state.gpr[2] = 0;
+    return;
+  }
+  if (name == "sceKernelDeleteSema") {
+    std::lock_guard lock(implementation_->objects_mutex);
+    state.gpr[2] =
+        implementation_->semaphores.erase(static_cast<int>(state.gpr[4]))
+            ? 0U
+            : unimplemented;
+    return;
+  }
+
+  if (name == "sceKernelCreateEventFlag") {
+    auto event = std::make_shared<Implementation::EventFlag>();
+    event->bits = state.gpr[6];
+    std::lock_guard lock(implementation_->objects_mutex);
+    const auto uid = implementation_->allocate_uid();
+    implementation_->event_flags.emplace(uid, event);
+    state.gpr[2] = static_cast<std::uint32_t>(uid);
+    return;
+  }
+  if (is_one_of(name, {"sceKernelSetEventFlag", "sceKernelClearEventFlag"})) {
+    std::shared_ptr<Implementation::EventFlag> event;
+    {
+      std::lock_guard lock(implementation_->objects_mutex);
+      const auto found =
+          implementation_->event_flags.find(static_cast<int>(state.gpr[4]));
+      if (found == implementation_->event_flags.end())
+        return;
+      event = found->second;
+    }
+    {
+      std::lock_guard lock(event->mutex);
+      if (name == "sceKernelSetEventFlag")
+        event->bits |= state.gpr[5];
+      else
+        event->bits &= state.gpr[5];
+    }
+    event->changed.notify_all();
+    state.gpr[2] = 0;
+    return;
+  }
+  if (name == "sceKernelWaitEventFlag") {
+    std::shared_ptr<Implementation::EventFlag> event;
+    {
+      std::lock_guard lock(implementation_->objects_mutex);
+      const auto found =
+          implementation_->event_flags.find(static_cast<int>(state.gpr[4]));
+      if (found == implementation_->event_flags.end())
+        return;
+      event = found->second;
+    }
+    const auto pattern = state.gpr[5];
+    const auto mode = state.gpr[6];
+    const auto matched = [&] {
+      return (mode & 1U) != 0 ? (event->bits & pattern) != 0
+                              : (event->bits & pattern) == pattern;
+    };
+    std::unique_lock lock(event->mutex);
+    event->changed.wait(
+        lock, [&] { return matched() || implementation_->exit_requested; });
+    const auto observed = event->bits;
+    if (auto* output = guest_pointer<std::uint32_t>(state, state.gpr[7]))
+      *output = observed;
+    if ((mode & 0x20U) != 0)
+      event->bits = 0;
+    else if ((mode & 0x10U) != 0)
+      event->bits &= ~pattern;
+    state.gpr[2] = 0;
+    return;
+  }
+  if (name == "sceKernelDeleteEventFlag") {
+    std::lock_guard lock(implementation_->objects_mutex);
+    state.gpr[2] =
+        implementation_->event_flags.erase(static_cast<int>(state.gpr[4]))
+            ? 0U
+            : unimplemented;
+    return;
+  }
+
+  if (name == "sceKernelAllocPartitionMemory") {
+    std::lock_guard lock(implementation_->objects_mutex);
+    const auto size = state.gpr[7];
+    const auto address = implementation_->allocate_heap(size);
+    if (address == 0) {
+      state.gpr[2] = out_of_memory;
+      return;
+    }
+    const auto uid = implementation_->allocate_uid();
+    implementation_->memory_blocks.emplace(
+        uid, Implementation::MemoryBlock{address, size});
+    state.gpr[2] = static_cast<std::uint32_t>(uid);
+    std::fprintf(stderr,
+                 "[psprism:memory] partition uid=%d size=%u address=%08x\n",
+                 uid, size, address);
+    return;
+  }
+  if (name == "sceKernelGetBlockHeadAddr") {
+    std::lock_guard lock(implementation_->objects_mutex);
+    const auto found =
+        implementation_->memory_blocks.find(static_cast<int>(state.gpr[4]));
+    if (found != implementation_->memory_blocks.end())
+      state.gpr[2] = found->second.address;
+    return;
+  }
+  if (name == "sceKernelFreePartitionMemory") {
+    std::lock_guard lock(implementation_->objects_mutex);
+    state.gpr[2] =
+        implementation_->memory_blocks.erase(static_cast<int>(state.gpr[4]))
+            ? 0U
+            : unimplemented;
+    return;
+  }
+  if (name == "sceKernelMaxFreeMemSize") {
+    std::lock_guard lock(implementation_->objects_mutex);
+    state.gpr[2] =
+        implementation_->stack_cursor > implementation_->heap_cursor
+            ? implementation_->stack_cursor - implementation_->heap_cursor
+            : 0U;
+    return;
+  }
+  if (name == "sceKernelCreateFpl") {
+    const auto block_size = state.gpr[7];
+    const auto block_count = state.gpr[8];
+    std::fprintf(stderr,
+                 "[psprism:memory] create-fpl block_size=%u blocks=%u "
+                 "sp=%08x\n",
+                 block_size, block_count, state.gpr[29]);
+    if (block_size == 0 || block_count == 0) {
+      state.gpr[2] = out_of_memory;
+      return;
+    }
+    auto pool = std::make_shared<Implementation::FixedPool>();
+    std::lock_guard lock(implementation_->objects_mutex);
+    for (std::uint32_t index = 0; index < block_count; ++index) {
+      const auto address = implementation_->allocate_heap(block_size);
+      if (address == 0) {
+        state.gpr[2] = out_of_memory;
+        return;
+      }
+      pool->available.push_back(address);
+    }
+    const auto uid = implementation_->allocate_uid();
+    implementation_->fixed_pools.emplace(uid, pool);
+    state.gpr[2] = static_cast<std::uint32_t>(uid);
+    std::fprintf(stderr, "[psprism:memory] fpl uid=%d\n", uid);
+    return;
+  }
+  if (name == "sceKernelAllocateFpl") {
+    std::shared_ptr<Implementation::FixedPool> pool;
+    {
+      std::lock_guard lock(implementation_->objects_mutex);
+      const auto found =
+          implementation_->fixed_pools.find(static_cast<int>(state.gpr[4]));
+      if (found == implementation_->fixed_pools.end())
+        return;
+      pool = found->second;
+    }
+    std::unique_lock lock(pool->mutex);
+    pool->changed.wait(lock, [&] {
+      return !pool->available.empty() || implementation_->exit_requested;
+    });
+    if (pool->available.empty())
+      return;
+    const auto address = pool->available.back();
+    pool->available.pop_back();
+    if (auto* output = guest_pointer<std::uint32_t>(state, state.gpr[5]))
+      *output = address;
+    state.gpr[2] = 0;
+    std::fprintf(stderr,
+                 "[psprism:memory] allocate-fpl uid=%u output=%08x "
+                 "address=%08x\n",
+                 state.gpr[4], state.gpr[5], address);
+    return;
+  }
+  if (name == "sceKernelFreeFpl") {
+    std::shared_ptr<Implementation::FixedPool> pool;
+    {
+      std::lock_guard lock(implementation_->objects_mutex);
+      const auto found =
+          implementation_->fixed_pools.find(static_cast<int>(state.gpr[4]));
+      if (found == implementation_->fixed_pools.end())
+        return;
+      pool = found->second;
+    }
+    {
+      std::lock_guard lock(pool->mutex);
+      pool->available.push_back(state.gpr[5]);
+    }
+    pool->changed.notify_one();
+    state.gpr[2] = 0;
+    return;
+  }
+  if (name == "sceKernelDeleteFpl") {
+    std::lock_guard lock(implementation_->objects_mutex);
+    state.gpr[2] =
+        implementation_->fixed_pools.erase(static_cast<int>(state.gpr[4]))
+            ? 0U
+            : unimplemented;
+    return;
+  }
 
   if (is_one_of(name,
                 {"sceKernelGetModuleId", "sceKernelSetCompilerVersion",
@@ -160,14 +650,34 @@ void Runtime::dispatch(psprecomp::State &state, std::string_view name) {
     state.gpr[2] = 0;
     return;
   }
-  if (is_one_of(name, {"sceKernelExitGame", "sceKernelExitThread",
-                       "sceKernelSleepThreadCB"})) {
+  if (is_one_of(name, {"sceKernelExitGame", "sceKernelExitThread"})) {
+    if (name == "sceKernelExitGame") {
+      implementation_->exit_requested = true;
+      std::lock_guard lock(implementation_->objects_mutex);
+      for (const auto& [uid, semaphore] : implementation_->semaphores) {
+        static_cast<void>(uid);
+        semaphore->changed.notify_all();
+      }
+      for (const auto& [uid, event] : implementation_->event_flags) {
+        static_cast<void>(uid);
+        event->changed.notify_all();
+      }
+      for (const auto& [uid, pool] : implementation_->fixed_pools) {
+        static_cast<void>(uid);
+        pool->changed.notify_all();
+      }
+    }
     state.gpr[2] = 0;
     state.stop_reason = psprecomp::StopReason::returned;
     return;
   }
+  if (name == "sceKernelSleepThreadCB") {
+    host::sleep_microseconds(1000U);
+    state.gpr[2] = 0;
+    return;
+  }
   if (name == "sceKernelPrintf") {
-    if (const auto *format = guest_string(state, state.gpr[4])) {
+    if (const auto* format = guest_string(state, state.gpr[4])) {
       std::fprintf(stderr, "[guest] %s", format);
     }
     state.gpr[2] = 0;
@@ -185,7 +695,7 @@ void Runtime::dispatch(psprecomp::State &state, std::string_view name) {
   }
   if (name == "sceKernelLibcTime") {
     const auto seconds = static_cast<std::uint32_t>(host::unix_seconds());
-    if (auto *destination = guest_pointer<std::uint32_t>(state, state.gpr[4])) {
+    if (auto* destination = guest_pointer<std::uint32_t>(state, state.gpr[4])) {
       *destination = seconds;
     }
     state.gpr[2] = seconds;
@@ -227,7 +737,7 @@ void Runtime::dispatch(psprecomp::State &state, std::string_view name) {
     const auto count = state.gpr[5];
     if (!psprecomp::address_ok(state, state.gpr[4], pad_size * count))
       return;
-    auto *output = state.memory + state.gpr[4] - state.memory_base;
+    auto* output = state.memory + state.gpr[4] - state.memory_base;
     std::memset(output, 0, pad_size * count);
     for (std::uint32_t index = 0; index < count; ++index) {
       const auto timestamp =
@@ -240,7 +750,7 @@ void Runtime::dispatch(psprecomp::State &state, std::string_view name) {
     return;
   }
   if (is_one_of(name, {"sceIoOpen", "sceIoOpenAsync"})) {
-    const auto *path = guest_string(state, state.gpr[4]);
+    const auto* path = guest_string(state, state.gpr[4]);
     if (path == nullptr)
       return;
     const auto resolved = implementation_->resolve_path(path);
@@ -275,7 +785,7 @@ void Runtime::dispatch(psprecomp::State &state, std::string_view name) {
     const auto size = static_cast<std::size_t>(state.gpr[6]);
     if (descriptor < 0 || !psprecomp::address_ok(state, state.gpr[5], size))
       return;
-    auto *buffer = state.memory + state.gpr[5] - state.memory_base;
+    auto* buffer = state.memory + state.gpr[5] - state.memory_base;
     const auto result = name == "sceIoWrite" ? ::write(descriptor, buffer, size)
                                              : ::read(descriptor, buffer, size);
     state.gpr[2] = result < 0 ? io_error : static_cast<std::uint32_t>(result);

@@ -33,6 +33,10 @@ struct State {
     std::uint8_t* memory{};
     std::size_t memory_size{};
     std::uint32_t memory_base{};
+    std::uint8_t* scratchpad{};
+    std::size_t scratchpad_size{};
+    std::uint8_t* video_memory{};
+    std::size_t video_memory_size{};
     // PSP-native builds may access real user/VRAM addresses returned by the
     // firmware in addition to the relocated module image.
     bool direct_memory_access{};
@@ -42,15 +46,35 @@ struct State {
     StopReason stop_reason{StopReason::running};
     std::uint32_t fault_address{};
     std::uint32_t fault_instruction{};
+    std::uint32_t fault_pc{};
 };
+
+inline std::uint8_t* mapped_address(const State& state, std::uint32_t address,
+                                    std::size_t width) {
+    const auto within = [width](std::uint32_t address, std::uint32_t base,
+                                std::size_t size) {
+        if (address < base) return false;
+        const auto offset = static_cast<std::size_t>(address - base);
+        return offset <= size && width <= size - offset;
+    };
+    if (state.memory != nullptr &&
+        within(address, state.memory_base, state.memory_size)) {
+        return state.memory + address - state.memory_base;
+    }
+    if (state.scratchpad != nullptr &&
+        within(address, 0x00010000U, state.scratchpad_size)) {
+        return state.scratchpad + address - 0x00010000U;
+    }
+    if (state.video_memory != nullptr &&
+        within(address, 0x04000000U, state.video_memory_size)) {
+        return state.video_memory + address - 0x04000000U;
+    }
+    return nullptr;
+}
 
 inline bool address_ok(const State& state, std::uint32_t address,
                        std::size_t width) {
-    if (address < state.memory_base) {
-        return false;
-    }
-    const auto offset = static_cast<std::size_t>(address - state.memory_base);
-    return offset <= state.memory_size && width <= state.memory_size - offset;
+    return mapped_address(state, address, width) != nullptr;
 }
 
 inline bool direct_address_ok(State& state, std::uint32_t address,
@@ -63,6 +87,7 @@ inline bool direct_address_ok(State& state, std::uint32_t address,
                     std::numeric_limits<std::uint32_t>::max() - address) + 1U) {
         state.stop_reason = StopReason::memory_fault;
         state.fault_address = address;
+        if (state.fault_pc == 0) state.fault_pc = state.pc;
         return false;
     }
     return true;
@@ -79,15 +104,17 @@ inline std::uint8_t load8(State& state, std::uint32_t address) {
     if (!address_ok(state, address, 1)) {
         state.stop_reason = StopReason::memory_fault;
         state.fault_address = address;
+        if (state.fault_pc == 0) state.fault_pc = state.pc;
         return 0;
     }
-    return state.memory[address - state.memory_base];
+    return *mapped_address(state, address, 1);
 }
 
 inline std::uint16_t load16(State& state, std::uint32_t address) {
     if ((address & 1U) != 0U) {
         state.stop_reason = StopReason::memory_fault;
         state.fault_address = address;
+        if (state.fault_pc == 0) state.fault_pc = state.pc;
         return 0;
     }
     if (state.direct_memory_access) {
@@ -107,17 +134,19 @@ inline std::uint16_t load16(State& state, std::uint32_t address) {
     if (!address_ok(state, address, 2)) {
         state.stop_reason = StopReason::memory_fault;
         state.fault_address = address;
+        if (state.fault_pc == 0) state.fault_pc = state.pc;
         return 0;
     }
-    const auto offset = address - state.memory_base;
-    return static_cast<std::uint16_t>(state.memory[offset]) |
-           static_cast<std::uint16_t>(state.memory[offset + 1]) << 8U;
+    const auto* pointer = mapped_address(state, address, 2);
+    return static_cast<std::uint16_t>(pointer[0]) |
+           static_cast<std::uint16_t>(pointer[1]) << 8U;
 }
 
 inline std::uint32_t load32(State& state, std::uint32_t address) {
     if ((address & 3U) != 0U) {
         state.stop_reason = StopReason::memory_fault;
         state.fault_address = address;
+        if (state.fault_pc == 0) state.fault_pc = state.pc;
         return 0;
     }
     if (state.direct_memory_access) {
@@ -139,13 +168,14 @@ inline std::uint32_t load32(State& state, std::uint32_t address) {
     if (!address_ok(state, address, 4)) {
         state.stop_reason = StopReason::memory_fault;
         state.fault_address = address;
+        if (state.fault_pc == 0) state.fault_pc = state.pc;
         return 0;
     }
-    const auto offset = address - state.memory_base;
-    return static_cast<std::uint32_t>(state.memory[offset]) |
-           static_cast<std::uint32_t>(state.memory[offset + 1]) << 8U |
-           static_cast<std::uint32_t>(state.memory[offset + 2]) << 16U |
-           static_cast<std::uint32_t>(state.memory[offset + 3]) << 24U;
+    const auto* pointer = mapped_address(state, address, 4);
+    return static_cast<std::uint32_t>(pointer[0]) |
+           static_cast<std::uint32_t>(pointer[1]) << 8U |
+           static_cast<std::uint32_t>(pointer[2]) << 16U |
+           static_cast<std::uint32_t>(pointer[3]) << 24U;
 }
 
 // Instruction immediates are read from the relocated guest image.  PSP PRX
@@ -158,11 +188,11 @@ inline std::uint32_t instruction_word(const State& state,
     if ((current_pc & 3U) != 0U || !address_ok(state, current_pc, 4)) {
         return fallback;
     }
-    const auto offset = current_pc - state.memory_base;
-    return static_cast<std::uint32_t>(state.memory[offset]) |
-           static_cast<std::uint32_t>(state.memory[offset + 1]) << 8U |
-           static_cast<std::uint32_t>(state.memory[offset + 2]) << 16U |
-           static_cast<std::uint32_t>(state.memory[offset + 3]) << 24U;
+    const auto* pointer = mapped_address(state, current_pc, 4);
+    return static_cast<std::uint32_t>(pointer[0]) |
+           static_cast<std::uint32_t>(pointer[1]) << 8U |
+           static_cast<std::uint32_t>(pointer[2]) << 16U |
+           static_cast<std::uint32_t>(pointer[3]) << 24U;
 }
 
 inline std::uint32_t instruction_immediate(const State& state,
@@ -212,15 +242,17 @@ inline void store8(State& state, std::uint32_t address, std::uint8_t value) {
     if (!address_ok(state, address, 1)) {
         state.stop_reason = StopReason::memory_fault;
         state.fault_address = address;
+        if (state.fault_pc == 0) state.fault_pc = state.pc;
         return;
     }
-    state.memory[address - state.memory_base] = value;
+    *mapped_address(state, address, 1) = value;
 }
 
 inline void store16(State& state, std::uint32_t address, std::uint16_t value) {
     if ((address & 1U) != 0U) {
         state.stop_reason = StopReason::memory_fault;
         state.fault_address = address;
+        if (state.fault_pc == 0) state.fault_pc = state.pc;
         return;
     }
     if (state.direct_memory_access) {
@@ -241,17 +273,19 @@ inline void store16(State& state, std::uint32_t address, std::uint16_t value) {
     if (!address_ok(state, address, 2)) {
         state.stop_reason = StopReason::memory_fault;
         state.fault_address = address;
+        if (state.fault_pc == 0) state.fault_pc = state.pc;
         return;
     }
-    const auto offset = address - state.memory_base;
-    state.memory[offset] = static_cast<std::uint8_t>(value);
-    state.memory[offset + 1] = static_cast<std::uint8_t>(value >> 8U);
+    auto* pointer = mapped_address(state, address, 2);
+    pointer[0] = static_cast<std::uint8_t>(value);
+    pointer[1] = static_cast<std::uint8_t>(value >> 8U);
 }
 
 inline void store32(State& state, std::uint32_t address, std::uint32_t value) {
     if ((address & 3U) != 0U) {
         state.stop_reason = StopReason::memory_fault;
         state.fault_address = address;
+        if (state.fault_pc == 0) state.fault_pc = state.pc;
         return;
     }
     if (state.direct_memory_access) {
@@ -274,13 +308,14 @@ inline void store32(State& state, std::uint32_t address, std::uint32_t value) {
     if (!address_ok(state, address, 4)) {
         state.stop_reason = StopReason::memory_fault;
         state.fault_address = address;
+        if (state.fault_pc == 0) state.fault_pc = state.pc;
         return;
     }
-    const auto offset = address - state.memory_base;
-    state.memory[offset] = static_cast<std::uint8_t>(value);
-    state.memory[offset + 1] = static_cast<std::uint8_t>(value >> 8U);
-    state.memory[offset + 2] = static_cast<std::uint8_t>(value >> 16U);
-    state.memory[offset + 3] = static_cast<std::uint8_t>(value >> 24U);
+    auto* pointer = mapped_address(state, address, 4);
+    pointer[0] = static_cast<std::uint8_t>(value);
+    pointer[1] = static_cast<std::uint8_t>(value >> 8U);
+    pointer[2] = static_cast<std::uint8_t>(value >> 16U);
+    pointer[3] = static_cast<std::uint8_t>(value >> 24U);
 }
 
 #if defined(__PSP__)
