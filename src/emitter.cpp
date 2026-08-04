@@ -44,6 +44,34 @@ std::string function_name(std::uint32_t value) {
     return stream.str();
 }
 
+std::string cpp_string(std::string_view value) {
+    std::string result;
+    for (const auto character : value) {
+        if (character == '\\' || character == '"') {
+            result.push_back('\\');
+        }
+        if (character != '\r' && character != '\n') {
+            result.push_back(character);
+        }
+    }
+    return result;
+}
+
+std::string make_value(std::string_view value) {
+    std::string result;
+    for (const auto character : value) {
+        if (character == '$') {
+            result += "$$";
+        } else {
+            result.push_back(character == '\r' || character == '\n' ||
+                                     character == '#'
+                                 ? ' '
+                                 : character);
+        }
+    }
+    return result;
+}
+
 bool starts_delayed_branch(std::uint32_t instruction) {
     const auto op = instruction >> 26U;
     if (op == 0) {
@@ -916,7 +944,9 @@ void emit_cpp(const ElfImage& image, const std::filesystem::path& output,
 }
 
 void emit_project(const ElfImage& image, const std::filesystem::path& directory,
-                  const CodeMap* code_map, std::uint32_t shard_size) {
+                  const CodeMap* code_map,
+                  const GeneratedProjectOptions& options) {
+    const auto shard_size = options.shard_size;
     if (shard_size == 0 || (shard_size & (shard_size - 1U)) != 0U ||
         shard_size < 0x1000U) {
         throw std::runtime_error("shard size must be a power of two >= 0x1000");
@@ -1722,7 +1752,9 @@ void emit_project(const ElfImage& image, const std::filesystem::path& directory,
                   "#include <cstdint>\n"
                   "#include <cstring>\n"
                   "#include <malloc.h>\n\n"
-                  "PSP_MODULE_INFO(\"PSP Recompiled\", 0, 1, 0);\n"
+                  "PSP_MODULE_INFO(\""
+               << cpp_string(options.module_name)
+               << "\", 0, 1, 0);\n"
                   "PSP_MAIN_THREAD_ATTR(THREAD_ATTR_USER | THREAD_ATTR_VFPU);\n"
                   "PSP_MAIN_THREAD_STACK_SIZE_KB(256);\n"
                   "PSP_HEAP_SIZE_KB(768);\n\n"
@@ -1854,7 +1886,9 @@ void emit_project(const ElfImage& image, const std::filesystem::path& directory,
             throw std::runtime_error("cannot create generated PSP Makefile");
         }
         stream << "PSPSDK := $(shell psp-config --pspsdk-path)\n"
-                  "TARGET = psp_recompiled\n"
+                  "TARGET = "
+               << make_value(options.target_name)
+               << "\n"
                   "OBJS = psp_main.o imports.o import_bridge.o dispatch.o";
         for (const auto& name : source_names) {
             if (name.rfind("shard_", 0) == 0 ||
@@ -1865,8 +1899,12 @@ void emit_project(const ElfImage& image, const std::filesystem::path& directory,
         stream << " guest_image.o guest_relocations.o\n"
                   "BUILD_PRX = 1\n"
                   "EXTRA_TARGETS = EBOOT.PBP\n"
-                  "PSP_EBOOT_TITLE = PSP Recompiled\n"
-                  "PSPRECOMP_INCLUDE ?= ../../include\n"
+                  "PSP_EBOOT_TITLE = "
+               << make_value(options.display_name)
+               << "\n"
+                  "PSPRECOMP_INCLUDE ?= "
+               << make_value(options.include_path)
+               << "\n"
                   "CFLAGS = -Os -G0 -Wall -I$(PSPRECOMP_INCLUDE)\n"
                   "CXXFLAGS = $(CFLAGS) -std=c++20 -fno-exceptions -fno-rtti\n"
                   "ASFLAGS = $(CFLAGS)\n"

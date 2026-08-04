@@ -9,7 +9,11 @@ add_executable(psprecomp
     src/main.cpp
     src/elf.cpp
     src/emitter.cpp
+    src/iso.cpp
+    src/project.cpp
 )
+target_compile_definitions(psprecomp PRIVATE
+    PSPRECOMP_SOURCE_INCLUDE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_include_directories(psprecomp PRIVATE src include)
 target_compile_options(psprecomp PRIVATE -Wall -Wextra -Wpedantic -Werror)
 
@@ -19,6 +23,11 @@ if(BUILD_TESTING)
     target_include_directories(runtime_tests PRIVATE include)
     target_compile_options(runtime_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
     add_test(NAME runtime_tests COMMAND runtime_tests)
+
+    add_executable(iso_tests tests/iso_tests.cpp src/iso.cpp)
+    target_include_directories(iso_tests PRIVATE src)
+    target_compile_options(iso_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+    add_test(NAME iso_tests COMMAND iso_tests)
 
     find_program(PSP_GCC psp-gcc HINTS "$ENV{PSPDEV}/bin")
     find_program(PSP_LD psp-ld HINTS "$ENV{PSPDEV}/bin")

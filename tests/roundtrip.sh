@@ -60,3 +60,16 @@ test -s "$ROUNDTRIP_TMP/EBOOT.PBP"
     "$SOURCE_DIR/tests/fixtures/arithmetic.c" \
     -o "$ROUNDTRIP_TMP/project-runner"
 "$ROUNDTRIP_TMP/project-runner"
+
+# Exercise the beginner-facing, self-contained codebase exporter. The exported
+# project must build without referring back to PSPRecomp's source tree.
+"$RECOMPILER" init "$ROUNDTRIP_TMP/project.elf" \
+    --display-name "Roundtrip Export" \
+    --project-name roundtrip_export \
+    --output "$ROUNDTRIP_TMP/exported" \
+    --yes
+test -s "$ROUNDTRIP_TMP/exported/project.toml"
+test -s "$ROUNDTRIP_TMP/exported/include/psprecomp/runtime.hpp"
+make -C "$ROUNDTRIP_TMP/exported" -j2
+test -s "$ROUNDTRIP_TMP/exported/src/generated/roundtrip_export.prx"
+test -s "$ROUNDTRIP_TMP/exported/src/generated/EBOOT.PBP"
