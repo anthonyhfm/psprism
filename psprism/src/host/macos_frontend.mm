@@ -60,10 +60,56 @@ struct FragmentState {
   std::uint32_t texture_environment_color{};
 };
 
+MTLBlendFactor psp_blend_factor(std::uint32_t factor,
+                                std::uint32_t fixed_color, bool source) {
+  if (factor >= 10U) {
+    if ((fixed_color & 0x00ffffffU) == 0U)
+      return MTLBlendFactorZero;
+    if ((fixed_color & 0x00ffffffU) == 0x00ffffffU)
+      return MTLBlendFactorOne;
+    return MTLBlendFactorBlendColor;
+  }
+  constexpr MTLBlendFactor source_factors[] = {
+      MTLBlendFactorDestinationColor,
+      MTLBlendFactorOneMinusDestinationColor,
+      MTLBlendFactorSourceAlpha,
+      MTLBlendFactorOneMinusSourceAlpha,
+      MTLBlendFactorDestinationAlpha,
+      MTLBlendFactorOneMinusDestinationAlpha,
+      MTLBlendFactorSourceAlpha,
+      MTLBlendFactorOneMinusSourceAlpha,
+      MTLBlendFactorDestinationAlpha,
+      MTLBlendFactorOneMinusDestinationAlpha,
+  };
+  constexpr MTLBlendFactor destination_factors[] = {
+      MTLBlendFactorSourceColor,
+      MTLBlendFactorOneMinusSourceColor,
+      MTLBlendFactorSourceAlpha,
+      MTLBlendFactorOneMinusSourceAlpha,
+      MTLBlendFactorDestinationAlpha,
+      MTLBlendFactorOneMinusDestinationAlpha,
+      MTLBlendFactorSourceAlpha,
+      MTLBlendFactorOneMinusSourceAlpha,
+      MTLBlendFactorDestinationAlpha,
+      MTLBlendFactorOneMinusDestinationAlpha,
+  };
+  return source ? source_factors[factor] : destination_factors[factor];
+}
+
+MTLBlendOperation psp_blend_operation(std::uint32_t equation) {
+  switch (equation) {
+    case 1U: return MTLBlendOperationSubtract;
+    case 2U: return MTLBlendOperationReverseSubtract;
+    case 3U: return MTLBlendOperationMin;
+    case 4U: return MTLBlendOperationMax;
+    default: return MTLBlendOperationAdd;
+  }
+}
+
 std::mutex geometry_mutex;
 std::vector<GeometryBatch> building_geometry_batches;
+std::vector<GeometryBatch> pending_geometry_batches;
 std::vector<GeometryBatch> presented_geometry_batches;
-std::atomic_bool has_completed_ge_frame{};
 std::atomic_uint32_t display_framebuffer_address{0x04000000U};
 std::atomic_uint32_t keyboard_buttons{};
 std::atomic_uint32_t keyboard_latched_buttons{};
@@ -128,6 +174,8 @@ bool update_keyboard_key(unsigned short key_code, bool pressed) {
 @property(nonatomic, strong) id<MTLRenderPipelineState> texturedGeometryPipeline;
 @property(nonatomic, strong) id<MTLRenderPipelineState> blendedGeometryPipeline;
 @property(nonatomic, strong) id<MTLRenderPipelineState> blendedTexturedGeometryPipeline;
+@property(nonatomic, strong) id<MTLLibrary> shaderLibrary;
+@property(nonatomic, strong) NSMutableDictionary<NSNumber*, id<MTLRenderPipelineState>>* blendPipelines;
 @property(nonatomic, strong) id<MTLTexture> texture;
 @property(nonatomic, strong) NSArray<id<MTLDepthStencilState>>* depthStates;
 @property(nonatomic, strong) NSArray<id<MTLSamplerState>>* samplerStates;
@@ -263,6 +311,8 @@ bool update_keyboard_key(unsigned short key_code, bool pressed) {
     NSLog(@"psprism: Metal shader error: %@", error);
     return nil;
   }
+  self.shaderLibrary = library;
+  self.blendPipelines = [NSMutableDictionary dictionary];
   MTLRenderPipelineDescriptor* descriptor =
       [[MTLRenderPipelineDescriptor alloc] init];
   descriptor.vertexFunction = [library newFunctionWithName:@"psprism_vertex"];
@@ -360,6 +410,59 @@ bool update_keyboard_key(unsigned short key_code, bool pressed) {
   }
   self.samplerStates = sampler_states;
   return self;
+}
+
+- (id<MTLRenderPipelineState>)blendPipelineForView:(MTKView*)view
+                                           textured:(BOOL)textured
+                                              state:(const psprism::host::GeometryState&)state {
+  const auto source_fixed_class = state.blend_source >= 10U
+                                      ? (state.blend_fix_a == 0U ? 1U
+                                         : state.blend_fix_a == 0x00ffffffU ? 2U
+                                                                           : 3U)
+                                      : 0U;
+  const auto destination_fixed_class = state.blend_destination >= 10U
+                                           ? (state.blend_fix_b == 0U ? 1U
+                                              : state.blend_fix_b == 0x00ffffffU ? 2U
+                                                                                : 3U)
+                                           : 0U;
+  const std::uint32_t key = (textured ? 1U : 0U) |
+                            ((state.blend_source & 0xfU) << 1U) |
+                            ((state.blend_destination & 0xfU) << 5U) |
+                            ((state.blend_equation & 7U) << 9U) |
+                            (source_fixed_class << 12U) |
+                            (destination_fixed_class << 14U);
+  if (id<MTLRenderPipelineState> cached = self.blendPipelines[@(key)])
+    return cached;
+  MTLRenderPipelineDescriptor* descriptor =
+      [[MTLRenderPipelineDescriptor alloc] init];
+  descriptor.vertexFunction =
+      [self.shaderLibrary newFunctionWithName:@"psprism_geometry_vertex"];
+  descriptor.fragmentFunction = [self.shaderLibrary
+      newFunctionWithName:textured ? @"psprism_textured_geometry_fragment"
+                                   : @"psprism_geometry_fragment"];
+  descriptor.colorAttachments[0].pixelFormat = view.colorPixelFormat;
+  descriptor.depthAttachmentPixelFormat = view.depthStencilPixelFormat;
+  auto* attachment = descriptor.colorAttachments[0];
+  attachment.blendingEnabled = YES;
+  attachment.sourceRGBBlendFactor = psp_blend_factor(
+      std::min(state.blend_source, 10U), state.blend_fix_a, true);
+  attachment.destinationRGBBlendFactor = psp_blend_factor(
+      std::min(state.blend_destination, 10U), state.blend_fix_b, false);
+  attachment.rgbBlendOperation =
+      psp_blend_operation(state.blend_equation);
+  attachment.sourceAlphaBlendFactor = MTLBlendFactorOne;
+  attachment.destinationAlphaBlendFactor = MTLBlendFactorZero;
+  attachment.alphaBlendOperation = MTLBlendOperationAdd;
+  NSError* error = nil;
+  id<MTLRenderPipelineState> pipeline =
+      [self.device newRenderPipelineStateWithDescriptor:descriptor error:&error];
+  if (pipeline == nil) {
+    NSLog(@"psprism: Metal PSP blend pipeline error: %@", error);
+    return textured ? self.blendedTexturedGeometryPipeline
+                    : self.blendedGeometryPipeline;
+  }
+  self.blendPipelines[@(key)] = pipeline;
+  return pipeline;
 }
 
 - (void)drawInMTKView:(MTKView*)view {
@@ -474,13 +577,18 @@ bool update_keyboard_key(unsigned short key_code, bool pressed) {
              bytesPerRow:batch.texture_width * 4U];
       }
       if (sampled_texture == nil) {
-        [encoder setRenderPipelineState:batch.state.alpha_blend
-                                            ? self.blendedGeometryPipeline
-                                            : self.geometryPipeline];
+        [encoder setRenderPipelineState:
+                     batch.state.alpha_blend
+                         ? [self blendPipelineForView:view
+                                            textured:NO
+                                               state:batch.state]
+                         : self.geometryPipeline];
       } else {
         [encoder setRenderPipelineState:
                      batch.state.alpha_blend
-                         ? self.blendedTexturedGeometryPipeline
+                         ? [self blendPipelineForView:view
+                                            textured:YES
+                                               state:batch.state]
                          : self.texturedGeometryPipeline];
         const auto sampler_state =
             (batch.state.texture_linear_filter ? 4U : 0U) +
@@ -489,6 +597,17 @@ bool update_keyboard_key(unsigned short key_code, bool pressed) {
         [encoder setFragmentSamplerState:self.samplerStates[sampler_state]
                                  atIndex:0];
         [encoder setFragmentTexture:sampled_texture atIndex:0];
+      }
+      if (batch.state.alpha_blend &&
+          (batch.state.blend_source >= 10U ||
+           batch.state.blend_destination >= 10U)) {
+        const auto fixed = batch.state.blend_source >= 10U
+                               ? batch.state.blend_fix_a
+                               : batch.state.blend_fix_b;
+        [encoder setBlendColorRed:static_cast<double>(fixed & 0xffU) / 255.0
+                            green:static_cast<double>((fixed >> 8U) & 0xffU) / 255.0
+                             blue:static_cast<double>((fixed >> 16U) & 0xffU) / 255.0
+                            alpha:1.0];
       }
       [encoder setVertexBytes:batch.vertices.data()
                        length:batch.vertices.size() * sizeof(psprism::host::GeometryVertex)
@@ -717,8 +836,24 @@ void present_frame(const std::uint8_t* pixels, std::uint32_t stride,
     [renderer.texture replaceRegion:region mipmapLevel:0
                           withBytes:converted->data()
                         bytesPerRow:static_cast<NSUInteger>(width) * 4U];
-    if (!has_completed_ge_frame.load()) [metal_view setNeedsDisplay:YES];
+    [metal_view setNeedsDisplay:YES];
   });
+  present_ge_frame();
+}
+
+void present_ge_frame() {
+  bool has_geometry = false;
+  {
+    std::lock_guard lock(geometry_mutex);
+    has_geometry = !pending_geometry_batches.empty();
+    presented_geometry_batches.insert(
+        presented_geometry_batches.end(),
+        std::make_move_iterator(pending_geometry_batches.begin()),
+        std::make_move_iterator(pending_geometry_batches.end()));
+    pending_geometry_batches.clear();
+  }
+  if (has_geometry)
+    dispatch_async(dispatch_get_main_queue(), ^{ [metal_view setNeedsDisplay:YES]; });
 }
 
 void begin_ge_frame() {
@@ -729,14 +864,12 @@ void begin_ge_frame() {
 void end_ge_frame() {
   {
     std::lock_guard lock(geometry_mutex);
-    presented_geometry_batches.insert(
-        presented_geometry_batches.end(),
+    pending_geometry_batches.insert(
+        pending_geometry_batches.end(),
         std::make_move_iterator(building_geometry_batches.begin()),
         std::make_move_iterator(building_geometry_batches.end()));
     building_geometry_batches.clear();
   }
-  has_completed_ge_frame.store(true);
-  dispatch_async(dispatch_get_main_queue(), ^{ [metal_view setNeedsDisplay:YES]; });
 }
 
 void submit_ge_primitive(std::uint32_t type,

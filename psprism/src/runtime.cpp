@@ -236,7 +236,8 @@ std::uint32_t decode_16bit_color(std::uint16_t packed,
 
 DecodedTexture decode_texture(
     psprecomp::State& state,
-    const std::array<std::uint32_t, 256>& commands) {
+    const std::array<std::uint32_t, 256>& commands,
+    const std::array<std::uint8_t, 1024>& clut) {
   DecodedTexture result;
   const auto format = commands[0xc3U] & 0xfU;
   result.address = (commands[0xa0U] & 0x00fffff0U) |
@@ -266,14 +267,8 @@ DecodedTexture decode_texture(
     return {};
   const std::uint8_t* palette{};
   auto palette_format = commands[0xc5U] & 3U;
-  auto palette_entry_size = palette_format == 3U ? 4U : 2U;
   if (format >= 4U) {
-    const auto clut_address = (commands[0xb0U] & 0x00fffff0U) |
-                              ((commands[0xb1U] << 8U) & 0x0f000000U);
-    palette = psprecomp::mapped_address(state, clut_address,
-                                        256U * palette_entry_size);
-    if (palette == nullptr)
-      return {};
+    palette = clut.data();
   }
   const auto shift = (commands[0xc5U] >> 2U) & 0x1fU;
   const auto mask = (commands[0xc5U] >> 8U) & 0xffU;
@@ -378,6 +373,7 @@ struct Runtime::Implementation {
     std::array<float, 12> view_matrix{};
     std::array<float, 16> projection_matrix{};
     std::array<float, 96> bone_matrices{};
+    std::array<std::uint8_t, 1024> clut{};
     std::uint32_t world_matrix_index{};
     std::uint32_t view_matrix_index{};
     std::uint32_t projection_matrix_index{};
@@ -998,7 +994,10 @@ void Runtime::dispatch(psprecomp::State& state, std::string_view name) {
       std::uint32_t words{};
       std::uint32_t primitives{};
       bool ended{};
-      for (; words < 65536U; ++words) {
+      // CALLed display-list fragments count toward this guard as well. Large
+      // games can legitimately execute well beyond 64K words before END.
+      constexpr std::uint32_t max_ge_command_words = 1U << 20U;
+      for (; words < max_ge_command_words; ++words) {
         const auto* pointer =
             psprecomp::mapped_address(state, program_counter, 4U);
         if (pointer == nullptr)
@@ -1043,6 +1042,20 @@ void Runtime::dispatch(psprecomp::State& state, std::string_view name) {
           if (graphics.bone_matrix_index < graphics.bone_matrices.size())
             graphics.bone_matrices[graphics.bone_matrix_index++] =
                 float24(argument);
+        } else if (command == 0xc4U) {
+          // LOADCLUT copies palette data into GE-internal storage.  Later
+          // texture draws keep using that copy even when the source address
+          // changes, so decoding directly from CLUTADDR is not equivalent.
+          const auto clut_address =
+              (graphics.commands[0xb0U] & 0x00fffff0U) |
+              ((graphics.commands[0xb1U] << 8U) & 0x0f000000U);
+          const auto clut_bytes =
+              std::min<std::size_t>((argument & 0x3fU) * 32U,
+                                    graphics.clut.size());
+          if (const auto* source =
+                  psprecomp::mapped_address(state, clut_address, clut_bytes)) {
+            std::copy_n(source, clut_bytes, graphics.clut.begin());
+          }
         } else if (command == 0x04U) {
           const auto primitive_type = (argument >> 16U) & 7U;
           const auto vertex_count = argument & 0xffffU;
@@ -1130,7 +1143,8 @@ void Runtime::dispatch(psprecomp::State& state, std::string_view name) {
               if (const auto* source = psprecomp::mapped_address(
                       state, graphics.vertex_address, vertex_byte_count)) {
                 std::vector<host::GeometryVertex> vertices(vertex_count);
-                auto texture = decode_texture(state, graphics.commands);
+                auto texture =
+                    decode_texture(state, graphics.commands, graphics.clut);
                 const auto material_color =
                     (graphics.commands[0x55U] & 0x00ffffffU) |
                     ((graphics.commands[0x58U] & 0xffU) << 24U);
@@ -1414,40 +1428,71 @@ void Runtime::dispatch(psprecomp::State& state, std::string_view name) {
                   }
                   if (layout.texture_type != 0 && texture.width != 0 &&
                       texture.height != 0) {
-                    const auto* coordinates = input + layout.texture_offset;
                     float u{};
                     float v{};
-                    if (layout.texture_type == 1U) {
-                      u = static_cast<float>(coordinates[0]);
-                      v = static_cast<float>(coordinates[1]);
-                      if (!through) {
-                        u /= 128.0F;
-                        v /= 128.0F;
-                      }
-                    } else if (layout.texture_type == 2U) {
-                      std::uint16_t packed_u{};
-                      std::uint16_t packed_v{};
-                      std::memcpy(&packed_u, coordinates, sizeof(packed_u));
-                      std::memcpy(&packed_v, coordinates + 2U,
-                                  sizeof(packed_v));
-                      u = static_cast<float>(packed_u);
-                      v = static_cast<float>(packed_v);
-                      if (!through) {
-                        u /= 32768.0F;
-                        v /= 32768.0F;
-                      }
+                    if (!through &&
+                        (graphics.commands[0xc0U] & 3U) == 2U) {
+                      const auto shade_coordinate = [&](std::uint32_t light) {
+                        float light_position[3]{};
+                        for (std::size_t component = 0; component < 3U;
+                             ++component) {
+                          light_position[component] = float24(
+                              graphics.commands[0x63U + light * 3U +
+                                                component]);
+                        }
+                        const auto length =
+                            std::sqrt(light_position[0] * light_position[0] +
+                                      light_position[1] * light_position[1] +
+                                      light_position[2] * light_position[2]);
+                        float factor = world_normal[2];
+                        if (length > 0.0F) {
+                          factor = (light_position[0] * world_normal[0] +
+                                    light_position[1] * world_normal[1] +
+                                    light_position[2] * world_normal[2]) /
+                                   length;
+                        }
+                        return (1.0F + factor) * 0.5F;
+                      };
+                      u = shade_coordinate(graphics.commands[0xc1U] & 3U) *
+                          float24(graphics.commands[0x48U]);
+                      v = shade_coordinate(
+                              (graphics.commands[0xc1U] >> 8U) & 3U) *
+                          float24(graphics.commands[0x49U]);
                     } else {
-                      std::memcpy(&u, coordinates, sizeof(u));
-                      std::memcpy(&v, coordinates + 4U, sizeof(v));
-                    }
-                    if (through) {
-                      u /= static_cast<float>(texture.width);
-                      v /= static_cast<float>(texture.height);
-                    } else {
-                      u = u * float24(graphics.commands[0x48U]) +
-                          float24(graphics.commands[0x4aU]);
-                      v = v * float24(graphics.commands[0x49U]) +
-                          float24(graphics.commands[0x4bU]);
+                      const auto* coordinates =
+                          input + layout.texture_offset;
+                      if (layout.texture_type == 1U) {
+                        u = static_cast<float>(coordinates[0]);
+                        v = static_cast<float>(coordinates[1]);
+                        if (!through) {
+                          u /= 128.0F;
+                          v /= 128.0F;
+                        }
+                      } else if (layout.texture_type == 2U) {
+                        std::uint16_t packed_u{};
+                        std::uint16_t packed_v{};
+                        std::memcpy(&packed_u, coordinates, sizeof(packed_u));
+                        std::memcpy(&packed_v, coordinates + 2U,
+                                    sizeof(packed_v));
+                        u = static_cast<float>(packed_u);
+                        v = static_cast<float>(packed_v);
+                        if (!through) {
+                          u /= 32768.0F;
+                          v /= 32768.0F;
+                        }
+                      } else {
+                        std::memcpy(&u, coordinates, sizeof(u));
+                        std::memcpy(&v, coordinates + 4U, sizeof(v));
+                      }
+                      if (through) {
+                        u /= static_cast<float>(texture.width);
+                        v /= static_cast<float>(texture.height);
+                      } else {
+                        u = u * float24(graphics.commands[0x48U]) +
+                            float24(graphics.commands[0x4aU]);
+                        v = v * float24(graphics.commands[0x49U]) +
+                            float24(graphics.commands[0x4bU]);
+                      }
                     }
                     output.texture[0] = u;
                     output.texture[1] = v;
@@ -1482,6 +1527,15 @@ void Runtime::dispatch(psprecomp::State& state, std::string_view name) {
                 render_state.depth_function = graphics.commands[0xdeU] & 7U;
                 render_state.alpha_blend =
                     !clear_mode && (graphics.commands[0x21U] & 1U) != 0;
+                render_state.blend_source = graphics.commands[0xdfU] & 0xfU;
+                render_state.blend_destination =
+                    (graphics.commands[0xdfU] >> 4U) & 0xfU;
+                render_state.blend_equation =
+                    (graphics.commands[0xdfU] >> 8U) & 7U;
+                render_state.blend_fix_a =
+                    graphics.commands[0xe0U] & 0x00ffffffU;
+                render_state.blend_fix_b =
+                    graphics.commands[0xe1U] & 0x00ffffffU;
                 render_state.color_test =
                     !clear_mode && (graphics.commands[0x27U] & 1U) != 0;
                 render_state.color_function = graphics.commands[0xd8U] & 3U;
@@ -1890,6 +1944,7 @@ void Runtime::dispatch(psprecomp::State& state, std::string_view name) {
     return;
   }
   if (name == "sceDisplayWaitVblankStart") {
+    host::present_ge_frame();
     host::sleep_microseconds(16683U);
     state.gpr[2] = 0;
     return;

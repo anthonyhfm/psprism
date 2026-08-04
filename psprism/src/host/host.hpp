@@ -33,6 +33,11 @@ struct GeometryState {
   bool depth_write{};
   std::uint32_t depth_function{1};
   bool alpha_blend{};
+  std::uint32_t blend_source{};
+  std::uint32_t blend_destination{};
+  std::uint32_t blend_equation{};
+  std::uint32_t blend_fix_a{};
+  std::uint32_t blend_fix_b{};
   bool color_test{};
   std::uint32_t color_function{1};
   std::uint32_t color_reference{};
@@ -55,6 +60,7 @@ void request_frontend_exit();
 void present_frame(const std::uint8_t* pixels, std::uint32_t stride,
                    std::uint32_t width, std::uint32_t height,
                    std::uint32_t format, std::uint32_t address);
+void present_ge_frame();
 void begin_ge_frame();
 void end_ge_frame();
 void submit_ge_primitive(std::uint32_t type,
