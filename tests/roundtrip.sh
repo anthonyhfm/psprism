@@ -80,6 +80,8 @@ test -s "$ROUNDTRIP_TMP/exported/psprism/include/psprism/psprism.hpp"
 test -s "$ROUNDTRIP_TMP/exported/psprism/src/runtime.cpp"
 diff -qr "$SOURCE_DIR/psprism" "$ROUNDTRIP_TMP/exported/psprism"
 grep -q 'add_subdirectory(psprism)' "$ROUNDTRIP_TMP/exported/CMakeLists.txt"
+grep -q 'INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE' \
+    "$ROUNDTRIP_TMP/exported/CMakeLists.txt"
 grep -q 'psprism::Runtime::instance' \
     "$ROUNDTRIP_TMP/exported/platform/macos/platform.cpp"
 grep -q '^psp:' "$ROUNDTRIP_TMP/exported/Makefile"

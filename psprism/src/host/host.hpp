@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <vector>
 
 namespace psprism::host {
@@ -65,7 +66,8 @@ void begin_ge_frame();
 void end_ge_frame();
 void submit_ge_primitive(std::uint32_t type,
                          std::vector<GeometryVertex> vertices,
-                         std::vector<std::uint8_t> texture = {},
+                         std::shared_ptr<const std::vector<std::uint8_t>>
+                             texture = {},
                          std::uint32_t texture_width = 0,
                          std::uint32_t texture_height = 0,
                          GeometryState graphics_state = {});

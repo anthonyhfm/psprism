@@ -331,6 +331,8 @@ std::string macos_cmake(const ExportConfig& config) {
          "set(CMAKE_CXX_STANDARD 20)\n"
          "set(CMAKE_CXX_STANDARD_REQUIRED ON)\n"
          "set(CMAKE_CXX_EXTENSIONS OFF)\n"
+         "include(CheckIPOSupported)\n"
+         "check_ipo_supported(RESULT PSPRECOMP_IPO_SUPPORTED)\n"
          "include(src/generated/generated_sources.cmake)\n\n"
          "add_subdirectory(psprism)\n\n"
          "add_executable("
@@ -351,6 +353,13 @@ std::string macos_cmake(const ExportConfig& config) {
          "target_compile_options("
       << config.project_name
       << " PRIVATE -Wno-tautological-compare)\n"
+         "if(PSPRECOMP_IPO_SUPPORTED)\n"
+         "  set_property(TARGET psprism PROPERTY "
+         "INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)\n"
+         "  set_property(TARGET "
+      << config.project_name
+      << " PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)\n"
+         "endif()\n"
          "set_source_files_properties(\n"
          "  src/generated/guest_image.bin src/generated/relocations.bin\n"
          "  PROPERTIES MACOSX_PACKAGE_LOCATION Resources\n"

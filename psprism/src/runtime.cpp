@@ -202,10 +202,23 @@ void transform44(const std::array<float, 16>& matrix, const float input[3],
 }
 
 struct DecodedTexture {
-  std::vector<std::uint8_t> pixels;
+  std::shared_ptr<std::vector<std::uint8_t>> pixels;
   std::uint32_t width{};
   std::uint32_t height{};
   std::uint32_t address{};
+};
+
+using TextureKey = std::array<std::uint32_t, 7>;
+
+struct TextureKeyHash {
+  std::size_t operator()(const TextureKey& key) const noexcept {
+    std::size_t hash = 0xcbf29ce484222325ULL;
+    for (const auto value : key) {
+      hash ^= value;
+      hash *= 0x100000001b3ULL;
+    }
+    return hash;
+  }
 };
 
 std::uint32_t decode_16bit_color(std::uint16_t packed,
@@ -273,8 +286,8 @@ DecodedTexture decode_texture(
   const auto shift = (commands[0xc5U] >> 2U) & 0x1fU;
   const auto mask = (commands[0xc5U] >> 8U) & 0xffU;
   const auto start = ((commands[0xc5U] >> 16U) & 0x1fU) << 4U;
-  result.pixels.resize(static_cast<std::size_t>(result.width) * result.height *
-                       4U);
+  result.pixels = std::make_shared<std::vector<std::uint8_t>>(
+      static_cast<std::size_t>(result.width) * result.height * 4U);
   for (std::uint32_t y = 0; y < result.height; ++y) {
     for (std::uint32_t x = 0; x < result.width; ++x) {
       std::uint32_t color{};
@@ -308,10 +321,11 @@ DecodedTexture decode_texture(
         }
       }
       const auto output = (static_cast<std::size_t>(y) * result.width + x) * 4U;
-      result.pixels[output] = static_cast<std::uint8_t>(color);
-      result.pixels[output + 1U] = static_cast<std::uint8_t>(color >> 8U);
-      result.pixels[output + 2U] = static_cast<std::uint8_t>(color >> 16U);
-      result.pixels[output + 3U] = static_cast<std::uint8_t>(color >> 24U);
+      (*result.pixels)[output] = static_cast<std::uint8_t>(color);
+      (*result.pixels)[output + 1U] = static_cast<std::uint8_t>(color >> 8U);
+      (*result.pixels)[output + 2U] = static_cast<std::uint8_t>(color >> 16U);
+      (*result.pixels)[output + 3U] =
+          static_cast<std::uint8_t>(color >> 24U);
     }
   }
   return result;
@@ -990,6 +1004,12 @@ void Runtime::dispatch(psprecomp::State& state, std::string_view name) {
         std::uint32_t offset_address;
       };
       std::vector<GeCallFrame> call_stack;
+      call_stack.reserve(64U);
+      std::unordered_map<TextureKey, DecodedTexture, TextureKeyHash>
+          texture_cache;
+      texture_cache.reserve(64U);
+      std::vector<std::uint32_t> vertex_indices;
+      vertex_indices.reserve(4096U);
       auto program_counter = state.gpr[4];
       std::uint32_t words{};
       std::uint32_t primitives{};
@@ -1054,7 +1074,11 @@ void Runtime::dispatch(psprecomp::State& state, std::string_view name) {
                                     graphics.clut.size());
           if (const auto* source =
                   psprecomp::mapped_address(state, clut_address, clut_bytes)) {
-            std::copy_n(source, clut_bytes, graphics.clut.begin());
+            if (!std::equal(source, source + clut_bytes,
+                            graphics.clut.begin())) {
+              std::copy_n(source, clut_bytes, graphics.clut.begin());
+              texture_cache.clear();
+            }
           }
         } else if (command == 0x04U) {
           const auto primitive_type = (argument >> 16U) & 7U;
@@ -1110,7 +1134,7 @@ void Runtime::dispatch(psprecomp::State& state, std::string_view name) {
             const auto index_size = component_size(index_type);
             const auto index_byte_count =
                 static_cast<std::size_t>(vertex_count) * index_size;
-            std::vector<std::uint32_t> vertex_indices(vertex_count);
+            vertex_indices.resize(vertex_count);
             bool indices_valid = true;
             std::uint32_t maximum_index{};
             if (index_type == 0) {
@@ -1143,8 +1167,21 @@ void Runtime::dispatch(psprecomp::State& state, std::string_view name) {
               if (const auto* source = psprecomp::mapped_address(
                       state, graphics.vertex_address, vertex_byte_count)) {
                 std::vector<host::GeometryVertex> vertices(vertex_count);
-                auto texture =
-                    decode_texture(state, graphics.commands, graphics.clut);
+                const TextureKey texture_key{
+                    graphics.commands[0x1eU], graphics.commands[0xa0U],
+                    graphics.commands[0xa8U], graphics.commands[0xb8U],
+                    graphics.commands[0xc2U], graphics.commands[0xc3U],
+                    graphics.commands[0xc5U]};
+                auto cached_texture = texture_cache.find(texture_key);
+                if (cached_texture == texture_cache.end()) {
+                  cached_texture = texture_cache
+                                       .emplace(texture_key,
+                                                decode_texture(
+                                                    state, graphics.commands,
+                                                    graphics.clut))
+                                       .first;
+                }
+                auto texture = cached_texture->second;
                 const auto material_color =
                     (graphics.commands[0x55U] & 0x00ffffffU) |
                     ((graphics.commands[0x58U] & 0xffU) << 24U);
@@ -1670,6 +1707,9 @@ void Runtime::dispatch(psprecomp::State& state, std::string_view name) {
         } else if (command == 0x13U) {
           graphics.offset_address = argument << 8U;
         } else if (command == 0xeaU) {
+          // A GE block transfer can modify a texture without changing any
+          // texture-state command, so cached decodes are no longer valid.
+          texture_cache.clear();
           const auto source_address =
               (graphics.commands[0xb2U] & 0x00fffff0U) |
               ((graphics.commands[0xb3U] & 0x00ff0000U) << 8U);

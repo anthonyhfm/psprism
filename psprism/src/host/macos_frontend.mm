@@ -40,7 +40,7 @@ std::uint32_t normalized_vram_address(std::uint32_t address) {
 struct GeometryBatch {
   MTLPrimitiveType type;
   std::vector<psprism::host::GeometryVertex> vertices;
-  std::vector<std::uint8_t> texture;
+  std::shared_ptr<const std::vector<std::uint8_t>> texture;
   std::uint32_t texture_width{};
   std::uint32_t texture_height{};
   psprism::host::GeometryState state;
@@ -470,6 +470,8 @@ bool update_keyboard_key(unsigned short key_code, bool pressed) {
   id<CAMetalDrawable> drawable = view.currentDrawable;
   if (display_pass == nil || drawable == nil || self.pipeline == nil) return;
   id<MTLCommandBuffer> commands = [self.queue commandBuffer];
+  NSMutableDictionary<NSValue*, id<MTLTexture>>* uploaded_textures =
+      [NSMutableDictionary dictionary];
   if (self.geometryPipeline != nil) {
     std::lock_guard lock(geometry_mutex);
     id<MTLRenderCommandEncoder> encoder = nil;
@@ -562,19 +564,25 @@ bool update_keyboard_key(unsigned short key_code, bool pressed) {
           normalized_vram_address(batch.state.texture_address);
       if (batch.state.texture_address != 0U)
         sampled_texture = [self.renderTargets objectForKey:@(texture_address)];
-      if (sampled_texture == nil && !batch.texture.empty()) {
-        MTLTextureDescriptor* descriptor = [MTLTextureDescriptor
-            texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
-                                         width:batch.texture_width
-                                        height:batch.texture_height
-                                     mipmapped:NO];
-        sampled_texture = [self.device newTextureWithDescriptor:descriptor];
-        [sampled_texture
-            replaceRegion:MTLRegionMake2D(0, 0, batch.texture_width,
-                                          batch.texture_height)
-             mipmapLevel:0
-               withBytes:batch.texture.data()
-             bytesPerRow:batch.texture_width * 4U];
+      if (sampled_texture == nil && batch.texture != nullptr &&
+          !batch.texture->empty()) {
+        NSValue* texture_key = [NSValue valueWithPointer:batch.texture.get()];
+        sampled_texture = [uploaded_textures objectForKey:texture_key];
+        if (sampled_texture == nil) {
+          MTLTextureDescriptor* descriptor = [MTLTextureDescriptor
+              texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                           width:batch.texture_width
+                                          height:batch.texture_height
+                                       mipmapped:NO];
+          sampled_texture = [self.device newTextureWithDescriptor:descriptor];
+          [sampled_texture
+              replaceRegion:MTLRegionMake2D(0, 0, batch.texture_width,
+                                            batch.texture_height)
+               mipmapLevel:0
+                 withBytes:batch.texture->data()
+               bytesPerRow:batch.texture_width * 4U];
+          [uploaded_textures setObject:sampled_texture forKey:texture_key];
+        }
       }
       if (sampled_texture == nil) {
         [encoder setRenderPipelineState:
@@ -846,6 +854,8 @@ void present_ge_frame() {
   {
     std::lock_guard lock(geometry_mutex);
     has_geometry = !pending_geometry_batches.empty();
+    presented_geometry_batches.reserve(presented_geometry_batches.size() +
+                                        pending_geometry_batches.size());
     presented_geometry_batches.insert(
         presented_geometry_batches.end(),
         std::make_move_iterator(pending_geometry_batches.begin()),
@@ -859,11 +869,15 @@ void present_ge_frame() {
 void begin_ge_frame() {
   std::lock_guard lock(geometry_mutex);
   building_geometry_batches.clear();
+  if (building_geometry_batches.capacity() < 4096U)
+    building_geometry_batches.reserve(4096U);
 }
 
 void end_ge_frame() {
   {
     std::lock_guard lock(geometry_mutex);
+    pending_geometry_batches.reserve(pending_geometry_batches.size() +
+                                      building_geometry_batches.size());
     pending_geometry_batches.insert(
         pending_geometry_batches.end(),
         std::make_move_iterator(building_geometry_batches.begin()),
@@ -874,7 +888,8 @@ void end_ge_frame() {
 
 void submit_ge_primitive(std::uint32_t type,
                          std::vector<GeometryVertex> vertices,
-                         std::vector<std::uint8_t> texture,
+                         std::shared_ptr<const std::vector<std::uint8_t>>
+                             texture,
                          std::uint32_t texture_width,
                          std::uint32_t texture_height,
                          GeometryState graphics_state) {
