@@ -48,6 +48,62 @@ the generated code as a real PRX and `EBOOT.PBP`.
 
 ## Command-line usage
 
+### Guided project export
+
+Start the interactive wizard with no arguments, or give it an input file right
+away:
+
+```sh
+./build/psprecomp
+./build/psprecomp game.iso
+```
+
+The wizard accepts PSP ISO images as well as decrypted ELF/PRX executables. For
+an ISO it discovers `EBOOT.BIN`/`BOOT.BIN`, reads the display name and disc ID
+from `PARAM.SFO`, and can extract the complete disc filesystem. It then asks for
+the remaining project choices and produces a self-contained codebase:
+
+```text
+my_game/
+├── Makefile                 one-command build entry point
+├── README.md                generated project guide
+├── project.toml             reproducible project metadata
+├── config/code.map          optional copied function metadata
+├── include/psprecomp/       vendored portable runtime
+├── src/generated/           generated C++ functions and PSP glue
+├── disc/                    complete extracted ISO filesystem
+└── original/                input executable for non-ISO exports
+```
+
+Build it without referring back to this repository:
+
+```sh
+cd my_game
+make -j
+```
+
+For scripts and automation, use the same workflow without prompts:
+
+```sh
+./build/psprecomp init game.iso \
+  --display-name "My Recompilation" \
+  --project-name my_recomp \
+  --output out/my_recomp \
+  --code-map path/to/program.map \
+  --yes
+```
+
+Run `psprecomp --help` for all wizard options. ISO extraction is enabled by
+default and can be disabled with `--no-extract-disc`. Encrypted retail
+executables still need to be decrypted before translation; when both files are
+present, the importer automatically prefers whichever of `EBOOT.BIN` and
+`BOOT.BIN` is a valid ELF.
+
+See [docs/project-wizard.md](docs/project-wizard.md) for the complete workflow
+and generated layout.
+
+### Low-level commands
+
 Inspect an executable and report loader/translation coverage:
 
 ```sh
@@ -90,6 +146,8 @@ workflow.
 - PSP-native direct memory access and native PSPSDK import bridge
 - Guest thread wrappers with independent Guest stacks
 - Generated image/relocation embedding and PSPSDK Makefile output
+- Guided ISO/ELF project wizard with `PARAM.SFO` metadata discovery
+- Streaming ISO 9660 extraction and complete self-contained codebase exports
 - Address-sharded and function-oriented project emitters
 - Runtime unit tests plus native and PSP roundtrip coverage
 
@@ -102,7 +160,7 @@ differential testing on PPSSPP and physical hardware.
 
 ```text
 include/psprecomp/   Portable CPU, relocation and VFPU runtime
-src/                 ELF/PRX loader, CLI and C++ project emitter
+src/                 ISO/ELF loaders, wizard, CLI and C++ project emitter
 tests/               Synthetic fixtures and host/PSP roundtrip tests
 tools/               Optional reverse-engineering metadata exporters
 docs/                Architecture and code-map documentation

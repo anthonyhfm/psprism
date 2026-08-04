@@ -7,8 +7,9 @@ a goal. The first backend remains PSP so CPU semantics, imports and generated
 control flow can be verified before introducing a second platform layer.
 
 ```text
-ELF/PRX
-    -> loader, segments, relocations and imports
+ISO 9660 or ELF/PRX
+    -> source discovery, SFO metadata and optional disc extraction
+    -> ELF loader, segments, relocations and imports
     -> Allegrex instruction decoder
     -> address and function metadata
     -> portable C++ emitter
@@ -17,6 +18,12 @@ ELF/PRX
 ```
 
 ## Loader and relocated image
+
+The frontend accepts either a direct executable or an ISO 9660 disc image. The
+ISO reader has no external runtime dependencies: it walks directory records,
+normalizes PSP paths, discovers the usable `EBOOT.BIN`/`BOOT.BIN`, and reads
+`TITLE` and `DISC_ID` from `PARAM.SFO`. Full-disc extraction streams data in
+bounded chunks so movie and audio assets do not have to fit in host memory.
 
 The loader reads ELF32 MIPS program and section metadata, preserves load
 segments, records PSP relocation entries and discovers import stubs. Generated
@@ -77,6 +84,16 @@ PSP-specific module metadata, import calls, thread creation and direct-address
 behavior belong to generated platform glue. A future desktop backend can keep
 the same Guest state and generated functions while replacing those services
 with an HLE/platform implementation.
+
+## Export boundary
+
+The low-level emitter only creates translated sources and PSP platform glue.
+The project exporter wraps that output in a stable, beginner-facing codebase:
+it vendors the portable headers, records inputs and choices in `project.toml`,
+copies the optional code map, writes build documentation, and includes the disc
+filesystem when requested. Generation happens in a sibling staging directory
+and is renamed into place only after every step succeeds, so failed translation
+does not leave a plausible-looking partial project.
 
 ## Verification strategy
 
