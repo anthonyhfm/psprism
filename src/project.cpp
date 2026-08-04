@@ -16,7 +16,7 @@
 namespace psprecomp {
 namespace {
 
-std::vector<std::uint8_t> read_binary(const std::filesystem::path &path) {
+std::vector<std::uint8_t> read_binary(const std::filesystem::path& path) {
   std::ifstream stream(path, std::ios::binary | std::ios::ate);
   if (!stream) {
     throw std::runtime_error("cannot open input: " + path.string());
@@ -28,7 +28,7 @@ std::vector<std::uint8_t> read_binary(const std::filesystem::path &path) {
   std::vector<std::uint8_t> result(static_cast<std::size_t>(size));
   stream.seekg(0);
   if (!result.empty()) {
-    stream.read(reinterpret_cast<char *>(result.data()),
+    stream.read(reinterpret_cast<char*>(result.data()),
                 static_cast<std::streamsize>(result.size()));
   }
   if (!stream) {
@@ -37,10 +37,10 @@ std::vector<std::uint8_t> read_binary(const std::filesystem::path &path) {
   return result;
 }
 
-bool has_psp_executable_magic(const std::filesystem::path &path) {
+bool has_psp_executable_magic(const std::filesystem::path& path) {
   std::ifstream stream(path, std::ios::binary);
   std::uint8_t magic[4]{};
-  stream.read(reinterpret_cast<char *>(magic), sizeof(magic));
+  stream.read(reinterpret_cast<char*>(magic), sizeof(magic));
   if (stream.gcount() != 4) {
     return false;
   }
@@ -48,7 +48,7 @@ bool has_psp_executable_magic(const std::filesystem::path &path) {
   return is_elf_data(prefix) || is_encrypted_psp_data(prefix);
 }
 
-InputKind detect_kind(const std::filesystem::path &input) {
+InputKind detect_kind(const std::filesystem::path& input) {
   if (!std::filesystem::is_regular_file(input)) {
     throw std::runtime_error("input does not exist or is not a file: " +
                              input.string());
@@ -67,15 +67,15 @@ InputKind detect_kind(const std::filesystem::path &input) {
       "unsupported input; expected a PSP ELF/PRX or ISO 9660 image");
 }
 
-void write_bytes(const std::filesystem::path &path,
-                 const std::vector<std::uint8_t> &data) {
+void write_bytes(const std::filesystem::path& path,
+                 const std::vector<std::uint8_t>& data) {
   std::filesystem::create_directories(path.parent_path());
   std::ofstream stream(path, std::ios::binary | std::ios::trunc);
   if (!stream) {
     throw std::runtime_error("cannot create file: " + path.string());
   }
   if (!data.empty()) {
-    stream.write(reinterpret_cast<const char *>(data.data()),
+    stream.write(reinterpret_cast<const char*>(data.data()),
                  static_cast<std::streamsize>(data.size()));
   }
   if (!stream) {
@@ -83,7 +83,7 @@ void write_bytes(const std::filesystem::path &path,
   }
 }
 
-void write_text(const std::filesystem::path &path, std::string_view value) {
+void write_text(const std::filesystem::path& path, std::string_view value) {
   std::filesystem::create_directories(path.parent_path());
   std::ofstream stream(path, std::ios::binary | std::ios::trunc);
   if (!stream) {
@@ -119,7 +119,7 @@ std::string toml_string(std::string_view value) {
   return result;
 }
 
-std::string generated_readme(const ExportConfig &config, InputKind kind,
+std::string generated_readme(const ExportConfig& config, InputKind kind,
                              std::string_view executable_source) {
   std::ostringstream out;
   out << "# " << config.display_name
@@ -136,6 +136,11 @@ std::string generated_readme(const ExportConfig &config, InputKind kind,
          "```\n\n"
          "The PSP targets require PSPSDK and `psp-config` in `PATH`. The "
          "macOS target requires CMake and Apple Clang.\n\n"
+         "## Controls\n\n"
+         "Native macOS builds support standard game controllers and a "
+         "keyboard fallback: arrows = D-pad, WASD = analog stick, I/J/K/L = "
+         "Triangle/Square/Cross/Circle, Q/E = L/R, Return = Start and Right "
+         "Shift = Select.\n\n"
          "The resulting `EBOOT.PBP` and PRX are written below "
          "`src/generated/`. Run `make disc-tree` to create a copy of the "
          "extracted disc with its executable replaced by the recompiled "
@@ -160,7 +165,7 @@ std::string generated_readme(const ExportConfig &config, InputKind kind,
   return out.str();
 }
 
-std::string root_makefile(const ExportConfig &config, bool has_disc,
+std::string root_makefile(const ExportConfig& config, bool has_disc,
                           std::string_view disc_executable) {
   std::ostringstream out;
   out << "PPSSPP ?= ppsspp\n"
@@ -228,7 +233,7 @@ std::string root_makefile(const ExportConfig &config, bool has_disc,
   return out.str();
 }
 
-std::string psp_run_script(const ExportConfig &config,
+std::string psp_run_script(const ExportConfig& config,
                            std::string_view disc_executable) {
   const auto executable_name =
       std::filesystem::path(disc_executable).filename().string();
@@ -310,7 +315,7 @@ echo "Built PSP ISO: $OUTPUT"
 )SH";
 }
 
-std::string macos_cmake(const ExportConfig &config) {
+std::string macos_cmake(const ExportConfig& config) {
   std::ostringstream out;
   out << "cmake_minimum_required(VERSION 3.20)\n"
          "project("
@@ -357,7 +362,7 @@ std::string macos_cmake(const ExportConfig &config) {
 }
 
 std::filesystem::path
-unique_staging_path(const std::filesystem::path &destination) {
+unique_staging_path(const std::filesystem::path& destination) {
   const auto nonce =
       std::chrono::steady_clock::now().time_since_epoch().count();
   return destination.parent_path() / ("." + destination.filename().string() +
@@ -366,7 +371,7 @@ unique_staging_path(const std::filesystem::path &destination) {
 
 } // namespace
 
-SourceInfo inspect_source(const std::filesystem::path &input) {
+SourceInfo inspect_source(const std::filesystem::path& input) {
   SourceInfo result;
   result.kind = detect_kind(input);
   if (result.kind == InputKind::executable) {
@@ -414,7 +419,7 @@ std::string project_slug(std::string_view value) {
   return result;
 }
 
-ExportSummary export_codebase(const ExportConfig &config) {
+ExportSummary export_codebase(const ExportConfig& config) {
   if (config.display_name.empty() || config.project_name.empty()) {
     throw std::runtime_error("display name and project name cannot be empty");
   }
@@ -461,7 +466,7 @@ ExportSummary export_codebase(const ExportConfig &config) {
       }
       if (config.extract_disc) {
         std::uintmax_t extracted_size = 0;
-        for (const auto &entry : iso.entries()) {
+        for (const auto& entry : iso.entries()) {
           if (!entry.directory) {
             extracted_size += entry.size;
           }
@@ -506,7 +511,7 @@ ExportSummary export_codebase(const ExportConfig &config) {
     ElfImage elf;
     try {
       elf = load_elf(executable);
-    } catch (const std::exception &error) {
+    } catch (const std::exception& error) {
       throw std::runtime_error(
           std::string("selected PSP executable cannot be recompiled: ") +
           error.what());
@@ -578,7 +583,7 @@ ExportSummary export_codebase(const ExportConfig &config) {
     write_text(staging / "project.toml", manifest.str());
 
     std::size_t translation_units = 0;
-    for (const auto &entry :
+    for (const auto& entry :
          std::filesystem::directory_iterator(staging / "src" / "generated")) {
       if (entry.path().extension() == ".cpp") {
         ++translation_units;

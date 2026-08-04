@@ -13,3 +13,7 @@ delays, controller-neutral input, UMD status and synchronous/async-style file
 I/O against the exported `disc/` and `.psprism/ms0/` trees. Unknown imports are
 reported once and return PSP's `SCE_KERNEL_ERROR_LIBRARY_NOT_YET_LINKED` value.
 
+The macOS frontend accepts standard game controllers. Its keyboard fallback is
+arrows for the D-pad, WASD for the analog stick, I/J/K/L for
+Triangle/Square/Cross/Circle, Q/E for L/R, Return for Start and Right Shift for
+Select.

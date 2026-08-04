@@ -36,27 +36,81 @@ struct GeometryBatch {
   std::vector<std::uint8_t> texture;
   std::uint32_t texture_width{};
   std::uint32_t texture_height{};
-  bool depth_test{};
-  bool depth_write{};
-  std::uint32_t depth_function{1};
-  bool alpha_blend{};
-  bool alpha_test{};
-  std::uint32_t alpha_function{1};
-  std::uint32_t alpha_reference{};
-  std::uint32_t alpha_mask{0xff};
+  psprism::host::GeometryState state;
 };
 
 struct FragmentState {
+  std::uint32_t color_test{};
+  std::uint32_t color_function{1};
+  std::uint32_t color_reference{};
+  std::uint32_t color_mask{0x00ffffff};
   std::uint32_t alpha_test{};
   std::uint32_t alpha_function{1};
   std::uint32_t alpha_reference{};
   std::uint32_t alpha_mask{0xff};
+  std::uint32_t texture_function{};
+  std::uint32_t texture_alpha_used{1};
+  std::uint32_t texture_environment_color{};
 };
 
 std::mutex geometry_mutex;
 std::vector<GeometryBatch> building_geometry_batches;
 std::vector<GeometryBatch> presented_geometry_batches;
 std::atomic_bool has_completed_ge_frame{};
+std::atomic_uint32_t keyboard_buttons{};
+std::atomic_uint32_t keyboard_latched_buttons{};
+std::atomic_uint32_t keyboard_analog_directions{};
+id keyboard_event_monitor;
+
+constexpr std::uint32_t analog_left = 1U << 0U;
+constexpr std::uint32_t analog_right = 1U << 1U;
+constexpr std::uint32_t analog_up = 1U << 2U;
+constexpr std::uint32_t analog_down = 1U << 3U;
+
+void update_keyboard_mask(std::atomic_uint32_t& state, std::uint32_t mask,
+                          bool pressed) {
+  if (pressed)
+    state.fetch_or(mask, std::memory_order_relaxed);
+  else
+    state.fetch_and(~mask, std::memory_order_relaxed);
+}
+
+void update_keyboard_button(std::uint32_t mask, bool pressed) {
+  update_keyboard_mask(keyboard_buttons, mask, pressed);
+  if (pressed)
+    keyboard_latched_buttons.fetch_or(mask, std::memory_order_relaxed);
+}
+
+bool update_keyboard_key(unsigned short key_code, bool pressed) {
+  switch (key_code) {
+    case 126: update_keyboard_button(psp_up, pressed); break;
+    case 124: update_keyboard_button(psp_right, pressed); break;
+    case 125: update_keyboard_button(psp_down, pressed); break;
+    case 123: update_keyboard_button(psp_left, pressed); break;
+    case 12: update_keyboard_button(psp_l, pressed); break;
+    case 14: update_keyboard_button(psp_r, pressed); break;
+    case 34: update_keyboard_button(psp_triangle, pressed); break;
+    case 37: update_keyboard_button(psp_circle, pressed); break;
+    case 40: update_keyboard_button(psp_cross, pressed); break;
+    case 38: update_keyboard_button(psp_square, pressed); break;
+    case 36: update_keyboard_button(psp_start, pressed); break;
+    case 60: update_keyboard_button(psp_select, pressed); break;
+    case 0:
+      update_keyboard_mask(keyboard_analog_directions, analog_left, pressed);
+      break;
+    case 2:
+      update_keyboard_mask(keyboard_analog_directions, analog_right, pressed);
+      break;
+    case 13:
+      update_keyboard_mask(keyboard_analog_directions, analog_up, pressed);
+      break;
+    case 1:
+      update_keyboard_mask(keyboard_analog_directions, analog_down, pressed);
+      break;
+    default: return false;
+  }
+  return true;
+}
 
 @interface PsprismRenderer : NSObject <MTKViewDelegate>
 @property(nonatomic, strong) id<MTLDevice> device;
@@ -68,6 +122,7 @@ std::atomic_bool has_completed_ge_frame{};
 @property(nonatomic, strong) id<MTLRenderPipelineState> blendedTexturedGeometryPipeline;
 @property(nonatomic, strong) id<MTLTexture> texture;
 @property(nonatomic, strong) NSArray<id<MTLDepthStencilState>>* depthStates;
+@property(nonatomic, strong) NSArray<id<MTLSamplerState>>* samplerStates;
 @end
 
 @implementation PsprismRenderer
@@ -101,10 +156,17 @@ std::atomic_bool has_completed_ge_frame{};
       float2 texture;
     };
     struct FragmentState {
+      uint color_test;
+      uint color_function;
+      uint color_reference;
+      uint color_mask;
       uint alpha_test;
       uint alpha_function;
       uint alpha_reference;
       uint alpha_mask;
+      uint texture_function;
+      uint texture_alpha_used;
+      uint texture_environment_color;
     };
     bool psprism_compare(uint value, uint reference, uint function) {
       switch (function) {
@@ -118,7 +180,19 @@ std::atomic_bool has_completed_ge_frame{};
         default: return value >= reference;
       }
     }
-    float4 psprism_alpha_test(float4 color, constant FragmentState& state) {
+    float4 psprism_fragment_tests(float4 color, constant FragmentState& state) {
+      uint3 rgb = uint3(round(saturate(color.rgb) * 255.0));
+      uint packed_rgb = rgb.r | (rgb.g << 8) | (rgb.b << 16);
+      uint masked_rgb = packed_rgb & state.color_mask & 0x00ffffff;
+      uint masked_reference =
+          state.color_reference & state.color_mask & 0x00ffffff;
+      bool color_passes = state.color_function == 1 ||
+                          (state.color_function == 2 &&
+                           masked_rgb == masked_reference) ||
+                          (state.color_function == 3 &&
+                           masked_rgb != masked_reference);
+      if (state.color_test != 0 && !color_passes)
+        discard_fragment();
       uint alpha = uint(round(saturate(color.a) * 255.0)) & state.alpha_mask;
       uint reference = state.alpha_reference & state.alpha_mask;
       if (state.alpha_test != 0 &&
@@ -126,20 +200,45 @@ std::atomic_bool has_completed_ge_frame{};
         discard_fragment();
       return color;
     }
+    float4 psprism_texture_combine(float4 texture_color, float4 primary,
+                                   constant FragmentState& state) {
+      bool use_alpha = state.texture_alpha_used != 0;
+      float alpha = use_alpha ? texture_color.a * primary.a : primary.a;
+      switch (state.texture_function) {
+        case 1:
+          return float4(mix(primary.rgb, texture_color.rgb,
+                            use_alpha ? texture_color.a : 1.0), primary.a);
+        case 2: {
+          float3 environment = float3(
+              float(state.texture_environment_color & 0xff) / 255.0,
+              float((state.texture_environment_color >> 8) & 0xff) / 255.0,
+              float((state.texture_environment_color >> 16) & 0xff) / 255.0);
+          return float4(mix(primary.rgb, environment, texture_color.rgb), alpha);
+        }
+        case 3:
+          return float4(texture_color.rgb,
+                        use_alpha ? texture_color.a : primary.a);
+        case 4:
+          return float4(texture_color.rgb + primary.rgb, alpha);
+        default:
+          return float4(texture_color.rgb * primary.rgb, alpha);
+      }
+    }
     vertex GeometryOut psprism_geometry_vertex(
         uint id [[vertex_id]], device const GeometryVertex* vertices [[buffer(0)]]) {
       return {vertices[id].position, vertices[id].color, vertices[id].texture};
     }
     fragment float4 psprism_geometry_fragment(
         GeometryOut in [[stage_in]], constant FragmentState& state [[buffer(1)]]) {
-      return psprism_alpha_test(in.color, state);
+      return psprism_fragment_tests(in.color, state);
     }
     fragment float4 psprism_textured_geometry_fragment(
         GeometryOut in [[stage_in]], texture2d<float> image [[texture(0)]],
+        sampler texture_sampler [[sampler(0)]],
         constant FragmentState& state [[buffer(1)]]) {
-      constexpr sampler linear_sampler(filter::linear, address::clamp_to_edge);
-      return psprism_alpha_test(image.sample(linear_sampler, in.texture) * in.color,
-                                state);
+      float4 color = psprism_texture_combine(
+          image.sample(texture_sampler, in.texture), in.color, state);
+      return psprism_fragment_tests(color, state);
     }
   )METAL";
   NSError* error = nil;
@@ -222,6 +321,30 @@ std::atomic_bool has_completed_ge_frame{};
     }
   }
   self.depthStates = depth_states;
+  NSMutableArray<id<MTLSamplerState>>* sampler_states =
+      [NSMutableArray arrayWithCapacity:8];
+  for (NSUInteger linear = 0; linear < 2; ++linear) {
+    for (NSUInteger clamp_t = 0; clamp_t < 2; ++clamp_t) {
+      for (NSUInteger clamp_s = 0; clamp_s < 2; ++clamp_s) {
+        MTLSamplerDescriptor* sampler_descriptor =
+            [[MTLSamplerDescriptor alloc] init];
+        sampler_descriptor.minFilter =
+            linear != 0 ? MTLSamplerMinMagFilterLinear
+                        : MTLSamplerMinMagFilterNearest;
+        sampler_descriptor.magFilter = sampler_descriptor.minFilter;
+        sampler_descriptor.sAddressMode =
+            clamp_s != 0 ? MTLSamplerAddressModeClampToEdge
+                         : MTLSamplerAddressModeRepeat;
+        sampler_descriptor.tAddressMode =
+            clamp_t != 0 ? MTLSamplerAddressModeClampToEdge
+                         : MTLSamplerAddressModeRepeat;
+        [sampler_states
+            addObject:[self.device newSamplerStateWithDescriptor:
+                                       sampler_descriptor]];
+      }
+    }
+  }
+  self.samplerStates = sampler_states;
   return self;
 }
 
@@ -240,24 +363,46 @@ std::atomic_bool has_completed_ge_frame{};
     std::lock_guard lock(geometry_mutex);
     for (const auto& batch : presented_geometry_batches) {
       if (batch.vertices.empty()) continue;
+      [encoder setCullMode:batch.state.cull_face ? MTLCullModeBack
+                                                 : MTLCullModeNone];
+      [encoder setFrontFacingWinding:batch.state.front_face_clockwise
+                                         ? MTLWindingClockwise
+                                         : MTLWindingCounterClockwise];
       const auto depth_state =
-          (batch.depth_write ? 16U : 0U) + (batch.depth_test ? 8U : 0U) +
-          std::min(batch.depth_function, 7U);
+          (batch.state.depth_write ? 16U : 0U) +
+          (batch.state.depth_test ? 8U : 0U) +
+          std::min(batch.state.depth_function, 7U);
       [encoder setDepthStencilState:self.depthStates[depth_state]];
       const FragmentState fragment_state{
-          batch.alpha_test ? 1U : 0U, batch.alpha_function,
-          batch.alpha_reference, batch.alpha_mask};
+          batch.state.color_test ? 1U : 0U,
+          batch.state.color_function,
+          batch.state.color_reference,
+          batch.state.color_mask,
+          batch.state.alpha_test ? 1U : 0U,
+          batch.state.alpha_function,
+          batch.state.alpha_reference,
+          batch.state.alpha_mask,
+          batch.state.texture_function,
+          batch.state.texture_alpha_used ? 1U : 0U,
+          batch.state.texture_environment_color};
       [encoder setFragmentBytes:&fragment_state
                          length:sizeof(fragment_state)
                         atIndex:1];
       if (batch.texture.empty()) {
-        [encoder setRenderPipelineState:batch.alpha_blend
+        [encoder setRenderPipelineState:batch.state.alpha_blend
                                             ? self.blendedGeometryPipeline
                                             : self.geometryPipeline];
       } else {
         [encoder setRenderPipelineState:
-                     batch.alpha_blend ? self.blendedTexturedGeometryPipeline
-                                       : self.texturedGeometryPipeline];
+                     batch.state.alpha_blend
+                         ? self.blendedTexturedGeometryPipeline
+                         : self.texturedGeometryPipeline];
+        const auto sampler_state =
+            (batch.state.texture_linear_filter ? 4U : 0U) +
+            (batch.state.texture_clamp_t ? 2U : 0U) +
+            (batch.state.texture_clamp_s ? 1U : 0U);
+        [encoder setFragmentSamplerState:self.samplerStates[sampler_state]
+                                 atIndex:0];
         MTLTextureDescriptor* descriptor = [MTLTextureDescriptor
             texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
                                          width:batch.texture_width
@@ -423,6 +568,21 @@ void initialize_frontend() {
                 }];
     if (GCController.controllers.count != 0)
       active_controller = GCController.controllers.firstObject;
+    keyboard_event_monitor = [NSEvent
+        addLocalMonitorForEventsMatchingMask:NSEventMaskKeyDown |
+                                              NSEventMaskKeyUp
+                                    handler:^NSEvent*(NSEvent* event) {
+                                      const auto pressed =
+                                          event.type == NSEventTypeKeyDown;
+                                      const auto handled = update_keyboard_key(
+                                          event.keyCode, pressed);
+                                      if (handled && pressed && !event.isARepeat)
+                                        std::fprintf(
+                                            stderr,
+                                            "[psprism:keyboard] key=%hu\n",
+                                            event.keyCode);
+                                      return handled ? nil : event;
+                                    }];
   });
 }
 
@@ -476,12 +636,8 @@ void submit_ge_primitive(std::uint32_t type,
                          std::vector<GeometryVertex> vertices,
                          std::vector<std::uint8_t> texture,
                          std::uint32_t texture_width,
-                         std::uint32_t texture_height, bool depth_test,
-                         bool depth_write, std::uint32_t depth_function,
-                         bool alpha_blend, bool alpha_test,
-                         std::uint32_t alpha_function,
-                         std::uint32_t alpha_reference,
-                         std::uint32_t alpha_mask) {
+                         std::uint32_t texture_height,
+                         GeometryState graphics_state) {
   MTLPrimitiveType metal_type;
   switch (type) {
     case 0:
@@ -506,14 +662,23 @@ void submit_ge_primitive(std::uint32_t type,
     std::lock_guard lock(geometry_mutex);
     building_geometry_batches.push_back(
         {metal_type, std::move(vertices), std::move(texture), texture_width,
-         texture_height, depth_test, depth_write, depth_function,
-         alpha_blend, alpha_test, alpha_function, alpha_reference,
-         alpha_mask});
+         texture_height, graphics_state});
   }
 }
 
 ControllerState controller_state() {
   ControllerState result;
+  result.buttons = keyboard_buttons.load(std::memory_order_relaxed) |
+                   keyboard_latched_buttons.exchange(0,
+                                                     std::memory_order_relaxed);
+  const auto directions =
+      keyboard_analog_directions.load(std::memory_order_relaxed);
+  const auto horizontal = ((directions & analog_right) != 0 ? 1 : 0) -
+                          ((directions & analog_left) != 0 ? 1 : 0);
+  const auto vertical = ((directions & analog_down) != 0 ? 1 : 0) -
+                        ((directions & analog_up) != 0 ? 1 : 0);
+  result.analog_x = static_cast<std::uint8_t>(128 + horizontal * 127);
+  result.analog_y = static_cast<std::uint8_t>(128 + vertical * 127);
   GCExtendedGamepad* pad = active_controller.extendedGamepad;
   if (pad == nil) return result;
   if (pad.dpad.up.isPressed) result.buttons |= psp_up;
@@ -529,8 +694,10 @@ ControllerState controller_state() {
   if (pad.buttonMenu.isPressed) result.buttons |= psp_start;
   if ([pad respondsToSelector:@selector(buttonOptions)] && pad.buttonOptions.isPressed)
     result.buttons |= psp_select;
-  result.analog_x = axis_to_byte(pad.leftThumbstick.xAxis.value);
-  result.analog_y = axis_to_byte(-pad.leftThumbstick.yAxis.value);
+  if (directions == 0) {
+    result.analog_x = axis_to_byte(pad.leftThumbstick.xAxis.value);
+    result.analog_y = axis_to_byte(-pad.leftThumbstick.yAxis.value);
+  }
   return result;
 }
 

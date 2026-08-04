@@ -85,6 +85,7 @@ int host_open_flags(std::uint32_t flags) {
 
 struct VertexLayout {
   std::size_t stride{};
+  std::size_t weight_offset{};
   std::size_t texture_offset{};
   std::size_t color_offset{};
   std::size_t normal_offset{};
@@ -93,6 +94,8 @@ struct VertexLayout {
   std::uint32_t color_type{};
   std::uint32_t normal_type{};
   std::uint32_t position_type{};
+  std::uint32_t weight_type{};
+  std::uint32_t weight_count{};
 };
 
 std::size_t component_size(std::uint32_t type) {
@@ -109,14 +112,16 @@ VertexLayout vertex_layout(std::uint32_t type) {
   result.color_type = (type >> 2U) & 7U;
   result.normal_type = (type >> 5U) & 3U;
   result.position_type = (type >> 7U) & 3U;
-  const auto weight_type = (type >> 9U) & 3U;
-  const auto weight_size = component_size(weight_type);
+  result.weight_type = (type >> 9U) & 3U;
+  result.weight_count = ((type >> 14U) & 7U) + 1U;
+  const auto weight_size = component_size(result.weight_type);
   std::size_t offset{};
   std::size_t maximum_alignment{1U};
   if (weight_size != 0) {
     maximum_alignment = std::max(maximum_alignment, weight_size);
     offset = align_offset(offset, weight_size);
-    offset += weight_size * (((type >> 14U) & 7U) + 1U);
+    result.weight_offset = offset;
+    offset += weight_size * result.weight_count;
   }
   const auto texture_size = component_size(result.texture_type);
   if (texture_size != 0) {
@@ -164,6 +169,26 @@ void transform43(const std::array<float, 12>& matrix, const float input[3],
               matrix[8] * input[2] + matrix[11];
 }
 
+void transform_normal43(const std::array<float, 12>& matrix,
+                        const float input[3], float output[3]) {
+  output[0] = matrix[0] * input[0] + matrix[3] * input[1] +
+              matrix[6] * input[2];
+  output[1] = matrix[1] * input[0] + matrix[4] * input[1] +
+              matrix[7] * input[2];
+  output[2] = matrix[2] * input[0] + matrix[5] * input[1] +
+              matrix[8] * input[2];
+}
+
+void normalize3(float value[3]) {
+  const auto length = std::sqrt(value[0] * value[0] + value[1] * value[1] +
+                                value[2] * value[2]);
+  if (length > 0.0F) {
+    value[0] /= length;
+    value[1] /= length;
+    value[2] /= length;
+  }
+}
+
 void transform44(const std::array<float, 16>& matrix, const float input[3],
                  float output[4]) {
   output[0] = matrix[0] * input[0] + matrix[4] * input[1] +
@@ -182,11 +207,38 @@ struct DecodedTexture {
   std::uint32_t height{};
 };
 
-DecodedTexture
-decode_clut8_texture(psprecomp::State& state,
-                     const std::array<std::uint32_t, 256>& commands) {
+std::uint32_t decode_16bit_color(std::uint16_t packed,
+                                 std::uint32_t format) {
+  const auto expand_4 = [](std::uint32_t value) { return value * 17U; };
+  const auto expand_5 = [](std::uint32_t value) {
+    return (value << 3U) | (value >> 2U);
+  };
+  const auto expand_6 = [](std::uint32_t value) {
+    return (value << 2U) | (value >> 4U);
+  };
+  if (format == 0U) {
+    return expand_5(packed & 31U) |
+           (expand_6((packed >> 5U) & 63U) << 8U) |
+           (expand_5((packed >> 11U) & 31U) << 16U) | 0xff000000U;
+  }
+  if (format == 1U) {
+    return expand_5(packed & 31U) |
+           (expand_5((packed >> 5U) & 31U) << 8U) |
+           (expand_5((packed >> 10U) & 31U) << 16U) |
+           ((packed & 0x8000U) != 0 ? 0xff000000U : 0U);
+  }
+  return expand_4(packed & 15U) |
+         (expand_4((packed >> 4U) & 15U) << 8U) |
+         (expand_4((packed >> 8U) & 15U) << 16U) |
+         (expand_4((packed >> 12U) & 15U) << 24U);
+}
+
+DecodedTexture decode_texture(
+    psprecomp::State& state,
+    const std::array<std::uint32_t, 256>& commands) {
   DecodedTexture result;
-  if ((commands[0x1eU] & 1U) == 0 || (commands[0xc3U] & 0xfU) != 5U)
+  const auto format = commands[0xc3U] & 0xfU;
+  if ((commands[0x1eU] & 1U) == 0 || format > 5U)
     return result;
   result.width = 1U << (commands[0xb8U] & 0xfU);
   result.height = 1U << ((commands[0xb8U] >> 8U) & 0xfU);
@@ -196,53 +248,67 @@ decode_clut8_texture(psprecomp::State& state,
     return {};
   const auto texture_address =
       (commands[0xa0U] & 0x00fffff0U) | ((commands[0xa8U] << 8U) & 0x0f000000U);
-  const auto blocks_per_row = (buffer_width + 15U) / 16U;
+  const auto row_bytes =
+      format == 4U ? (buffer_width + 1U) / 2U
+                   : buffer_width * (format == 3U ? 4U : format < 4U ? 2U : 1U);
+  const auto blocks_per_row = (row_bytes + 15U) / 16U;
   const auto block_rows = (result.height + 7U) / 8U;
-  const auto source_size =
-      static_cast<std::size_t>(blocks_per_row) * block_rows * 128U;
+  const auto swizzled = (commands[0xc2U] & 1U) != 0;
+  const auto source_size = swizzled
+                               ? static_cast<std::size_t>(blocks_per_row) *
+                                     block_rows * 128U
+                               : static_cast<std::size_t>(row_bytes) *
+                                     result.height;
   const auto* source =
       psprecomp::mapped_address(state, texture_address, source_size);
-  const auto clut_address =
-      (commands[0xb0U] & 0x00fffff0U) | ((commands[0xb1U] << 8U) & 0x0f000000U);
-  const auto palette_format = commands[0xc5U] & 3U;
-  const auto palette_entry_size = palette_format == 3U ? 4U : 2U;
-  const auto* palette =
-      psprecomp::mapped_address(state, clut_address, 256U * palette_entry_size);
-  if (source == nullptr || palette == nullptr)
+  if (source == nullptr)
     return {};
+  const std::uint8_t* palette{};
+  auto palette_format = commands[0xc5U] & 3U;
+  auto palette_entry_size = palette_format == 3U ? 4U : 2U;
+  if (format >= 4U) {
+    const auto clut_address = (commands[0xb0U] & 0x00fffff0U) |
+                              ((commands[0xb1U] << 8U) & 0x0f000000U);
+    palette = psprecomp::mapped_address(state, clut_address,
+                                        256U * palette_entry_size);
+    if (palette == nullptr)
+      return {};
+  }
   const auto shift = (commands[0xc5U] >> 2U) & 0x1fU;
   const auto mask = (commands[0xc5U] >> 8U) & 0xffU;
   const auto start = ((commands[0xc5U] >> 16U) & 0x1fU) << 4U;
-  const auto swizzled = (commands[0xc2U] & 1U) != 0;
   result.pixels.resize(static_cast<std::size_t>(result.width) * result.height *
                        4U);
   for (std::uint32_t y = 0; y < result.height; ++y) {
     for (std::uint32_t x = 0; x < result.width; ++x) {
-      const auto source_offset =
-          swizzled ? ((y / 8U) * blocks_per_row + x / 16U) * 128U +
-                         (y & 7U) * 16U + (x & 15U)
-                   : y * buffer_width + x;
-      const auto palette_index =
-          ((source[source_offset] >> shift) & mask) | (start & 0xffU);
       std::uint32_t color{};
-      if (palette_format == 3U) {
-        std::memcpy(&color, palette + palette_index * 4U, sizeof(color));
-      } else {
+      const auto byte_x = format == 4U ? x / 2U
+                          : format == 3U ? x * 4U
+                          : format < 4U  ? x * 2U
+                                       : x;
+      const auto source_offset =
+          swizzled ? ((y / 8U) * blocks_per_row + byte_x / 16U) * 128U +
+                         (y & 7U) * 16U + (byte_x & 15U)
+                   : static_cast<std::size_t>(y) * row_bytes + byte_x;
+      if (format == 3U) {
+        std::memcpy(&color, source + source_offset, sizeof(color));
+      } else if (format < 3U) {
         std::uint16_t packed{};
-        std::memcpy(&packed, palette + palette_index * 2U, sizeof(packed));
-        if (palette_format == 0U) {
-          color = ((packed & 31U) << 3U) |
-                  (((packed >> 5U) & 63U) * 255U / 63U << 8U) |
-                  (((packed >> 11U) & 31U) << 19U) | 0xff000000U;
-        } else if (palette_format == 1U) {
-          color = ((packed & 31U) << 3U) | (((packed >> 5U) & 31U) << 11U) |
-                  (((packed >> 10U) & 31U) << 19U) |
-                  ((packed & 0x8000U) != 0 ? 0xff000000U : 0U);
+        std::memcpy(&packed, source + source_offset, sizeof(packed));
+        color = decode_16bit_color(packed, format);
+      } else {
+        auto palette_source = source[source_offset];
+        if (format == 4U)
+          palette_source =
+              x % 2U == 0 ? palette_source & 15U : palette_source >> 4U;
+        const auto palette_index =
+            ((palette_source >> shift) & mask) | (start & 0xffU);
+        if (palette_format == 3U) {
+          std::memcpy(&color, palette + palette_index * 4U, sizeof(color));
         } else {
-          color = ((packed & 15U) * 17U) |
-                  (((packed >> 4U) & 15U) * 17U << 8U) |
-                  (((packed >> 8U) & 15U) * 17U << 16U) |
-                  (((packed >> 12U) & 15U) * 17U << 24U);
+          std::uint16_t packed{};
+          std::memcpy(&packed, palette + palette_index * 2U, sizeof(packed));
+          color = decode_16bit_color(packed, palette_format);
         }
       }
       const auto output = (static_cast<std::size_t>(y) * result.width + x) * 4U;
@@ -310,9 +376,11 @@ struct Runtime::Implementation {
     std::array<float, 12> world_matrix{};
     std::array<float, 12> view_matrix{};
     std::array<float, 16> projection_matrix{};
+    std::array<float, 96> bone_matrices{};
     std::uint32_t world_matrix_index{};
     std::uint32_t view_matrix_index{};
     std::uint32_t projection_matrix_index{};
+    std::uint32_t bone_matrix_index{};
   };
 
   std::uint8_t* memory{};
@@ -339,6 +407,8 @@ struct Runtime::Implementation {
   std::atomic<bool> exit_requested{};
   std::atomic<std::uint32_t> displayed_frames{};
   std::atomic<std::uint32_t> submitted_ge_lists{};
+  std::uint64_t start_monotonic_microseconds{};
+  std::uint64_t start_unix_seconds{};
   GraphicsState graphics;
   std::atomic<std::uint32_t> savedata_status{};
   std::uint32_t savedata_parameters{};
@@ -346,6 +416,10 @@ struct Runtime::Implementation {
   std::atomic<std::uint32_t> message_dialog_status{};
 
   int allocate_uid() { return next_uid++; }
+
+  std::uint64_t elapsed_microseconds() const {
+    return host::monotonic_microseconds() - start_monotonic_microseconds;
+  }
 
   std::uint32_t allocate_heap(std::uint32_t size,
                               std::uint32_t alignment = 64) {
@@ -416,6 +490,9 @@ void Runtime::configure(std::uint8_t* memory, std::size_t size,
   implementation_->memory_base = base;
   implementation_->scratchpad.assign(16U * 1024U, 0);
   implementation_->video_memory.assign(2U * 1024U * 1024U, 0);
+  implementation_->start_monotonic_microseconds =
+      host::monotonic_microseconds();
+  implementation_->start_unix_seconds = host::unix_seconds();
   implementation_->heap_cursor =
       align_up(static_cast<std::uint32_t>(configuration.image_size), 64U);
   implementation_->stack_cursor = static_cast<std::uint32_t>(size);
@@ -954,168 +1031,420 @@ void Runtime::dispatch(psprecomp::State& state, std::string_view name) {
               graphics.projection_matrix.size())
             graphics.projection_matrix[graphics.projection_matrix_index++] =
                 float24(argument);
+        } else if (command == 0x2aU) {
+          graphics.bone_matrix_index = argument & 0x7fU;
+        } else if (command == 0x2bU) {
+          if (graphics.bone_matrix_index < graphics.bone_matrices.size())
+            graphics.bone_matrices[graphics.bone_matrix_index++] =
+                float24(argument);
         } else if (command == 0x04U) {
           const auto primitive_type = (argument >> 16U) & 7U;
           const auto vertex_count = argument & 0xffffU;
           const auto vertex_type = graphics.commands[0x12U] & 0x00ffffffU;
           if (submission < 2U && primitives < 32U) {
-            std::fprintf(stderr,
-                         "[psprism:ge] prim=%u type=%u count=%u vtype=%06x "
-                         "vaddr=%08x iaddr=%08x tex=%u texaddr=%06x "
-                         "texbuf=%06x texsize=%06x texfmt=%u texmode=%06x "
-                         "depth=%u/%u/%u blend=%u/%03x\n",
-                         primitives, primitive_type, vertex_count, vertex_type,
-                         graphics.vertex_address, graphics.index_address,
-                         graphics.commands[0x1eU] & 1U,
-                         graphics.commands[0xa0U] & 0x00ffffffU,
-                         graphics.commands[0xa8U] & 0x00ffffffU,
-                         graphics.commands[0xb8U] & 0x00ffffffU,
-                         graphics.commands[0xc3U] & 0xfU,
-                         graphics.commands[0xc2U] & 0x00ffffffU,
-                         graphics.commands[0x23U] & 1U,
-                         (graphics.commands[0xe7U] & 1U) == 0,
-                         graphics.commands[0xdeU] & 7U,
-                         graphics.commands[0x21U] & 1U,
-                         graphics.commands[0xdfU] & 0xfffU);
+            std::fprintf(
+                stderr,
+                "[psprism:ge] prim=%u type=%u count=%u vtype=%06x "
+                "vaddr=%08x iaddr=%08x tex=%u texaddr=%06x "
+                "texbuf=%06x texsize=%06x texfmt=%u texmode=%06x "
+                "depth=%u/%u/%u blend=%u/%03x clear=%06x "
+                "cull=%u/%u texfunc=%06x wrap=%06x "
+                "color=%u/%u/%06x/%06x alpha=%u/%u/%02x/%02x\n",
+                primitives, primitive_type, vertex_count, vertex_type,
+                graphics.vertex_address, graphics.index_address,
+                graphics.commands[0x1eU] & 1U,
+                graphics.commands[0xa0U] & 0x00ffffffU,
+                graphics.commands[0xa8U] & 0x00ffffffU,
+                graphics.commands[0xb8U] & 0x00ffffffU,
+                graphics.commands[0xc3U] & 0xfU,
+                graphics.commands[0xc2U] & 0x00ffffffU,
+                graphics.commands[0x23U] & 1U,
+                (graphics.commands[0xe7U] & 1U) == 0,
+                graphics.commands[0xdeU] & 7U, graphics.commands[0x21U] & 1U,
+                graphics.commands[0xdfU] & 0xfffU,
+                graphics.commands[0xd3U] & 0x00ffffffU,
+                graphics.commands[0x1dU] & 1U, graphics.commands[0x9bU] & 1U,
+                graphics.commands[0xc9U] & 0x00ffffffU,
+                graphics.commands[0xc7U] & 0x00ffffffU,
+                graphics.commands[0x27U] & 1U,
+                graphics.commands[0xd8U] & 3U,
+                graphics.commands[0xd9U] & 0x00ffffffU,
+                graphics.commands[0xdaU] & 0x00ffffffU,
+                graphics.commands[0x22U] & 1U,
+                graphics.commands[0xdbU] & 7U,
+                (graphics.commands[0xdbU] >> 8U) & 0xffU,
+                (graphics.commands[0xdbU] >> 16U) & 0xffU);
           }
           const auto layout = vertex_layout(vertex_type);
-          const auto indexed = (vertex_type & (3U << 11U)) != 0;
-          if (!indexed && layout.stride != 0 && primitive_type <= 4U) {
-            const auto byte_count =
-                static_cast<std::size_t>(vertex_count) * layout.stride;
-            if (const auto* source = psprecomp::mapped_address(
-                    state, graphics.vertex_address, byte_count)) {
-              std::vector<host::GeometryVertex> vertices(vertex_count);
-              auto texture = decode_clut8_texture(state, graphics.commands);
-              const auto material_color = graphics.commands[0x55U];
+          const auto index_type = (vertex_type >> 11U) & 3U;
+          if (layout.stride != 0 && primitive_type <= 4U) {
+            const auto index_size = component_size(index_type);
+            const auto index_byte_count =
+                static_cast<std::size_t>(vertex_count) * index_size;
+            std::vector<std::uint32_t> vertex_indices(vertex_count);
+            bool indices_valid = true;
+            std::uint32_t maximum_index{};
+            if (index_type == 0) {
+              for (std::uint32_t index = 0; index < vertex_count; ++index)
+                vertex_indices[index] = index;
+              maximum_index = vertex_count == 0 ? 0U : vertex_count - 1U;
+            } else if (const auto* indices = psprecomp::mapped_address(
+                           state, graphics.index_address, index_byte_count)) {
               for (std::uint32_t index = 0; index < vertex_count; ++index) {
-                const auto* input = source + index * layout.stride;
-                const auto* position = input + layout.position_offset;
-                float decoded[3]{};
-                const auto through = (vertex_type & (1U << 23U)) != 0;
-                if (layout.position_type == 1U) {
-                  for (std::size_t component = 0; component < 3U; ++component)
-                    decoded[component] =
-                        through ? static_cast<float>(position[component])
-                                : static_cast<float>(
-                                      reinterpret_cast<const std::int8_t*>(
-                                          position)[component]) /
-                                      127.0F;
-                } else if (layout.position_type == 2U) {
-                  for (std::size_t component = 0; component < 3U; ++component) {
-                    if (through) {
-                      std::uint16_t value{};
-                      std::memcpy(&value, position + component * 2U,
-                                  sizeof(value));
-                      decoded[component] = static_cast<float>(value);
-                    } else {
-                      std::int16_t value{};
-                      std::memcpy(&value, position + component * 2U,
-                                  sizeof(value));
-                      decoded[component] = static_cast<float>(value) / 32767.0F;
-                    }
-                  }
-                } else if (layout.position_type == 3U) {
-                  std::memcpy(decoded, position, sizeof(decoded));
-                }
-                auto& output = vertices[index];
-                if (through) {
-                  output.position[0] = decoded[0] / 240.0F - 1.0F;
-                  output.position[1] = 1.0F - decoded[1] / 136.0F;
-                  output.position[2] = decoded[2] / 65535.0F;
-                  output.position[3] = 1.0F;
+                std::uint32_t decoded_index{};
+                if (index_type == 1U) {
+                  decoded_index = indices[index];
+                } else if (index_type == 2U) {
+                  std::uint16_t value{};
+                  std::memcpy(&value, indices + index * 2U, sizeof(value));
+                  decoded_index = value;
                 } else {
-                  float world[3]{};
-                  float view[3]{};
-                  transform43(graphics.world_matrix, decoded, world);
-                  transform43(graphics.view_matrix, world, view);
-                  transform44(graphics.projection_matrix, view,
-                              output.position);
+                  std::memcpy(&decoded_index, indices + index * 4U,
+                              sizeof(decoded_index));
                 }
-                std::uint32_t color = material_color;
-                if (layout.color_type == 7U) {
-                  std::memcpy(&color, input + layout.color_offset,
-                              sizeof(color));
-                } else if (layout.color_type >= 4U) {
-                  std::uint16_t packed{};
-                  std::memcpy(&packed, input + layout.color_offset,
-                              sizeof(packed));
-                  if (layout.color_type == 4U) {
-                    color = ((packed & 31U) << 3U) |
-                            (((packed >> 5U) & 63U) * 255U / 63U << 8U) |
-                            (((packed >> 11U) & 31U) << 19U) | 0xff000000U;
-                  } else if (layout.color_type == 5U) {
-                    color = ((packed & 31U) << 3U) |
-                            (((packed >> 5U) & 31U) << 11U) |
-                            (((packed >> 10U) & 31U) << 19U) |
-                            ((packed & 0x8000U) != 0 ? 0xff000000U : 0U);
-                  } else {
-                    color = ((packed & 15U) * 17U) |
-                            (((packed >> 4U) & 15U) * 17U << 8U) |
-                            (((packed >> 8U) & 15U) * 17U << 16U) |
-                            (((packed >> 12U) & 15U) * 17U << 24U);
-                  }
-                }
-                output.color[0] = static_cast<float>(color & 0xffU) / 255.0F;
-                output.color[1] =
-                    static_cast<float>((color >> 8U) & 0xffU) / 255.0F;
-                output.color[2] =
-                    static_cast<float>((color >> 16U) & 0xffU) / 255.0F;
-                output.color[3] =
-                    static_cast<float>((color >> 24U) & 0xffU) / 255.0F;
-                if (layout.texture_type != 0 && texture.width != 0 &&
-                    texture.height != 0) {
-                  const auto* coordinates = input + layout.texture_offset;
-                  float u{};
-                  float v{};
-                  if (layout.texture_type == 1U) {
-                    u = static_cast<float>(coordinates[0]);
-                    v = static_cast<float>(coordinates[1]);
-                    if (!through) {
-                      u /= 128.0F;
-                      v /= 128.0F;
-                    }
-                  } else if (layout.texture_type == 2U) {
-                    std::uint16_t packed_u{};
-                    std::uint16_t packed_v{};
-                    std::memcpy(&packed_u, coordinates, sizeof(packed_u));
-                    std::memcpy(&packed_v, coordinates + 2U, sizeof(packed_v));
-                    u = static_cast<float>(packed_u);
-                    v = static_cast<float>(packed_v);
-                    if (!through) {
-                      u /= 32768.0F;
-                      v /= 32768.0F;
-                    }
-                  } else {
-                    std::memcpy(&u, coordinates, sizeof(u));
-                    std::memcpy(&v, coordinates + 4U, sizeof(v));
-                  }
-                  if (through) {
-                    u /= static_cast<float>(texture.width);
-                    v /= static_cast<float>(texture.height);
-                  } else {
-                    u = u * float24(graphics.commands[0x48U]) +
-                        float24(graphics.commands[0x4aU]);
-                    v = v * float24(graphics.commands[0x49U]) +
-                        float24(graphics.commands[0x4bU]);
-                  }
-                  output.texture[0] = u;
-                  output.texture[1] = v;
-                }
+                vertex_indices[index] = decoded_index;
+                maximum_index = std::max(maximum_index, decoded_index);
               }
-              host::submit_ge_primitive(
-                  primitive_type, std::move(vertices),
-                  std::move(texture.pixels), texture.width, texture.height,
-                  (graphics.commands[0x23U] & 1U) != 0,
-                  (graphics.commands[0xe7U] & 1U) == 0,
-                  graphics.commands[0xdeU] & 7U,
-                  (graphics.commands[0x21U] & 1U) != 0,
-                  (graphics.commands[0x22U] & 1U) != 0,
-                  graphics.commands[0xdbU] & 7U,
-                  (graphics.commands[0xdbU] >> 8U) & 0xffU,
-                  (graphics.commands[0xdbU] >> 16U) & 0xffU);
+            } else {
+              indices_valid = false;
             }
-            graphics.vertex_address += static_cast<std::uint32_t>(byte_count);
+            const auto vertex_byte_count =
+                (static_cast<std::size_t>(maximum_index) + 1U) * layout.stride;
+            if (indices_valid) {
+              if (const auto* source = psprecomp::mapped_address(
+                      state, graphics.vertex_address, vertex_byte_count)) {
+                std::vector<host::GeometryVertex> vertices(vertex_count);
+                auto texture = decode_texture(state, graphics.commands);
+                const auto material_color =
+                    (graphics.commands[0x55U] & 0x00ffffffU) |
+                    ((graphics.commands[0x58U] & 0xffU) << 24U);
+                for (std::uint32_t index = 0; index < vertex_count; ++index) {
+                  const auto* input =
+                      source + vertex_indices[index] * layout.stride;
+                  const auto* position = input + layout.position_offset;
+                  float decoded[3]{};
+                  const auto through = (vertex_type & (1U << 23U)) != 0;
+                  if (layout.position_type == 1U) {
+                    for (std::size_t component = 0; component < 3U; ++component)
+                      decoded[component] =
+                          through ? static_cast<float>(position[component])
+                                  : static_cast<float>(
+                                        reinterpret_cast<const std::int8_t*>(
+                                            position)[component]) /
+                                        127.0F;
+                  } else if (layout.position_type == 2U) {
+                    for (std::size_t component = 0; component < 3U;
+                         ++component) {
+                      if (through) {
+                        std::uint16_t value{};
+                        std::memcpy(&value, position + component * 2U,
+                                    sizeof(value));
+                        decoded[component] = static_cast<float>(value);
+                      } else {
+                        std::int16_t value{};
+                        std::memcpy(&value, position + component * 2U,
+                                    sizeof(value));
+                        decoded[component] =
+                            static_cast<float>(value) / 32767.0F;
+                      }
+                    }
+                  } else if (layout.position_type == 3U) {
+                    std::memcpy(decoded, position, sizeof(decoded));
+                  }
+                  std::array<float, 12> skin_matrix{};
+                  if (!through && layout.weight_type != 0U) {
+                    const auto* weights = input + layout.weight_offset;
+                    for (std::uint32_t bone = 0; bone < layout.weight_count;
+                         ++bone) {
+                      float weight{};
+                      if (layout.weight_type == 1U) {
+                        weight = static_cast<float>(weights[bone]) / 128.0F;
+                      } else if (layout.weight_type == 2U) {
+                        std::uint16_t packed{};
+                        std::memcpy(&packed, weights + bone * 2U,
+                                    sizeof(packed));
+                        weight = static_cast<float>(packed) / 32768.0F;
+                      } else {
+                        std::memcpy(&weight, weights + bone * 4U,
+                                    sizeof(weight));
+                      }
+                      for (std::size_t element = 0;
+                           element < skin_matrix.size(); ++element) {
+                        skin_matrix[element] +=
+                            weight * graphics.bone_matrices[bone * 12U +
+                                                           element];
+                      }
+                    }
+                    float skinned[3]{};
+                    transform43(skin_matrix, decoded, skinned);
+                    std::copy(std::begin(skinned), std::end(skinned), decoded);
+                  }
+                  auto& output = vertices[index];
+                  float world_position[3]{};
+                  if (through) {
+                    output.position[0] = decoded[0] / 240.0F - 1.0F;
+                    output.position[1] = 1.0F - decoded[1] / 136.0F;
+                    output.position[2] = decoded[2] / 65535.0F;
+                    output.position[3] = 1.0F;
+                  } else {
+                    float view[3]{};
+                    transform43(graphics.world_matrix, decoded,
+                                world_position);
+                    transform43(graphics.view_matrix, world_position, view);
+                    transform44(graphics.projection_matrix, view,
+                                output.position);
+                  }
+                  float world_normal[3]{0.0F, 0.0F, 1.0F};
+                  if (!through && layout.normal_type != 0U) {
+                    const auto* normal = input + layout.normal_offset;
+                    float decoded_normal[3]{};
+                    if (layout.normal_type == 1U) {
+                      for (std::size_t component = 0; component < 3U;
+                           ++component) {
+                        decoded_normal[component] =
+                            static_cast<float>(
+                                reinterpret_cast<const std::int8_t*>(normal)
+                                    [component]) /
+                            128.0F;
+                      }
+                    } else if (layout.normal_type == 2U) {
+                      for (std::size_t component = 0; component < 3U;
+                           ++component) {
+                        std::int16_t value{};
+                        std::memcpy(&value, normal + component * 2U,
+                                    sizeof(value));
+                        decoded_normal[component] =
+                            static_cast<float>(value) / 32768.0F;
+                      }
+                    } else {
+                      std::memcpy(decoded_normal, normal,
+                                  sizeof(decoded_normal));
+                    }
+                    if (layout.weight_type != 0U) {
+                      float skinned_normal[3]{};
+                      transform_normal43(skin_matrix, decoded_normal,
+                                         skinned_normal);
+                      std::copy(std::begin(skinned_normal),
+                                std::end(skinned_normal), decoded_normal);
+                    }
+                    if ((graphics.commands[0x51U] & 1U) != 0) {
+                      for (auto& component : decoded_normal)
+                        component = -component;
+                    }
+                    transform_normal43(graphics.world_matrix, decoded_normal,
+                                       world_normal);
+                    normalize3(world_normal);
+                  }
+                  std::uint32_t color = material_color;
+                  if (layout.color_type == 7U) {
+                    std::memcpy(&color, input + layout.color_offset,
+                                sizeof(color));
+                  } else if (layout.color_type >= 4U) {
+                    std::uint16_t packed{};
+                    std::memcpy(&packed, input + layout.color_offset,
+                                sizeof(packed));
+                    if (layout.color_type == 4U) {
+                      color = ((packed & 31U) << 3U) |
+                              (((packed >> 5U) & 63U) * 255U / 63U << 8U) |
+                              (((packed >> 11U) & 31U) << 19U) | 0xff000000U;
+                    } else if (layout.color_type == 5U) {
+                      color = ((packed & 31U) << 3U) |
+                              (((packed >> 5U) & 31U) << 11U) |
+                              (((packed >> 10U) & 31U) << 19U) |
+                              ((packed & 0x8000U) != 0 ? 0xff000000U : 0U);
+                    } else {
+                      color = ((packed & 15U) * 17U) |
+                              (((packed >> 4U) & 15U) * 17U << 8U) |
+                              (((packed >> 8U) & 15U) * 17U << 16U) |
+                              (((packed >> 12U) & 15U) * 17U << 24U);
+                    }
+                  }
+                  output.color[0] = static_cast<float>(color & 0xffU) / 255.0F;
+                  output.color[1] =
+                      static_cast<float>((color >> 8U) & 0xffU) / 255.0F;
+                  output.color[2] =
+                      static_cast<float>((color >> 16U) & 0xffU) / 255.0F;
+                  output.color[3] =
+                      static_cast<float>((color >> 24U) & 0xffU) / 255.0F;
+                  if (!through && (graphics.commands[0x17U] & 1U) != 0) {
+                    const auto channel = [](std::uint32_t packed,
+                                            std::size_t component) {
+                      return static_cast<float>((packed >> (component * 8U)) &
+                                                0xffU) /
+                             255.0F;
+                    };
+                    const auto material_update =
+                        layout.color_type != 0U
+                            ? graphics.commands[0x53U] & 7U
+                            : 0U;
+                    float ambient[4]{};
+                    float diffuse[3]{};
+                    for (std::size_t component = 0; component < 3U;
+                         ++component) {
+                      ambient[component] =
+                          (material_update & 1U) != 0
+                              ? output.color[component]
+                              : channel(graphics.commands[0x55U], component);
+                      diffuse[component] =
+                          (material_update & 2U) != 0
+                              ? output.color[component]
+                              : channel(graphics.commands[0x56U], component);
+                      output.color[component] =
+                          channel(graphics.commands[0x5cU], component) *
+                              ambient[component] +
+                          channel(graphics.commands[0x54U], component);
+                    }
+                    ambient[3] = (material_update & 1U) != 0
+                                     ? output.color[3]
+                                     : channel(graphics.commands[0x58U], 0U);
+                    output.color[3] =
+                        channel(graphics.commands[0x5dU], 0U) * ambient[3];
+                    for (std::uint32_t light = 0; light < 4U; ++light) {
+                      if ((graphics.commands[0x18U + light] & 1U) == 0)
+                        continue;
+                      const auto light_type =
+                          (graphics.commands[0x5fU + light] >> 8U) & 3U;
+                      float to_light[3]{};
+                      for (std::size_t component = 0; component < 3U;
+                           ++component) {
+                        to_light[component] =
+                            float24(graphics.commands[0x63U + light * 3U +
+                                                       component]);
+                        if (light_type != 0U)
+                          to_light[component] -= world_position[component];
+                      }
+                      const auto distance =
+                          std::sqrt(to_light[0] * to_light[0] +
+                                    to_light[1] * to_light[1] +
+                                    to_light[2] * to_light[2]);
+                      if (distance > 0.0F) {
+                        to_light[0] /= distance;
+                        to_light[1] /= distance;
+                        to_light[2] /= distance;
+                      }
+                      const auto incidence = std::max(
+                          0.0F, to_light[0] * world_normal[0] +
+                                    to_light[1] * world_normal[1] +
+                                    to_light[2] * world_normal[2]);
+                      float scale = 1.0F;
+                      if (light_type != 0U) {
+                        const auto constant = float24(
+                            graphics.commands[0x7bU + light * 3U]);
+                        const auto linear = float24(
+                            graphics.commands[0x7cU + light * 3U]);
+                        const auto quadratic = float24(
+                            graphics.commands[0x7dU + light * 3U]);
+                        const auto denominator =
+                            constant + linear * distance +
+                            quadratic * distance * distance;
+                        scale = denominator > 0.0F
+                                    ? std::clamp(1.0F / denominator, 0.0F, 1.0F)
+                                    : 0.0F;
+                      }
+                      for (std::size_t component = 0; component < 3U;
+                           ++component) {
+                        const auto light_ambient = channel(
+                            graphics.commands[0x8fU + light * 3U], component);
+                        const auto light_diffuse = channel(
+                            graphics.commands[0x90U + light * 3U], component);
+                        output.color[component] +=
+                            (light_ambient * ambient[component] +
+                             light_diffuse * diffuse[component] * incidence) *
+                            scale;
+                        output.color[component] =
+                            std::clamp(output.color[component], 0.0F, 1.0F);
+                      }
+                    }
+                  }
+                  if (layout.texture_type != 0 && texture.width != 0 &&
+                      texture.height != 0) {
+                    const auto* coordinates = input + layout.texture_offset;
+                    float u{};
+                    float v{};
+                    if (layout.texture_type == 1U) {
+                      u = static_cast<float>(coordinates[0]);
+                      v = static_cast<float>(coordinates[1]);
+                      if (!through) {
+                        u /= 128.0F;
+                        v /= 128.0F;
+                      }
+                    } else if (layout.texture_type == 2U) {
+                      std::uint16_t packed_u{};
+                      std::uint16_t packed_v{};
+                      std::memcpy(&packed_u, coordinates, sizeof(packed_u));
+                      std::memcpy(&packed_v, coordinates + 2U,
+                                  sizeof(packed_v));
+                      u = static_cast<float>(packed_u);
+                      v = static_cast<float>(packed_v);
+                      if (!through) {
+                        u /= 32768.0F;
+                        v /= 32768.0F;
+                      }
+                    } else {
+                      std::memcpy(&u, coordinates, sizeof(u));
+                      std::memcpy(&v, coordinates + 4U, sizeof(v));
+                    }
+                    if (through) {
+                      u /= static_cast<float>(texture.width);
+                      v /= static_cast<float>(texture.height);
+                    } else {
+                      u = u * float24(graphics.commands[0x48U]) +
+                          float24(graphics.commands[0x4aU]);
+                      v = v * float24(graphics.commands[0x49U]) +
+                          float24(graphics.commands[0x4bU]);
+                    }
+                    output.texture[0] = u;
+                    output.texture[1] = v;
+                  }
+                }
+                host::GeometryState render_state;
+                const auto clear_mode =
+                    (graphics.commands[0xd3U] & 1U) != 0;
+                render_state.cull_face =
+                    !clear_mode && (graphics.commands[0x1dU] & 1U) != 0;
+                render_state.front_face_clockwise =
+                    (graphics.commands[0x9bU] & 1U) != 0;
+                render_state.depth_test = (graphics.commands[0x23U] & 1U) != 0;
+                render_state.depth_write = (graphics.commands[0xe7U] & 1U) == 0;
+                render_state.depth_function = graphics.commands[0xdeU] & 7U;
+                render_state.alpha_blend = (graphics.commands[0x21U] & 1U) != 0;
+                render_state.color_test =
+                    (graphics.commands[0x27U] & 1U) != 0;
+                render_state.color_function = graphics.commands[0xd8U] & 3U;
+                render_state.color_reference =
+                    graphics.commands[0xd9U] & 0x00ffffffU;
+                render_state.color_mask =
+                    graphics.commands[0xdaU] & 0x00ffffffU;
+                render_state.alpha_test = (graphics.commands[0x22U] & 1U) != 0;
+                render_state.alpha_function = graphics.commands[0xdbU] & 7U;
+                render_state.alpha_reference =
+                    (graphics.commands[0xdbU] >> 8U) & 0xffU;
+                render_state.alpha_mask =
+                    (graphics.commands[0xdbU] >> 16U) & 0xffU;
+                render_state.texture_clamp_s =
+                    (graphics.commands[0xc7U] & 1U) != 0;
+                render_state.texture_clamp_t =
+                    (graphics.commands[0xc7U] & 0x100U) != 0;
+                render_state.texture_linear_filter =
+                    (graphics.commands[0xc6U] & 1U) != 0 ||
+                    (graphics.commands[0xc6U] & 0x100U) != 0;
+                render_state.texture_function = graphics.commands[0xc9U] & 7U;
+                render_state.texture_alpha_used =
+                    (graphics.commands[0xc9U] & 0x100U) != 0;
+                render_state.texture_environment_color =
+                    graphics.commands[0xcaU] & 0x00ffffffU;
+                host::submit_ge_primitive(primitive_type, std::move(vertices),
+                                          std::move(texture.pixels),
+                                          texture.width, texture.height,
+                                          render_state);
+              }
+            }
+            if (index_type == 0)
+              graphics.vertex_address += static_cast<std::uint32_t>(
+                  static_cast<std::size_t>(vertex_count) * layout.stride);
+            else
+              graphics.index_address +=
+                  static_cast<std::uint32_t>(index_byte_count);
           }
           ++primitives;
         } else if (command == 0x08U) {
@@ -1255,13 +1584,32 @@ void Runtime::dispatch(psprecomp::State& state, std::string_view name) {
     return;
   }
   if (name == "sceKernelGetSystemTimeWide") {
-    const auto value = host::monotonic_microseconds();
+    const auto value = implementation_->elapsed_microseconds();
     state.gpr[2] = static_cast<std::uint32_t>(value);
     state.gpr[3] = static_cast<std::uint32_t>(value >> 32U);
     return;
   }
   if (name == "sceKernelLibcClock") {
-    state.gpr[2] = static_cast<std::uint32_t>(host::monotonic_microseconds());
+    state.gpr[2] =
+        static_cast<std::uint32_t>(implementation_->elapsed_microseconds());
+    return;
+  }
+  if (name == "sceKernelLibcGettimeofday") {
+    if (auto* destination =
+            psprecomp::mapped_address(state, state.gpr[4], 8U)) {
+      const auto elapsed = implementation_->elapsed_microseconds();
+      const auto seconds = static_cast<std::uint32_t>(
+          implementation_->start_unix_seconds + elapsed / 1000000U);
+      const auto microseconds = static_cast<std::uint32_t>(elapsed % 1000000U);
+      std::memcpy(destination, &seconds, sizeof(seconds));
+      std::memcpy(destination + 4U, &microseconds, sizeof(microseconds));
+    } else if (state.gpr[4] != 0) {
+      state.gpr[2] = 0U;
+      return;
+    }
+    if (auto* timezone = psprecomp::mapped_address(state, state.gpr[5], 8U))
+      std::memset(timezone, 0, 8U);
+    state.gpr[2] = 0U;
     return;
   }
   if (name == "sceKernelLibcTime") {
@@ -1393,8 +1741,8 @@ void Runtime::dispatch(psprecomp::State& state, std::string_view name) {
     return;
   }
   if (name == "sceDisplayGetVcount") {
-    state.gpr[2] =
-        static_cast<std::uint32_t>(host::monotonic_microseconds() / 16683U);
+    state.gpr[2] = static_cast<std::uint32_t>(
+        implementation_->elapsed_microseconds() / 16683U);
     return;
   }
   if (name == "sceDisplayWaitVblankStart") {
@@ -1421,10 +1769,13 @@ void Runtime::dispatch(psprecomp::State& state, std::string_view name) {
     auto* output =
         psprecomp::mapped_address(state, state.gpr[4], pad_size * count);
     const auto controller = host::controller_state();
+    if (controller.buttons != 0)
+      std::fprintf(stderr, "[psprism:controller] buttons=%08x\n",
+                   controller.buttons);
     std::memset(output, 0, pad_size * count);
     for (std::uint32_t index = 0; index < count; ++index) {
       const auto timestamp =
-          static_cast<std::uint32_t>(host::monotonic_microseconds());
+          static_cast<std::uint32_t>(implementation_->elapsed_microseconds());
       std::memcpy(output + index * pad_size, &timestamp, sizeof(timestamp));
       std::memcpy(output + index * pad_size + 4U, &controller.buttons,
                   sizeof(controller.buttons));
