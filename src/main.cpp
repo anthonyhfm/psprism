@@ -1,7 +1,6 @@
 #include "elf.hpp"
 #include "emitter.hpp"
 #include "project.hpp"
-#include "tui.hpp"
 
 #include <filesystem>
 #include <iostream>
@@ -38,7 +37,6 @@ void usage(const char *program) {
          "  --code-map <file>       Optional Ghidra function/code map\n"
          "  --extract-disc          Extract all ISO files (default)\n"
          "  --no-extract-disc       Only extract the selected executable\n"
-         "  --plain                  Use the line-based wizard\n"
          "  -y, --yes                Accept defaults; do not prompt\n\n"
          "Low-level compatibility commands:\n"
          "  "
@@ -112,7 +110,6 @@ struct InitArguments {
   bool extract_disc{true};
   bool extract_disc_set{};
   bool assume_yes{};
-  bool plain{};
 };
 
 InitArguments parse_init_arguments(int argc, char **argv, int first) {
@@ -141,8 +138,6 @@ InitArguments parse_init_arguments(int argc, char **argv, int first) {
       result.extract_disc_set = true;
     } else if (argument == "--yes" || argument == "-y") {
       result.assume_yes = true;
-    } else if (argument == "--plain") {
-      result.plain = true;
     } else if (!argument.empty() && argument.front() != '-' &&
                result.input.empty()) {
       result.input = argv[i];
@@ -155,19 +150,6 @@ InitArguments parse_init_arguments(int argc, char **argv, int first) {
 
 int run_init(InitArguments arguments) {
   const bool interactive = terminal_is_interactive() && !arguments.assume_yes;
-  if (interactive && !arguments.plain && psprecomp::tui::supported_terminal()) {
-    psprecomp::tui::InitOptions options;
-    options.input = std::move(arguments.input);
-    options.output = std::move(arguments.output);
-    options.code_map = std::move(arguments.code_map);
-    options.display_name = std::move(arguments.display_name);
-    options.project_name = std::move(arguments.project_name);
-    options.extract_disc = arguments.extract_disc;
-    options.extract_disc_set = arguments.extract_disc_set;
-    return psprecomp::tui::run_wizard(
-        std::move(options),
-        {PSPRECOMP_SOURCE_INCLUDE_DIR, PSPRECOMP_PSPRISM_DIR});
-  }
   if (interactive) {
     std::cout
         << "\nPSPRecomp project wizard\n"
@@ -367,23 +349,12 @@ int main(int argc, char **argv) {
     if (argc == 1) {
       return run_init({});
     }
-    if (argc == 2 && std::string_view(argv[1]) == "--plain") {
-      InitArguments arguments;
-      arguments.plain = true;
-      return run_init(std::move(arguments));
-    }
     if (std::string_view(argv[1]) == "init") {
       return run_init(parse_init_arguments(argc, argv, 2));
     }
     if (argc == 2) {
       InitArguments arguments;
       arguments.input = argv[1];
-      return run_init(std::move(arguments));
-    }
-    if (argc == 3 && std::string_view(argv[2]) == "--plain") {
-      InitArguments arguments;
-      arguments.input = argv[1];
-      arguments.plain = true;
       return run_init(std::move(arguments));
     }
     return run_legacy(argc, argv);

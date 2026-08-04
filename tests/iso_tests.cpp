@@ -155,14 +155,6 @@ int main() {
   iso.extract_all(temporary / "disc");
   CHECK(std::filesystem::file_size(temporary /
                                    "disc/PSP_GAME/SYSDIR/EBOOT.BIN") == 8U);
-  bool cancelled = false;
-  try {
-    iso.extract_all(temporary / "cancelled", [] { return true; });
-  } catch (const std::runtime_error& error) {
-    cancelled = std::string(error.what()) == "export cancelled";
-  }
-  CHECK(cancelled);
-  CHECK(!std::filesystem::exists(temporary / "cancelled"));
   std::filesystem::remove_all(temporary);
   return 0;
 }

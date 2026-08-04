@@ -20,23 +20,6 @@ You can also pass the input on the command line:
 ./build/psprecomp path/to/game.iso
 ```
 
-On a regular terminal this opens the PSPRecomp fullscreen workspace. It has a
-step rail, a local filesystem browser, editable project fields, a final review
-and a live export log. Tab moves focus, arrow keys navigate menus, Enter
-activates the current control and Esc moves back. Esc or Ctrl+C during export
-requests cancellation at a safe checkpoint. The staging directory is removed
-before the wizard returns.
-
-Use the plain wizard explicitly when working in a basic terminal, capturing
-output or using a screen reader:
-
-```sh
-psprecomp init path/to/game.iso --plain
-```
-
-Piped and non-interactive invocations retain the existing non-TUI behavior.
-`NO_COLOR=1` disables color decoration without leaving fullscreen mode.
-
 The wizard asks for:
 
 1. The input, unless it was passed on the command line.

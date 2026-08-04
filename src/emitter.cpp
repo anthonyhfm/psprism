@@ -990,12 +990,6 @@ void emit_cpp(const ElfImage& image, const std::filesystem::path& output,
 void emit_project(const ElfImage& image, const std::filesystem::path& directory,
                   const CodeMap* code_map,
                   const GeneratedProjectOptions& options) {
-    const auto throw_if_cancelled = [&]() {
-        if (options.is_cancel_requested && options.is_cancel_requested()) {
-            throw std::runtime_error("export cancelled");
-        }
-    };
-    throw_if_cancelled();
     const auto shard_size = options.shard_size;
     if (shard_size == 0 || (shard_size & (shard_size - 1U)) != 0U ||
         shard_size < 0x1000U) {
@@ -1085,9 +1079,6 @@ void emit_project(const ElfImage& image, const std::filesystem::path& directory,
     for (const auto& section : image.executable_sections) {
         for (std::size_t offset = 0; offset < section.bytes.size();
              offset += 4) {
-            if ((offset & 0x3ffU) == 0U) {
-                throw_if_cancelled();
-            }
             const auto pc =
                 section.address + static_cast<std::uint32_t>(offset);
             const auto instruction = word_at(section, offset);
@@ -1197,7 +1188,6 @@ void emit_project(const ElfImage& image, const std::filesystem::path& directory,
             native_starts.push_back(start);
         }
         for (std::size_t first = 0; first < native_starts.size(); ++first) {
-            throw_if_cancelled();
             const auto last = first + 1U;
             std::ostringstream name;
             name << "func_" << std::hex << std::setfill('0') << std::setw(8)

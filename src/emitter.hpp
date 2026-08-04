@@ -3,7 +3,6 @@
 #include "elf.hpp"
 
 #include <filesystem>
-#include <functional>
 #include <iosfwd>
 
 namespace psprecomp {
@@ -15,7 +14,6 @@ struct GeneratedProjectOptions {
   std::string include_path{"../../include"};
   std::filesystem::path platform_directory;
   std::uint32_t shard_size{0x4000U};
-  std::function<bool()> is_cancel_requested;
 };
 
 void emit_cpp(const ElfImage &image, const std::filesystem::path &output,
