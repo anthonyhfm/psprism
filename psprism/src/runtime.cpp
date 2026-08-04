@@ -1077,7 +1077,7 @@ void Runtime::dispatch(psprecomp::State& state, std::string_view name) {
           }
           const auto layout = vertex_layout(vertex_type);
           const auto index_type = (vertex_type >> 11U) & 3U;
-          if (layout.stride != 0 && primitive_type <= 4U) {
+          if (layout.stride != 0 && primitive_type <= 6U) {
             const auto index_size = component_size(index_type);
             const auto index_byte_count =
                 static_cast<std::size_t>(vertex_count) * index_size;
@@ -1433,7 +1433,74 @@ void Runtime::dispatch(psprecomp::State& state, std::string_view name) {
                     (graphics.commands[0xc9U] & 0x100U) != 0;
                 render_state.texture_environment_color =
                     graphics.commands[0xcaU] & 0x00ffffffU;
-                host::submit_ge_primitive(primitive_type, std::move(vertices),
+                auto submitted_type = primitive_type;
+                if (primitive_type == 5U && vertices.size() >= 3U) {
+                  std::vector<host::GeometryVertex> triangles;
+                  triangles.reserve((vertices.size() - 2U) * 3U);
+                  for (std::size_t fan = 1U; fan + 1U < vertices.size();
+                       ++fan) {
+                    triangles.push_back(vertices[0]);
+                    triangles.push_back(vertices[fan]);
+                    triangles.push_back(vertices[fan + 1U]);
+                  }
+                  vertices = std::move(triangles);
+                  submitted_type = 3U;
+                } else if (primitive_type == 6U && vertices.size() >= 2U) {
+                  std::vector<host::GeometryVertex> triangles;
+                  triangles.reserve((vertices.size() / 2U) * 6U);
+                  for (std::size_t rectangle = 0U;
+                       rectangle + 1U < vertices.size(); rectangle += 2U) {
+                    const auto& source_top_left = vertices[rectangle];
+                    const auto& source_bottom_right = vertices[rectangle + 1U];
+                    const auto ndc = [](const host::GeometryVertex& vertex,
+                                        std::size_t component) {
+                      return vertex.position[3] != 0.0F
+                                 ? vertex.position[component] /
+                                       vertex.position[3]
+                                 : vertex.position[component];
+                    };
+                    const auto left = ndc(source_top_left, 0U);
+                    const auto top = ndc(source_top_left, 1U);
+                    const auto right = ndc(source_bottom_right, 0U);
+                    const auto bottom = ndc(source_bottom_right, 1U);
+
+                    // PSP sprites take color, depth and W from the second
+                    // vertex.  Only the screen-space corner and UV differ.
+                    auto bottom_right = source_bottom_right;
+                    auto top_right = source_bottom_right;
+                    auto top_left = source_bottom_right;
+                    auto bottom_left = source_bottom_right;
+                    top_right.position[1] = top * top_right.position[3];
+                    top_left.position[0] = left * top_left.position[3];
+                    top_left.position[1] = top * top_left.position[3];
+                    bottom_left.position[0] = left * bottom_left.position[3];
+                    top_right.texture[1] = source_top_left.texture[1];
+                    top_left.texture[0] = source_top_left.texture[0];
+                    top_left.texture[1] = source_top_left.texture[1];
+                    bottom_left.texture[0] = source_top_left.texture[0];
+
+                    // The GE rotates sprite UVs when the two supplied
+                    // corners describe opposing axes.  Metal's Y axis is
+                    // inverted relative to PSP screen coordinates, hence
+                    // the same-direction comparison in NDC space.
+                    if ((left < right && top < bottom) ||
+                        (left > right && top > bottom)) {
+                      std::swap(top_right.texture[0], bottom_left.texture[0]);
+                      std::swap(top_right.texture[1], bottom_left.texture[1]);
+                    }
+
+                    triangles.push_back(bottom_right);
+                    triangles.push_back(top_right);
+                    triangles.push_back(top_left);
+                    triangles.push_back(bottom_left);
+                    triangles.push_back(bottom_right);
+                    triangles.push_back(top_left);
+                  }
+                  vertices = std::move(triangles);
+                  submitted_type = 3U;
+                  render_state.cull_face = false;
+                }
+                host::submit_ge_primitive(submitted_type, std::move(vertices),
                                           std::move(texture.pixels),
                                           texture.width, texture.height,
                                           render_state);
