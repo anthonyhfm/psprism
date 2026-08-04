@@ -205,6 +205,7 @@ struct DecodedTexture {
   std::vector<std::uint8_t> pixels;
   std::uint32_t width{};
   std::uint32_t height{};
+  std::uint32_t address{};
 };
 
 std::uint32_t decode_16bit_color(std::uint16_t packed,
@@ -238,6 +239,8 @@ DecodedTexture decode_texture(
     const std::array<std::uint32_t, 256>& commands) {
   DecodedTexture result;
   const auto format = commands[0xc3U] & 0xfU;
+  result.address = (commands[0xa0U] & 0x00fffff0U) |
+                   ((commands[0xa8U] << 8U) & 0x0f000000U);
   if ((commands[0x1eU] & 1U) == 0 || format > 5U)
     return result;
   result.width = 1U << (commands[0xb8U] & 0xfU);
@@ -246,8 +249,6 @@ DecodedTexture decode_texture(
   if (result.width == 0 || result.height == 0 || buffer_width == 0 ||
       result.width > 1024U || result.height > 1024U)
     return {};
-  const auto texture_address =
-      (commands[0xa0U] & 0x00fffff0U) | ((commands[0xa8U] << 8U) & 0x0f000000U);
   const auto row_bytes =
       format == 4U ? (buffer_width + 1U) / 2U
                    : buffer_width * (format == 3U ? 4U : format < 4U ? 2U : 1U);
@@ -260,7 +261,7 @@ DecodedTexture decode_texture(
                                : static_cast<std::size_t>(row_bytes) *
                                      result.height;
   const auto* source =
-      psprecomp::mapped_address(state, texture_address, source_size);
+      psprecomp::mapped_address(state, result.address, source_size);
   if (source == nullptr)
     return {};
   const std::uint8_t* palette{};
@@ -962,7 +963,8 @@ void Runtime::dispatch(psprecomp::State& state, std::string_view name) {
                      frame, state.gpr[4], state.gpr[5], state.gpr[6],
                      state.gpr[7]);
       }
-      host::present_frame(pixels, state.gpr[5], width, height, state.gpr[6]);
+      host::present_frame(pixels, state.gpr[5], width, height, state.gpr[6],
+                          state.gpr[4]);
       state.gpr[2] = 0;
     }
     return;
@@ -987,7 +989,11 @@ void Runtime::dispatch(psprecomp::State& state, std::string_view name) {
       auto& graphics = implementation_->graphics;
       host::begin_ge_frame();
       std::array<std::uint32_t, 256> commands{};
-      std::vector<std::uint32_t> return_addresses;
+      struct GeCallFrame {
+        std::uint32_t return_address;
+        std::uint32_t offset_address;
+      };
+      std::vector<GeCallFrame> call_stack;
       auto program_counter = state.gpr[4];
       std::uint32_t words{};
       std::uint32_t primitives{};
@@ -1077,6 +1083,16 @@ void Runtime::dispatch(psprecomp::State& state, std::string_view name) {
           }
           const auto layout = vertex_layout(vertex_type);
           const auto index_type = (vertex_type >> 11U) & 3U;
+          const auto framebuffer_stride =
+              graphics.commands[0x9dU] & 0x7fcU;
+          const auto scissor_width =
+              (graphics.commands[0xd5U] & 0x3ffU) + 1U;
+          const auto scissor_height =
+              ((graphics.commands[0xd5U] >> 10U) & 0x3ffU) + 1U;
+          const auto render_target_width = std::clamp(
+              std::max(framebuffer_stride, scissor_width), 1U, 1024U);
+          const auto render_target_height =
+              std::clamp(scissor_height, 1U, 1024U);
           if (layout.stride != 0 && primitive_type <= 6U) {
             const auto index_size = component_size(index_type);
             const auto index_byte_count =
@@ -1182,8 +1198,14 @@ void Runtime::dispatch(psprecomp::State& state, std::string_view name) {
                   auto& output = vertices[index];
                   float world_position[3]{};
                   if (through) {
-                    output.position[0] = decoded[0] / 240.0F - 1.0F;
-                    output.position[1] = 1.0F - decoded[1] / 136.0F;
+                    output.position[0] =
+                        decoded[0] /
+                            (static_cast<float>(render_target_width) * 0.5F) -
+                        1.0F;
+                    output.position[1] =
+                        1.0F -
+                        decoded[1] /
+                            (static_cast<float>(render_target_height) * 0.5F);
                     output.position[2] = decoded[2] / 65535.0F;
                     output.position[3] = 1.0F;
                   } else {
@@ -1193,6 +1215,40 @@ void Runtime::dispatch(psprecomp::State& state, std::string_view name) {
                     transform43(graphics.view_matrix, world_position, view);
                     transform44(graphics.projection_matrix, view,
                                 output.position);
+                    const auto clip_w = output.position[3];
+                    if (clip_w != 0.0F) {
+                      const auto screen_x =
+                          output.position[0] / clip_w *
+                              float24(graphics.commands[0x42U]) +
+                          float24(graphics.commands[0x45U]) -
+                          static_cast<float>(graphics.commands[0x4cU] &
+                                             0xffffU) /
+                              16.0F;
+                      const auto screen_y =
+                          output.position[1] / clip_w *
+                              float24(graphics.commands[0x43U]) +
+                          float24(graphics.commands[0x46U]) -
+                          static_cast<float>(graphics.commands[0x4dU] &
+                                             0xffffU) /
+                              16.0F;
+                      const auto screen_z =
+                          output.position[2] / clip_w *
+                              float24(graphics.commands[0x44U]) +
+                          float24(graphics.commands[0x47U]);
+                      output.position[0] =
+                          (screen_x /
+                               (static_cast<float>(render_target_width) *
+                                0.5F) -
+                           1.0F) *
+                          clip_w;
+                      output.position[1] =
+                          (1.0F -
+                           screen_y /
+                               (static_cast<float>(render_target_height) *
+                                0.5F)) *
+                          clip_w;
+                      output.position[2] = screen_z / 65535.0F * clip_w;
+                    }
                   }
                   float world_normal[3]{0.0F, 0.0F, 1.0F};
                   if (!through && layout.normal_type != 0U) {
@@ -1398,24 +1454,43 @@ void Runtime::dispatch(psprecomp::State& state, std::string_view name) {
                   }
                 }
                 host::GeometryState render_state;
+                render_state.render_target_address =
+                    0x04000000U |
+                    (graphics.commands[0x9cU] & 0x001ffff0U);
+                render_state.render_target_width = render_target_width;
+                render_state.render_target_height = render_target_height;
+                render_state.texture_address = texture.address;
                 const auto clear_mode =
                     (graphics.commands[0xd3U] & 1U) != 0;
+                if (clear_mode) {
+                  // PSP clear-mode draws ignore the currently bound texture and
+                  // fixed-function tests.  Letting those states leak into the
+                  // clear rectangle leaves stale color/depth targets behind.
+                  texture = {};
+                  render_state.texture_address = 0U;
+                }
                 render_state.cull_face =
                     !clear_mode && (graphics.commands[0x1dU] & 1U) != 0;
                 render_state.front_face_clockwise =
                     (graphics.commands[0x9bU] & 1U) != 0;
-                render_state.depth_test = (graphics.commands[0x23U] & 1U) != 0;
-                render_state.depth_write = (graphics.commands[0xe7U] & 1U) == 0;
+                render_state.depth_test =
+                    !clear_mode && (graphics.commands[0x23U] & 1U) != 0;
+                render_state.depth_write =
+                    clear_mode
+                        ? (graphics.commands[0xd3U] & 0x400U) != 0
+                        : (graphics.commands[0xe7U] & 1U) == 0;
                 render_state.depth_function = graphics.commands[0xdeU] & 7U;
-                render_state.alpha_blend = (graphics.commands[0x21U] & 1U) != 0;
+                render_state.alpha_blend =
+                    !clear_mode && (graphics.commands[0x21U] & 1U) != 0;
                 render_state.color_test =
-                    (graphics.commands[0x27U] & 1U) != 0;
+                    !clear_mode && (graphics.commands[0x27U] & 1U) != 0;
                 render_state.color_function = graphics.commands[0xd8U] & 3U;
                 render_state.color_reference =
                     graphics.commands[0xd9U] & 0x00ffffffU;
                 render_state.color_mask =
                     graphics.commands[0xdaU] & 0x00ffffffU;
-                render_state.alpha_test = (graphics.commands[0x22U] & 1U) != 0;
+                render_state.alpha_test =
+                    !clear_mode && (graphics.commands[0x22U] & 1U) != 0;
                 render_state.alpha_function = graphics.commands[0xdbU] & 7U;
                 render_state.alpha_reference =
                     (graphics.commands[0xdbU] >> 8U) & 0xffU;
@@ -1518,9 +1593,9 @@ void Runtime::dispatch(psprecomp::State& state, std::string_view name) {
           program_counter = relative_address(argument & 0x00fffffcU);
           continue;
         } else if (command == 0x0aU) {
-          if (return_addresses.size() >= 64U)
+          if (call_stack.size() >= 64U)
             break;
-          return_addresses.push_back(next);
+          call_stack.push_back({next, graphics.offset_address});
           program_counter = relative_address(argument & 0x00fffffcU);
           if (submission == 0U)
             std::fprintf(
@@ -1528,10 +1603,12 @@ void Runtime::dispatch(psprecomp::State& state, std::string_view name) {
                 next - 4U, program_counter, next);
           continue;
         } else if (command == 0x0bU) {
-          if (return_addresses.empty())
+          if (call_stack.empty())
             break;
-          program_counter = return_addresses.back();
-          return_addresses.pop_back();
+          const auto frame = call_stack.back();
+          call_stack.pop_back();
+          program_counter = frame.return_address;
+          graphics.offset_address = frame.offset_address;
           if (submission == 0U)
             std::fprintf(stderr, "[psprism:ge] return target=%08x\n",
                          program_counter);

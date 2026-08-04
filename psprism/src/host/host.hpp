@@ -23,6 +23,10 @@ struct GeometryVertex {
 };
 
 struct GeometryState {
+  std::uint32_t render_target_address{};
+  std::uint32_t render_target_width{480};
+  std::uint32_t render_target_height{272};
+  std::uint32_t texture_address{};
   bool cull_face{};
   bool front_face_clockwise{true};
   bool depth_test{};
@@ -50,7 +54,7 @@ void run_event_loop();
 void request_frontend_exit();
 void present_frame(const std::uint8_t* pixels, std::uint32_t stride,
                    std::uint32_t width, std::uint32_t height,
-                   std::uint32_t format);
+                   std::uint32_t format, std::uint32_t address);
 void begin_ge_frame();
 void end_ge_frame();
 void submit_ge_primitive(std::uint32_t type,

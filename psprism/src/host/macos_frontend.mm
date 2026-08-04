@@ -30,6 +30,13 @@ constexpr std::uint32_t psp_circle = 0x002000U;
 constexpr std::uint32_t psp_cross = 0x004000U;
 constexpr std::uint32_t psp_square = 0x008000U;
 
+std::uint32_t normalized_vram_address(std::uint32_t address) {
+  if (address < 0x00200000U ||
+      (address & 0x0fe00000U) == 0x04000000U)
+    return 0x04000000U | (address & 0x001fffffU);
+  return address;
+}
+
 struct GeometryBatch {
   MTLPrimitiveType type;
   std::vector<psprism::host::GeometryVertex> vertices;
@@ -57,6 +64,7 @@ std::mutex geometry_mutex;
 std::vector<GeometryBatch> building_geometry_batches;
 std::vector<GeometryBatch> presented_geometry_batches;
 std::atomic_bool has_completed_ge_frame{};
+std::atomic_uint32_t display_framebuffer_address{0x04000000U};
 std::atomic_uint32_t keyboard_buttons{};
 std::atomic_uint32_t keyboard_latched_buttons{};
 std::atomic_uint32_t keyboard_analog_directions{};
@@ -123,6 +131,8 @@ bool update_keyboard_key(unsigned short key_code, bool pressed) {
 @property(nonatomic, strong) id<MTLTexture> texture;
 @property(nonatomic, strong) NSArray<id<MTLDepthStencilState>>* depthStates;
 @property(nonatomic, strong) NSArray<id<MTLSamplerState>>* samplerStates;
+@property(nonatomic, strong) NSMutableDictionary<NSNumber*, id<MTLTexture>>* renderTargets;
+@property(nonatomic, strong) NSMutableDictionary<NSNumber*, id<MTLTexture>>* depthTargets;
 @end
 
 @implementation PsprismRenderer
@@ -131,14 +141,18 @@ bool update_keyboard_key(unsigned short key_code, bool pressed) {
   if (self == nil) return nil;
   self.device = view.device;
   self.queue = [self.device newCommandQueue];
+  self.renderTargets = [NSMutableDictionary dictionary];
+  self.depthTargets = [NSMutableDictionary dictionary];
   NSString* source = @R"METAL(
     #include <metal_stdlib>
     using namespace metal;
     struct VertexOut { float4 position [[position]]; float2 uv; };
-    vertex VertexOut psprism_vertex(uint id [[vertex_id]]) {
+    vertex VertexOut psprism_vertex(
+        uint id [[vertex_id]], constant float2& texture_scale [[buffer(0)]]) {
       constexpr float2 positions[] = {{-1.0,-1.0},{3.0,-1.0},{-1.0,3.0}};
       constexpr float2 texcoords[] = {{0.0,1.0},{2.0,1.0},{0.0,-1.0}};
-      return {float4(positions[id], 0.0, 1.0), texcoords[id]};
+      return {float4(positions[id], 0.0, 1.0),
+              texcoords[id] * texture_scale};
     }
     fragment float4 psprism_fragment(VertexOut in [[stage_in]],
                                      texture2d<float> image [[texture(0)]]) {
@@ -349,20 +363,72 @@ bool update_keyboard_key(unsigned short key_code, bool pressed) {
 }
 
 - (void)drawInMTKView:(MTKView*)view {
-  MTLRenderPassDescriptor* pass = view.currentRenderPassDescriptor;
+  MTLRenderPassDescriptor* display_pass = view.currentRenderPassDescriptor;
   id<CAMetalDrawable> drawable = view.currentDrawable;
-  if (pass == nil || drawable == nil || self.pipeline == nil) return;
+  if (display_pass == nil || drawable == nil || self.pipeline == nil) return;
   id<MTLCommandBuffer> commands = [self.queue commandBuffer];
-  id<MTLRenderCommandEncoder> encoder =
-      [commands renderCommandEncoderWithDescriptor:pass];
-  [encoder setRenderPipelineState:self.pipeline];
-  [encoder setDepthStencilState:self.depthStates[0]];
-  if (self.texture != nil) [encoder setFragmentTexture:self.texture atIndex:0];
-  [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
   if (self.geometryPipeline != nil) {
     std::lock_guard lock(geometry_mutex);
+    id<MTLRenderCommandEncoder> encoder = nil;
+    std::uint32_t active_target = UINT32_MAX;
     for (const auto& batch : presented_geometry_batches) {
       if (batch.vertices.empty()) continue;
+      const auto target_address =
+          normalized_vram_address(batch.state.render_target_address);
+      NSNumber* target_key = @(target_address);
+      id<MTLTexture> target =
+          [self.renderTargets objectForKey:target_key];
+      id<MTLTexture> depth = [self.depthTargets objectForKey:target_key];
+      bool created_target = false;
+      if (target == nil || target.width < batch.state.render_target_width ||
+          target.height < batch.state.render_target_height) {
+        const auto target_width =
+            std::max<NSUInteger>(target.width,
+                                 batch.state.render_target_width);
+        const auto target_height =
+            std::max<NSUInteger>(target.height,
+                                 batch.state.render_target_height);
+        MTLTextureDescriptor* target_descriptor = [MTLTextureDescriptor
+            texture2DDescriptorWithPixelFormat:view.colorPixelFormat
+                                         width:target_width
+                                        height:target_height
+                                     mipmapped:NO];
+        target_descriptor.usage =
+            MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+        target = [self.device newTextureWithDescriptor:target_descriptor];
+        [self.renderTargets setObject:target forKey:target_key];
+        MTLTextureDescriptor* depth_descriptor = [MTLTextureDescriptor
+            texture2DDescriptorWithPixelFormat:view.depthStencilPixelFormat
+                                         width:target_width
+                                        height:target_height
+                                     mipmapped:NO];
+        depth_descriptor.usage = MTLTextureUsageRenderTarget;
+        depth = [self.device newTextureWithDescriptor:depth_descriptor];
+        [self.depthTargets setObject:depth forKey:target_key];
+        created_target = true;
+      }
+      if (encoder == nil || active_target != target_address) {
+        if (encoder != nil) [encoder endEncoding];
+        MTLRenderPassDescriptor* target_pass =
+            [MTLRenderPassDescriptor renderPassDescriptor];
+        target_pass.colorAttachments[0].texture = target;
+        target_pass.colorAttachments[0].loadAction =
+            created_target ? MTLLoadActionClear : MTLLoadActionLoad;
+        target_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        target_pass.colorAttachments[0].clearColor =
+            MTLClearColorMake(0.0, 0.0, 0.0, 0.0);
+        target_pass.depthAttachment.texture = depth;
+        target_pass.depthAttachment.loadAction =
+            created_target ? MTLLoadActionClear : MTLLoadActionLoad;
+        target_pass.depthAttachment.storeAction = MTLStoreActionStore;
+        target_pass.depthAttachment.clearDepth = 1.0;
+        encoder = [commands renderCommandEncoderWithDescriptor:target_pass];
+        const MTLViewport target_viewport{
+            0.0, 0.0, static_cast<double>(target.width),
+            static_cast<double>(target.height), 0.0, 1.0};
+        [encoder setViewport:target_viewport];
+        active_target = target_address;
+      }
       [encoder setCullMode:batch.state.cull_face ? MTLCullModeBack
                                                  : MTLCullModeNone];
       [encoder setFrontFacingWinding:batch.state.front_face_clockwise
@@ -388,7 +454,26 @@ bool update_keyboard_key(unsigned short key_code, bool pressed) {
       [encoder setFragmentBytes:&fragment_state
                          length:sizeof(fragment_state)
                         atIndex:1];
-      if (batch.texture.empty()) {
+      id<MTLTexture> sampled_texture = nil;
+      const auto texture_address =
+          normalized_vram_address(batch.state.texture_address);
+      if (batch.state.texture_address != 0U)
+        sampled_texture = [self.renderTargets objectForKey:@(texture_address)];
+      if (sampled_texture == nil && !batch.texture.empty()) {
+        MTLTextureDescriptor* descriptor = [MTLTextureDescriptor
+            texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                         width:batch.texture_width
+                                        height:batch.texture_height
+                                     mipmapped:NO];
+        sampled_texture = [self.device newTextureWithDescriptor:descriptor];
+        [sampled_texture
+            replaceRegion:MTLRegionMake2D(0, 0, batch.texture_width,
+                                          batch.texture_height)
+             mipmapLevel:0
+               withBytes:batch.texture.data()
+             bytesPerRow:batch.texture_width * 4U];
+      }
+      if (sampled_texture == nil) {
         [encoder setRenderPipelineState:batch.state.alpha_blend
                                             ? self.blendedGeometryPipeline
                                             : self.geometryPipeline];
@@ -403,19 +488,7 @@ bool update_keyboard_key(unsigned short key_code, bool pressed) {
             (batch.state.texture_clamp_s ? 1U : 0U);
         [encoder setFragmentSamplerState:self.samplerStates[sampler_state]
                                  atIndex:0];
-        MTLTextureDescriptor* descriptor = [MTLTextureDescriptor
-            texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
-                                         width:batch.texture_width
-                                        height:batch.texture_height
-                                     mipmapped:NO];
-        id<MTLTexture> texture =
-            [self.device newTextureWithDescriptor:descriptor];
-        [texture replaceRegion:MTLRegionMake2D(0, 0, batch.texture_width,
-                                               batch.texture_height)
-                  mipmapLevel:0
-                    withBytes:batch.texture.data()
-                  bytesPerRow:batch.texture_width * 4U];
-        [encoder setFragmentTexture:texture atIndex:0];
+        [encoder setFragmentTexture:sampled_texture atIndex:0];
       }
       [encoder setVertexBytes:batch.vertices.data()
                        length:batch.vertices.size() * sizeof(psprism::host::GeometryVertex)
@@ -424,9 +497,39 @@ bool update_keyboard_key(unsigned short key_code, bool pressed) {
                   vertexStart:0
                   vertexCount:batch.vertices.size()];
     }
+    if (encoder != nil) [encoder endEncoding];
+    // A PSP frame may be assembled from several GE lists.  Consume every
+    // completed list once, in submission order, after encoding it into the
+    // persistent framebuffer targets.
+    presented_geometry_batches.clear();
   }
-  [encoder endEncoding];
+
+  id<MTLTexture> display_texture = [self.renderTargets
+      objectForKey:@(normalized_vram_address(
+                       display_framebuffer_address.load()))];
+  if (display_texture == nil) display_texture = self.texture;
+  id<MTLRenderCommandEncoder> display_encoder =
+      [commands renderCommandEncoderWithDescriptor:display_pass];
+  [display_encoder setRenderPipelineState:self.pipeline];
+  [display_encoder setDepthStencilState:self.depthStates[0]];
+  if (display_texture != nil) {
+    const float texture_scale[2]{
+        std::min(1.0F, 480.0F / static_cast<float>(display_texture.width)),
+        std::min(1.0F, 272.0F / static_cast<float>(display_texture.height))};
+    [display_encoder setVertexBytes:texture_scale
+                            length:sizeof(texture_scale)
+                           atIndex:0];
+    [display_encoder setFragmentTexture:display_texture atIndex:0];
+    [display_encoder drawPrimitives:MTLPrimitiveTypeTriangle
+                        vertexStart:0
+                        vertexCount:3];
+  }
+  [display_encoder endEncoding];
   [commands presentDrawable:drawable];
+  [commands addCompletedHandler:^(id<MTLCommandBuffer> buffer) {
+    if (buffer.error != nil)
+      NSLog(@"psprism: Metal command buffer error: %@", buffer.error);
+  }];
   [commands commit];
 }
 
@@ -597,8 +700,9 @@ void request_frontend_exit() {
 
 void present_frame(const std::uint8_t* pixels, std::uint32_t stride,
                    std::uint32_t width, std::uint32_t height,
-                   std::uint32_t format) {
+                   std::uint32_t format, std::uint32_t address) {
   if (pixels == nullptr || width == 0 || height == 0) return;
+  display_framebuffer_address.store(normalized_vram_address(address));
   auto converted = std::make_shared<std::vector<std::uint8_t>>(
       convert_frame(pixels, stride, width, height, format));
   dispatch_async(dispatch_get_main_queue(), ^{
@@ -625,7 +729,10 @@ void begin_ge_frame() {
 void end_ge_frame() {
   {
     std::lock_guard lock(geometry_mutex);
-    presented_geometry_batches = std::move(building_geometry_batches);
+    presented_geometry_batches.insert(
+        presented_geometry_batches.end(),
+        std::make_move_iterator(building_geometry_batches.begin()),
+        std::make_move_iterator(building_geometry_batches.end()));
     building_geometry_batches.clear();
   }
   has_completed_ge_frame.store(true);
