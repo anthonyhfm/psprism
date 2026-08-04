@@ -3,6 +3,7 @@
 #include "host/host.hpp"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cerrno>
 #include <condition_variable>
@@ -37,13 +38,12 @@ std::uint32_t align_up(std::uint32_t value, std::uint32_t alignment) {
 
 template <typename T>
 T* guest_pointer(psprecomp::State& state, std::uint32_t address) {
-  if (!psprecomp::address_ok(state, address, sizeof(T))) {
-    return nullptr;
-  }
-  return reinterpret_cast<T*>(state.memory + address - state.memory_base);
+  return reinterpret_cast<T*>(
+      psprecomp::mapped_address(state, address, sizeof(T)));
 }
 
 char* guest_string(psprecomp::State& state, std::uint32_t address) {
+  address = psprecomp::canonical_address(address);
   if (address < state.memory_base) {
     return nullptr;
   }
@@ -122,6 +122,11 @@ struct Runtime::Implementation {
     std::vector<std::uint32_t> available;
   };
 
+  struct Directory {
+    std::vector<std::filesystem::directory_entry> entries;
+    std::size_t next{};
+  };
+
   std::uint8_t* memory{};
   std::size_t memory_size{};
   std::uint32_t memory_base{};
@@ -130,6 +135,8 @@ struct Runtime::Implementation {
   Configuration configuration;
   std::unordered_set<std::string> warned;
   std::unordered_map<int, int> files;
+  std::unordered_map<int, Directory> directories;
+  std::filesystem::path current_directory;
   std::mutex objects_mutex;
   std::unordered_map<int, std::shared_ptr<GuestThread>> threads;
   std::unordered_map<int, std::shared_ptr<Semaphore>> semaphores;
@@ -141,6 +148,11 @@ struct Runtime::Implementation {
   std::uint32_t heap_cursor{};
   std::uint32_t stack_cursor{};
   std::atomic<bool> exit_requested{};
+  std::atomic<std::uint32_t> displayed_frames{};
+  std::atomic<std::uint32_t> submitted_ge_lists{};
+  std::atomic<std::uint32_t> savedata_status{};
+  std::uint32_t savedata_parameters{};
+  bool savedata_operation_complete{};
 
   int allocate_uid() { return next_uid++; }
 
@@ -175,7 +187,11 @@ struct Runtime::Implementation {
     if (psp_path.starts_with("ms0:")) {
       return configuration.writable_root / suffix(psp_path, "ms0:");
     }
-    return configuration.disc_root / suffix(psp_path, "");
+    if (!psp_path.empty() && psp_path.front() == '/')
+      return configuration.disc_root / suffix(psp_path, "");
+    return (current_directory.empty() ? configuration.disc_root
+                                      : current_directory) /
+           suffix(psp_path, "");
   }
 
   int descriptor(int psp_descriptor) const {
@@ -229,6 +245,8 @@ void Runtime::configure(std::uint8_t* memory, std::size_t size,
   }
   std::filesystem::create_directories(configuration.writable_root);
   implementation_->configuration = std::move(configuration);
+  implementation_->current_directory = implementation_->configuration.disc_root;
+  host::initialize_frontend();
   std::fprintf(stderr, "[psprism:macos] disc=%s writable=%s\n",
                implementation_->configuration.disc_root.c_str(),
                implementation_->configuration.writable_root.c_str());
@@ -244,6 +262,12 @@ void Runtime::prepare_state(psprecomp::State& state) {
   state.scratchpad_size = implementation_->scratchpad.size();
   state.video_memory = implementation_->video_memory.data();
   state.video_memory_size = implementation_->video_memory.size();
+}
+
+void Runtime::run_host_loop() {
+  host::run_event_loop();
+  implementation_->exit_requested = true;
+  wait_for_guest_threads();
 }
 
 void Runtime::wait_for_guest_threads() {
@@ -650,9 +674,87 @@ void Runtime::dispatch(psprecomp::State& state, std::string_view name) {
     state.gpr[2] = 0;
     return;
   }
+  if (name == "sceDisplaySetFrameBuf") {
+    constexpr std::uint32_t width = 480;
+    constexpr std::uint32_t height = 272;
+    const auto bytes_per_pixel = state.gpr[6] == 3U ? 4U : 2U;
+    const auto byte_count =
+        static_cast<std::size_t>(state.gpr[5]) * height * bytes_per_pixel;
+    if (auto* pixels =
+            psprecomp::mapped_address(state, state.gpr[4], byte_count)) {
+      const auto frame = implementation_->displayed_frames++;
+      if (frame < 4U) {
+        std::fprintf(stderr,
+                     "[psprism:display] frame=%u address=%08x stride=%u "
+                     "format=%u sync=%u\n",
+                     frame, state.gpr[4], state.gpr[5], state.gpr[6],
+                     state.gpr[7]);
+      }
+      host::present_frame(pixels, state.gpr[5], width, height, state.gpr[6]);
+      state.gpr[2] = 0;
+    }
+    return;
+  }
+  if (name == "sceGeEdramGetAddr") {
+    state.gpr[2] = 0x04000000U;
+    return;
+  }
+  if (name == "sceGeEdramGetSize") {
+    state.gpr[2] = 2U * 1024U * 1024U;
+    return;
+  }
+  if (name == "sceGeEdramSetAddrTranslation") {
+    state.gpr[2] = state.gpr[4];
+    return;
+  }
+  if (name == "sceGeListEnQueue") {
+    static std::atomic<std::uint32_t> next_list{1};
+    const auto submission = implementation_->submitted_ge_lists++;
+    if (submission < 8U) {
+      std::array<std::uint32_t, 256> commands{};
+      std::uint32_t words{};
+      bool ended{};
+      for (; words < 65536U; ++words) {
+        const auto address = state.gpr[4] + words * 4U;
+        const auto* pointer = psprecomp::mapped_address(state, address, 4U);
+        if (pointer == nullptr)
+          break;
+        std::uint32_t instruction{};
+        std::memcpy(&instruction, pointer, sizeof(instruction));
+        const auto command = instruction >> 24U;
+        ++commands[command];
+        if (command == 0x0cU) {
+          ++words;
+          ended = true;
+          break;
+        }
+      }
+      std::fprintf(stderr,
+                   "[psprism:ge] list=%u address=%08x stall=%08x words=%u "
+                   "ended=%u commands=",
+                   submission, state.gpr[4], state.gpr[5], words,
+                   ended ? 1U : 0U);
+      bool first = true;
+      for (std::size_t command = 0; command < commands.size(); ++command) {
+        if (commands[command] == 0)
+          continue;
+        std::fprintf(stderr, "%s%02zx:%u", first ? "" : ",", command,
+                     commands[command]);
+        first = false;
+      }
+      std::fputc('\n', stderr);
+    }
+    state.gpr[2] = next_list++;
+    return;
+  }
+  if (is_one_of(name, {"sceGeListSync", "sceGeContinue"})) {
+    state.gpr[2] = 0U;
+    return;
+  }
   if (is_one_of(name, {"sceKernelExitGame", "sceKernelExitThread"})) {
     if (name == "sceKernelExitGame") {
       implementation_->exit_requested = true;
+      host::request_frontend_exit();
       std::lock_guard lock(implementation_->objects_mutex);
       for (const auto& [uid, semaphore] : implementation_->semaphores) {
         static_cast<void>(uid);
@@ -683,6 +785,17 @@ void Runtime::dispatch(psprecomp::State& state, std::string_view name) {
     state.gpr[2] = 0;
     return;
   }
+  if (is_one_of(name,
+                {"sceKernelChangeThreadPriority", "sceKernelPowerLock",
+                 "sceKernelPowerUnlock", "sceKernelRegisterExitCallback"})) {
+    state.gpr[2] = 0;
+    return;
+  }
+  if (name == "sceKernelCreateCallback") {
+    std::lock_guard lock(implementation_->objects_mutex);
+    state.gpr[2] = static_cast<std::uint32_t>(implementation_->allocate_uid());
+    return;
+  }
   if (name == "sceKernelGetSystemTimeWide") {
     const auto value = host::monotonic_microseconds();
     state.gpr[2] = static_cast<std::uint32_t>(value);
@@ -699,6 +812,57 @@ void Runtime::dispatch(psprecomp::State& state, std::string_view name) {
       *destination = seconds;
     }
     state.gpr[2] = seconds;
+    return;
+  }
+  if (name == "sceUtilitySavedataInitStart") {
+    constexpr std::size_t minimum_parameter_size = 128U;
+    auto* parameters =
+        psprecomp::mapped_address(state, state.gpr[4], minimum_parameter_size);
+    if (parameters == nullptr)
+      return;
+    std::uint32_t mode{};
+    std::memcpy(&mode, parameters + 48U, sizeof(mode));
+    char game_name[14]{};
+    char save_name[21]{};
+    char file_name[14]{};
+    std::memcpy(game_name, parameters + 60U, 13U);
+    std::memcpy(save_name, parameters + 76U, 20U);
+    std::memcpy(file_name, parameters + 100U, 13U);
+    implementation_->savedata_parameters = state.gpr[4];
+    implementation_->savedata_operation_complete = false;
+    implementation_->savedata_status = 1U;
+    std::fprintf(stderr,
+                 "[psprism:savedata] init mode=%u game=%s save=%s file=%s\n",
+                 mode, game_name, save_name, file_name);
+    state.gpr[2] = 0U;
+    return;
+  }
+  if (name == "sceUtilitySavedataGetStatus") {
+    const auto status = implementation_->savedata_status.load();
+    state.gpr[2] = status;
+    if (status == 1U)
+      implementation_->savedata_status = 2U;
+    else if (status == 4U)
+      implementation_->savedata_status = 0U;
+    return;
+  }
+  if (name == "sceUtilitySavedataUpdate") {
+    if (implementation_->savedata_status == 2U &&
+        !implementation_->savedata_operation_complete) {
+      implementation_->savedata_operation_complete = true;
+      implementation_->savedata_status = 3U;
+      if (auto* parameters = psprecomp::mapped_address(
+              state, implementation_->savedata_parameters, 48U)) {
+        const std::uint32_t success{};
+        std::memcpy(parameters + 28U, &success, sizeof(success));
+      }
+    }
+    state.gpr[2] = 0U;
+    return;
+  }
+  if (name == "sceUtilitySavedataShutdownStart") {
+    implementation_->savedata_status = 4U;
+    state.gpr[2] = 0U;
     return;
   }
   if (is_one_of(name, {"sceKernelDelayThread", "sceKernelDelayThreadCB"})) {
@@ -737,14 +901,18 @@ void Runtime::dispatch(psprecomp::State& state, std::string_view name) {
     const auto count = state.gpr[5];
     if (!psprecomp::address_ok(state, state.gpr[4], pad_size * count))
       return;
-    auto* output = state.memory + state.gpr[4] - state.memory_base;
+    auto* output =
+        psprecomp::mapped_address(state, state.gpr[4], pad_size * count);
+    const auto controller = host::controller_state();
     std::memset(output, 0, pad_size * count);
     for (std::uint32_t index = 0; index < count; ++index) {
       const auto timestamp =
           static_cast<std::uint32_t>(host::monotonic_microseconds());
       std::memcpy(output + index * pad_size, &timestamp, sizeof(timestamp));
-      output[index * pad_size + 8] = 128;
-      output[index * pad_size + 9] = 128;
+      std::memcpy(output + index * pad_size + 4U, &controller.buttons,
+                  sizeof(controller.buttons));
+      output[index * pad_size + 8] = controller.analog_x;
+      output[index * pad_size + 9] = controller.analog_y;
     }
     state.gpr[2] = count;
     return;
@@ -770,6 +938,114 @@ void Runtime::dispatch(psprecomp::State& state, std::string_view name) {
     }
     return;
   }
+  if (name == "sceIoChdir") {
+    const auto* path = guest_string(state, state.gpr[4]);
+    if (path == nullptr)
+      return;
+    const auto resolved = implementation_->resolve_path(path);
+    if (!std::filesystem::is_directory(resolved)) {
+      state.gpr[2] = io_error;
+    } else {
+      implementation_->current_directory = resolved;
+      state.gpr[2] = 0;
+    }
+    return;
+  }
+  if (name == "sceIoDopen") {
+    const auto* path = guest_string(state, state.gpr[4]);
+    if (path == nullptr)
+      return;
+    const auto resolved = implementation_->resolve_path(path);
+    std::error_code error;
+    Implementation::Directory directory;
+    for (std::filesystem::directory_iterator iterator(resolved, error), end;
+         !error && iterator != end; iterator.increment(error)) {
+      directory.entries.push_back(*iterator);
+    }
+    if (error) {
+      state.gpr[2] = io_error;
+      return;
+    }
+    std::sort(directory.entries.begin(), directory.entries.end(),
+              [](const auto& left, const auto& right) {
+                return left.path().filename() < right.path().filename();
+              });
+    std::lock_guard lock(implementation_->objects_mutex);
+    const auto uid = implementation_->next_file++;
+    implementation_->directories.emplace(uid, std::move(directory));
+    state.gpr[2] = static_cast<std::uint32_t>(uid);
+    return;
+  }
+  if (name == "sceIoDread") {
+    std::lock_guard lock(implementation_->objects_mutex);
+    const auto found =
+        implementation_->directories.find(static_cast<int>(state.gpr[4]));
+    if (found == implementation_->directories.end())
+      return;
+    if (found->second.next >= found->second.entries.size()) {
+      state.gpr[2] = 0;
+      return;
+    }
+    constexpr std::size_t dirent_size = 352;
+    auto* output = psprecomp::mapped_address(state, state.gpr[5], dirent_size);
+    if (output == nullptr)
+      return;
+    std::memset(output, 0, dirent_size);
+    const auto& entry = found->second.entries[found->second.next++];
+    const auto filename = entry.path().filename().string();
+    const auto mode = entry.is_directory() ? 0x11ffU : 0x21ffU;
+    std::memcpy(output, &mode, sizeof(mode));
+    const auto size = entry.is_regular_file() ? entry.file_size() : 0U;
+    std::memcpy(output + 8U, &size, sizeof(size));
+    std::memcpy(output + 88U, filename.c_str(),
+                std::min<std::size_t>(filename.size(), 255U));
+    state.gpr[2] = 1;
+    return;
+  }
+  if (name == "sceIoDclose") {
+    std::lock_guard lock(implementation_->objects_mutex);
+    state.gpr[2] =
+        implementation_->directories.erase(static_cast<int>(state.gpr[4]))
+            ? 0U
+            : io_error;
+    return;
+  }
+  if (name == "sceIoMkdir") {
+    const auto* path = guest_string(state, state.gpr[4]);
+    if (path == nullptr)
+      return;
+    std::error_code error;
+    const auto created = std::filesystem::create_directories(
+        implementation_->resolve_path(path), error);
+    state.gpr[2] =
+        !error && (created || std::filesystem::is_directory(
+                                  implementation_->resolve_path(path)))
+            ? 0U
+            : io_error;
+    return;
+  }
+  if (name == "sceIoGetstat") {
+    const auto* path = guest_string(state, state.gpr[4]);
+    auto* output = psprecomp::mapped_address(state, state.gpr[5], 88U);
+    if (path == nullptr || output == nullptr)
+      return;
+    const auto resolved = implementation_->resolve_path(path);
+    std::error_code error;
+    const auto status = std::filesystem::status(resolved, error);
+    if (error || !std::filesystem::exists(status)) {
+      state.gpr[2] = io_error;
+      return;
+    }
+    std::memset(output, 0, 88U);
+    const auto mode = std::filesystem::is_directory(status) ? 0x11ffU : 0x21ffU;
+    std::memcpy(output, &mode, sizeof(mode));
+    const auto size = std::filesystem::is_regular_file(status)
+                          ? std::filesystem::file_size(resolved, error)
+                          : 0U;
+    std::memcpy(output + 8U, &size, sizeof(size));
+    state.gpr[2] = error ? io_error : 0U;
+    return;
+  }
   if (name == "sceIoClose") {
     const auto found =
         implementation_->files.find(static_cast<int>(state.gpr[4]));
@@ -785,7 +1061,7 @@ void Runtime::dispatch(psprecomp::State& state, std::string_view name) {
     const auto size = static_cast<std::size_t>(state.gpr[6]);
     if (descriptor < 0 || !psprecomp::address_ok(state, state.gpr[5], size))
       return;
-    auto* buffer = state.memory + state.gpr[5] - state.memory_base;
+    auto* buffer = psprecomp::mapped_address(state, state.gpr[5], size);
     const auto result = name == "sceIoWrite" ? ::write(descriptor, buffer, size)
                                              : ::read(descriptor, buffer, size);
     state.gpr[2] = result < 0 ? io_error : static_cast<std::uint32_t>(result);

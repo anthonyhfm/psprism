@@ -1,14 +1,14 @@
-#include <psprecomp/runtime.hpp>
 #include <psprecomp/relocation.hpp>
+#include <psprecomp/runtime.hpp>
 #include <psprecomp/vfpu.hpp>
 
 #include <array>
 
-#define CHECK(expression)                                                        \
-    do {                                                                         \
-        if (!(expression)) {                                                     \
-            return __LINE__;                                                     \
-        }                                                                        \
+#define CHECK(expression)                                                      \
+    do {                                                                       \
+        if (!(expression)) {                                                   \
+            return __LINE__;                                                   \
+        }                                                                      \
     } while (false)
 
 int main() {
@@ -21,6 +21,9 @@ int main() {
     psprecomp::store32(state, 0x1004, 0x89abcdefU);
     CHECK(state.stop_reason == psprecomp::StopReason::running);
     CHECK(psprecomp::load32(state, 0x1004) == 0x89abcdefU);
+    CHECK(psprecomp::load32(state, 0x40001004U) == 0x89abcdefU);
+    psprecomp::store32(state, 0x80001008U, 0x12345678U);
+    CHECK(psprecomp::load32(state, 0xa0001008U) == 0x12345678U);
     CHECK(memory[4] == 0xef && memory[7] == 0x89);
 
     (void)psprecomp::load16(state, 0x1001);

@@ -2119,7 +2119,7 @@ void emit_project(const ElfImage& image, const std::filesystem::path& directory,
                "  std::fprintf(stderr, \"[psprecomp:macos] stopped: "
                "reason=%u pc=%08x\\n\", static_cast<unsigned>("
                "state.stop_reason), static_cast<unsigned>(state.pc));\n"
-               "  psprism::Runtime::instance().wait_for_guest_threads();\n"
+               "  psprism::Runtime::instance().run_host_loop();\n"
                "  return static_cast<int>(state.gpr[2]);\n"
                "}\n";
     }

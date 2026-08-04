@@ -1,9 +1,9 @@
 #pragma once
 
-#include <cstddef>
-#include <cstdint>
 #include <bit>
 #include <cmath>
+#include <cstddef>
+#include <cstdint>
 #include <limits>
 
 namespace psprecomp {
@@ -49,11 +49,20 @@ struct State {
     std::uint32_t fault_pc{};
 };
 
+inline std::uint32_t canonical_address(std::uint32_t address) {
+    // Allegrex exposes RAM through cached, uncached and kernel aliases.  Games
+    // commonly set bit 30 on display-list pointers before writing through
+    // them. Portable hosts keep one backing allocation for all aliases.
+    return address & 0x1fffffffU;
+}
+
 inline std::uint8_t* mapped_address(const State& state, std::uint32_t address,
                                     std::size_t width) {
+    address = canonical_address(address);
     const auto within = [width](std::uint32_t address, std::uint32_t base,
                                 std::size_t size) {
-        if (address < base) return false;
+        if (address < base)
+            return false;
         const auto offset = static_cast<std::size_t>(address - base);
         return offset <= size && width <= size - offset;
     };
@@ -84,10 +93,12 @@ inline bool direct_address_ok(State& state, std::uint32_t address,
     // letting the host PSP thread fault outside the recompiler runtime.
     if (address < 0x00010000U ||
         width > static_cast<std::size_t>(
-                    std::numeric_limits<std::uint32_t>::max() - address) + 1U) {
+                    std::numeric_limits<std::uint32_t>::max() - address) +
+                    1U) {
         state.stop_reason = StopReason::memory_fault;
         state.fault_address = address;
-        if (state.fault_pc == 0) state.fault_pc = state.pc;
+        if (state.fault_pc == 0)
+            state.fault_pc = state.pc;
         return false;
     }
     return true;
@@ -104,7 +115,8 @@ inline std::uint8_t load8(State& state, std::uint32_t address) {
     if (!address_ok(state, address, 1)) {
         state.stop_reason = StopReason::memory_fault;
         state.fault_address = address;
-        if (state.fault_pc == 0) state.fault_pc = state.pc;
+        if (state.fault_pc == 0)
+            state.fault_pc = state.pc;
         return 0;
     }
     return *mapped_address(state, address, 1);
@@ -114,7 +126,8 @@ inline std::uint16_t load16(State& state, std::uint32_t address) {
     if ((address & 1U) != 0U) {
         state.stop_reason = StopReason::memory_fault;
         state.fault_address = address;
-        if (state.fault_pc == 0) state.fault_pc = state.pc;
+        if (state.fault_pc == 0)
+            state.fault_pc = state.pc;
         return 0;
     }
     if (state.direct_memory_access) {
@@ -134,7 +147,8 @@ inline std::uint16_t load16(State& state, std::uint32_t address) {
     if (!address_ok(state, address, 2)) {
         state.stop_reason = StopReason::memory_fault;
         state.fault_address = address;
-        if (state.fault_pc == 0) state.fault_pc = state.pc;
+        if (state.fault_pc == 0)
+            state.fault_pc = state.pc;
         return 0;
     }
     const auto* pointer = mapped_address(state, address, 2);
@@ -146,7 +160,8 @@ inline std::uint32_t load32(State& state, std::uint32_t address) {
     if ((address & 3U) != 0U) {
         state.stop_reason = StopReason::memory_fault;
         state.fault_address = address;
-        if (state.fault_pc == 0) state.fault_pc = state.pc;
+        if (state.fault_pc == 0)
+            state.fault_pc = state.pc;
         return 0;
     }
     if (state.direct_memory_access) {
@@ -168,7 +183,8 @@ inline std::uint32_t load32(State& state, std::uint32_t address) {
     if (!address_ok(state, address, 4)) {
         state.stop_reason = StopReason::memory_fault;
         state.fault_address = address;
-        if (state.fault_pc == 0) state.fault_pc = state.pc;
+        if (state.fault_pc == 0)
+            state.fault_pc = state.pc;
         return 0;
     }
     const auto* pointer = mapped_address(state, address, 4);
@@ -204,13 +220,14 @@ inline std::uint32_t instruction_immediate(const State& state,
 inline std::uint32_t instruction_signed_immediate(const State& state,
                                                   std::uint32_t current_pc,
                                                   std::uint32_t fallback) {
-    return static_cast<std::uint32_t>(static_cast<std::int32_t>(
-        static_cast<std::int16_t>(
+    return static_cast<std::uint32_t>(
+        static_cast<std::int32_t>(static_cast<std::int16_t>(
             instruction_immediate(state, current_pc, fallback))));
 }
 
-inline std::int32_t instruction_signed_immediate_s32(
-    const State& state, std::uint32_t current_pc, std::uint32_t fallback) {
+inline std::int32_t instruction_signed_immediate_s32(const State& state,
+                                                     std::uint32_t current_pc,
+                                                     std::uint32_t fallback) {
     return static_cast<std::int16_t>(
         instruction_immediate(state, current_pc, fallback));
 }
@@ -242,7 +259,8 @@ inline void store8(State& state, std::uint32_t address, std::uint8_t value) {
     if (!address_ok(state, address, 1)) {
         state.stop_reason = StopReason::memory_fault;
         state.fault_address = address;
-        if (state.fault_pc == 0) state.fault_pc = state.pc;
+        if (state.fault_pc == 0)
+            state.fault_pc = state.pc;
         return;
     }
     *mapped_address(state, address, 1) = value;
@@ -252,7 +270,8 @@ inline void store16(State& state, std::uint32_t address, std::uint16_t value) {
     if ((address & 1U) != 0U) {
         state.stop_reason = StopReason::memory_fault;
         state.fault_address = address;
-        if (state.fault_pc == 0) state.fault_pc = state.pc;
+        if (state.fault_pc == 0)
+            state.fault_pc = state.pc;
         return;
     }
     if (state.direct_memory_access) {
@@ -273,7 +292,8 @@ inline void store16(State& state, std::uint32_t address, std::uint16_t value) {
     if (!address_ok(state, address, 2)) {
         state.stop_reason = StopReason::memory_fault;
         state.fault_address = address;
-        if (state.fault_pc == 0) state.fault_pc = state.pc;
+        if (state.fault_pc == 0)
+            state.fault_pc = state.pc;
         return;
     }
     auto* pointer = mapped_address(state, address, 2);
@@ -285,7 +305,8 @@ inline void store32(State& state, std::uint32_t address, std::uint32_t value) {
     if ((address & 3U) != 0U) {
         state.stop_reason = StopReason::memory_fault;
         state.fault_address = address;
-        if (state.fault_pc == 0) state.fault_pc = state.pc;
+        if (state.fault_pc == 0)
+            state.fault_pc = state.pc;
         return;
     }
     if (state.direct_memory_access) {
@@ -308,7 +329,8 @@ inline void store32(State& state, std::uint32_t address, std::uint32_t value) {
     if (!address_ok(state, address, 4)) {
         state.stop_reason = StopReason::memory_fault;
         state.fault_address = address;
-        if (state.fault_pc == 0) state.fault_pc = state.pc;
+        if (state.fault_pc == 0)
+            state.fault_pc = state.pc;
         return;
     }
     auto* pointer = mapped_address(state, address, 4);
@@ -346,21 +368,21 @@ inline void direct_store32(std::uint32_t address, std::uint32_t value) {
 #define PSPRECOMP_LOAD8(state, address) ::psprecomp::direct_load8(address)
 #define PSPRECOMP_LOAD16(state, address) ::psprecomp::direct_load16(address)
 #define PSPRECOMP_LOAD32(state, address) ::psprecomp::direct_load32(address)
-#define PSPRECOMP_STORE8(state, address, value) \
+#define PSPRECOMP_STORE8(state, address, value)                                \
     ::psprecomp::direct_store8(address, value)
-#define PSPRECOMP_STORE16(state, address, value) \
+#define PSPRECOMP_STORE16(state, address, value)                               \
     ::psprecomp::direct_store16(address, value)
-#define PSPRECOMP_STORE32(state, address, value) \
+#define PSPRECOMP_STORE32(state, address, value)                               \
     ::psprecomp::direct_store32(address, value)
 #else
 #define PSPRECOMP_LOAD8(state, address) ::psprecomp::load8(state, address)
 #define PSPRECOMP_LOAD16(state, address) ::psprecomp::load16(state, address)
 #define PSPRECOMP_LOAD32(state, address) ::psprecomp::load32(state, address)
-#define PSPRECOMP_STORE8(state, address, value) \
+#define PSPRECOMP_STORE8(state, address, value)                                \
     ::psprecomp::store8(state, address, value)
-#define PSPRECOMP_STORE16(state, address, value) \
+#define PSPRECOMP_STORE16(state, address, value)                               \
     ::psprecomp::store16(state, address, value)
-#define PSPRECOMP_STORE32(state, address, value) \
+#define PSPRECOMP_STORE32(state, address, value)                               \
     ::psprecomp::store32(state, address, value)
 #endif
 
@@ -402,8 +424,7 @@ inline std::uint32_t arithmetic_shift_right(std::uint32_t value,
 
 inline std::uint32_t rotate_right(std::uint32_t value, std::uint32_t amount) {
     amount &= 31U;
-    return amount == 0 ? value
-                       : (value >> amount) | (value << (32U - amount));
+    return amount == 0 ? value : (value >> amount) | (value << (32U - amount));
 }
 
 inline float f32(const State& state, std::uint32_t index) {
@@ -425,8 +446,8 @@ inline void set_fpu_condition(State& state, std::uint32_t cc, bool value) {
     state.fcr31 = value ? state.fcr31 | mask : state.fcr31 & ~mask;
 }
 
-inline void compare_f32(State& state, std::uint32_t cc, float left,
-                        float right, std::uint32_t condition) {
+inline void compare_f32(State& state, std::uint32_t cc, float left, float right,
+                        std::uint32_t condition) {
     const bool unordered = std::isnan(left) || std::isnan(right);
     const bool less = !unordered && left < right;
     const bool equal = !unordered && left == right;
@@ -453,8 +474,10 @@ inline std::uint32_t rounded_word(float value, std::uint32_t mode) {
         break;
     }
     if (!std::isfinite(rounded) ||
-        rounded < static_cast<double>(std::numeric_limits<std::int32_t>::min()) ||
-        rounded > static_cast<double>(std::numeric_limits<std::int32_t>::max())) {
+        rounded <
+            static_cast<double>(std::numeric_limits<std::int32_t>::min()) ||
+        rounded >
+            static_cast<double>(std::numeric_limits<std::int32_t>::max())) {
         return 0x80000000U;
     }
     return static_cast<std::uint32_t>(static_cast<std::int32_t>(rounded));
