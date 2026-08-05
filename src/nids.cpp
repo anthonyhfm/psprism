@@ -26,4 +26,18 @@ std::string_view resolve_psp_nid(std::string_view library, std::uint32_t nid) {
     return {};
 }
 
+std::string_view resolve_psp_nid(std::uint32_t nid) {
+    std::string_view symbol{};
+    for (const auto& entry : entries) {
+        if (entry.nid == nid) {
+            if (symbol.empty()) {
+                symbol = entry.symbol;
+            } else if (symbol != entry.symbol) {
+                return {};
+            }
+        }
+    }
+    return symbol;
+}
+
 } // namespace psprecomp
