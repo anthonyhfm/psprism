@@ -1088,6 +1088,11 @@ void emit_project(const ElfImage& image, const std::filesystem::path& directory,
     for (std::size_t index = 0; index < image.imports.size(); ++index) {
         const auto& import = image.imports[index];
         const auto symbol = import_symbol(import, code_map);
+        if (symbol.empty()) {
+            std::cout << "[UNMAPPED NID] lib=" << import.library
+                      << " nid=0x" << std::hex << import.nid
+                      << " stub=0x" << import.stub_address << std::dec << "\n";
+        }
         std::ostringstream id;
         id << "import_" << std::setfill('0') << std::setw(4) << index << "_"
            << identifier(symbol.empty() ? import.library : symbol);
