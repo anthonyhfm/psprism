@@ -1,13 +1,13 @@
 ![psprism Header](header.png)
 
-# psprism
+# psprism 💎
 
 > Static recompilation engine for PlayStation Portable executables.  
 > Translates Allegrex MIPS binaries into clean, portable C++20 code.
 
 ---
 
-## Overview
+## 🚀 Overview
 
 **psprism** converts PlayStation Portable executables (ISOs, ELFs, or PRXs) into readable, self-contained C++20 projects.
 
@@ -15,7 +15,7 @@ Rather than interpreting instructions at runtime like a traditional emulator, `p
 
 ---
 
-## Verification: PSP ➔ C++ ➔ PSP
+## 🔄 Verification: PSP ➔ C++ ➔ PSP
 
 Before targeting native host operating systems, generated code is validated directly on original PSP hardware:
 
@@ -42,7 +42,7 @@ Recompiling generated C++ code back into a PSP executable (`EBOOT.PBP`) confirms
 
 ---
 
-## Current Status & Compatibility
+## 🎮 Current Status & Compatibility
 
 Pipeline validation has been performed on **Daxter** (*Ready at Dawn*) and **Tetris**:
 
@@ -51,24 +51,24 @@ Pipeline validation has been performed on **Daxter** (*Ready at Dawn*) and **Tet
 | **Daxter** *(Ready at Dawn)* | ✅ **Fully Playable** (100% completion verified) | 🟡 Start Menu |
 | **Tetris** | ✅ **Fully Playable** (100% completion verified) | 🟡 Start Menu |
 
-* **Hardware Roundtrip:** Recompiled back to PSP binaries via PSPSDK, both games execute fully from start to finish on real hardware with complete graphics, audio, logic, and VFPU operations intact.
-* **Host Translation Layer:** Running via the host runtime layer on desktop, both games initialize and reach the start menu.
+* 🕹️ **Hardware Roundtrip:** Recompiled back to PSP binaries via PSPSDK, both games execute fully from start to finish on real hardware with complete graphics, audio, logic, and VFPU operations intact.
+* 🖥️ **Host Translation Layer:** Running via the host runtime layer on desktop, both games initialize and reach the start menu.
 
 ---
 
-## Proposed Names for the Host Translation Layer
+## 🏷️ Proposed Names for the Host Translation Layer
 
 While the overall recompilation framework is named **psprism**, the host translation runtime (which maps Sony `sce` firmware calls to native APIs like Metal, OpenGL, and SDL) currently shares this name. Below are candidate names for separating the runtime layer:
 
-* **Spectra** (*Spectra Core*) – Bends PSP system calls into native host hardware APIs.
-* **Refract** – Direct mapping of hardware calls into host platform primitives.
-* **Chroma** (*ChromaOS*) – Runtime layer for graphics, input, and kernel translation.
-* **PrismCore** – Modular, high-performance host execution engine.
-* **Aether** – Subsystem bridge connecting PSP firmware interfaces to host OS abstractions.
+* 🌈 **Spectra** (*Spectra Core*) – Bends PSP system calls into native host hardware APIs.
+* 🔮 **Refract** – Direct mapping of hardware calls into host platform primitives.
+* 🎨 **Chroma** (*ChromaOS*) – Runtime layer for graphics, input, and kernel translation.
+* ⚡ **PrismCore** – Modular, high-performance host execution engine.
+* 🌌 **Aether** – Subsystem bridge connecting PSP firmware interfaces to host OS abstractions.
 
 ---
 
-## Subsystem & SCE Module Support
+## 🧩 Subsystem & SCE Module Support
 
 For native execution on host platforms, `psprism` implements native host bridges for Sony `sce` kernel and firmware modules:
 
@@ -88,7 +88,7 @@ For native execution on host platforms, `psprism` implements native host bridges
 
 ---
 
-## Quickstart
+## 🛠️ Quickstart
 
 ### 1. Build psprism
 ```bash
@@ -118,9 +118,9 @@ make native
 
 ---
 
-## Key Features
+## ⚡ Key Features
 
-* **Allegrex MIPS & VFPU Lifting:** Translates integer, FPU, and vector operations into standard C++20.
-* **Self-Contained Output:** Generated C++ projects build independently without requiring `psprism` source trees.
-* **Ghidra Map Integration:** Imports function symbol boundaries and names for readable code structure.
-* **Hardware Roundtrip Verification:** Guarantees translation accuracy through real hardware testing.
+* 🧬 **Allegrex MIPS & VFPU Lifting:** Translates integer, FPU, and vector operations into standard C++20.
+* 📦 **Self-Contained Output:** Generated C++ projects build independently without requiring `psprism` source trees.
+* 🗺️ **Ghidra Map Integration:** Imports function symbol boundaries and names for readable code structure.
+* 🎯 **Hardware Roundtrip Verification:** Guarantees translation accuracy through real hardware testing.
