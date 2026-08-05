@@ -118,3 +118,11 @@ make native
 * 📦 **Self-Contained Output:** Generated C++ projects build independently without requiring `psprism` source trees.
 * 🗺️ **Ghidra Map Integration:** Imports function symbol boundaries and names for readable code structure.
 * 🎯 **Hardware Roundtrip Verification:** Guarantees translation accuracy through real hardware testing.
+
+---
+
+## 🤖 AI Acknowledgment & Origin
+
+This project started as an experiment after being genuinely surprised by how effectively modern AI (Codex) handled initial MIPS instruction lifting and static recompilation prototypes. What began as a small weekend test quickly evolved into `psprism`.
+
+While a majority of the codebase and runtime translation stubs were generated with AI assistance, every module, architectural decision, and host bridge is human-guided, reviewed, and verified on real PSP hardware. We embrace AI tools to accelerate reverse engineering and long-term game preservation.
