@@ -7,6 +7,7 @@
 #include <cctype>
 #include <fstream>
 #include <iomanip>
+#include <iostream>
 #include <map>
 #include <optional>
 #include <set>

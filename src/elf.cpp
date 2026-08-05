@@ -1,7 +1,10 @@
 #include "elf.hpp"
 
 #include <algorithm>
+#include <cstdint>
+#include <cstring>
 #include <fstream>
+#include <iostream>
 #include <limits>
 #include <sstream>
 #include <stdexcept>
@@ -210,11 +213,10 @@ ElfImage load_elf(const std::filesystem::path& path) {
         data.begin() + string_header.offset + string_header.size);
 
     constexpr std::uint32_t sht_progbits = 1;
-    constexpr std::uint32_t shf_write = 1;
     constexpr std::uint32_t shf_execinstr = 4;
     for (const auto& header : headers) {
         if (header.type != sht_progbits ||
-            (header.flags & (shf_execinstr | shf_write)) == 0 ||
+            (header.flags & shf_execinstr) == 0 ||
             header.size == 0) {
             continue;
         }
