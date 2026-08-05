@@ -44,7 +44,7 @@ Recompiling generated C++ code back into a PSP executable (`EBOOT.PBP`) confirms
 
 ## 🎮 Current Status & Compatibility
 
-> [!INFO]
+> [!NOTE]
 > **Work in Progress:** `psprism` is an active open-source project working to revive PSP games and bring them to modern operating systems and other platforms including older devices where PSP emulators like PPSSPP cannot run.
 
 Pipeline validation and host runtime translation are currently demonstrated on **Daxter** (*Ready at Dawn*):
