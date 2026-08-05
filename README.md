@@ -56,18 +56,6 @@ Pipeline validation has been performed on **Daxter** (*Ready at Dawn*) and **Tet
 
 ---
 
-## 🏷️ Proposed Names for the Host Translation Layer
-
-While the overall recompilation framework is named **psprism**, the host translation runtime (which maps Sony `sce` firmware calls to native APIs like Metal, OpenGL, and SDL) currently shares this name. Below are candidate names for separating the runtime layer:
-
-* 🌈 **Spectra** (*Spectra Core*) – Bends PSP system calls into native host hardware APIs.
-* 🔮 **Refract** – Direct mapping of hardware calls into host platform primitives.
-* 🎨 **Chroma** (*ChromaOS*) – Runtime layer for graphics, input, and kernel translation.
-* ⚡ **PrismCore** – Modular, high-performance host execution engine.
-* 🌌 **Aether** – Subsystem bridge connecting PSP firmware interfaces to host OS abstractions.
-
----
-
 ## 🧩 Subsystem & SCE Module Support
 
 For native execution on host platforms, `psprism` implements native host bridges for Sony `sce` kernel and firmware modules:
