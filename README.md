@@ -44,15 +44,21 @@ Recompiling generated C++ code back into a PSP executable (`EBOOT.PBP`) confirms
 
 ## 🎮 Current Status & Compatibility
 
-Pipeline validation has been performed on **Daxter** (*Ready at Dawn*) and **Tetris**:
+> [!INFO]
+> **Work in Progress:** `psprism` is an active open-source project working to revive PSP games and bring them to modern operating systems and other platforms including older devices where PSP emulators like PPSSPP cannot run.
 
-| Title | Hardware Validation (`PSP ➔ C++ ➔ PSP`) | Host Translation Layer |
+Pipeline validation and host runtime translation are currently demonstrated on **Daxter** (*Ready at Dawn*):
+
+| Title | Hardware Validation (`PSP ➔ C++ ➔ PSP`) | Host Translation Layer (`refract`) |
 |---|:---:|:---:|
-| **Daxter** *(Ready at Dawn)* | ✅ **Fully Playable** (100% completion verified) | 🟡 Start Menu |
-| **Tetris** | ✅ **Fully Playable** (100% completion verified) | 🟡 Start Menu |
+| **Daxter** *(Ready at Dawn)* | ✅ **Fully Playable** (100% completion verified) | 🟡 Start Menu (macOS Native) |
 
-* 🕹️ **Hardware Roundtrip:** Recompiled back to PSP binaries via PSPSDK, both games execute fully from start to finish on real hardware with complete graphics, audio, logic, and VFPU operations intact.
-* 🖥️ **Host Translation Layer:** Running via the host runtime layer on desktop, both games initialize and reach the start menu.
+* 🕹️ **Hardware Roundtrip:** Recompiled back to PSP binaries via PSPSDK, Daxter executes fully from start to finish on real hardware with complete graphics, audio, logic, and VFPU operations intact.
+* 🖥️ **Host Translation Layer:** Native C++ code recompiled by `psprism` and paired with the `refract` host engine runs directly on macOS and reaches the game's start menu.
+
+| PPSSPP Reference | Native macOS (`psprism` + `refract`) |
+|:---:|:---:|
+| ![Daxter on PPSSPP](dax_ppsspp.png) | ![Daxter on psprism refract engine](dax_psprism.png) |
 
 ---
 
