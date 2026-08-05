@@ -7,7 +7,7 @@
 #include <string>
 #include <vector>
 
-namespace psprism::host {
+namespace refract::host {
 
 std::uint64_t monotonic_microseconds();
 std::uint64_t unix_seconds();
@@ -132,4 +132,4 @@ std::optional<DialogResult> poll_dialog_result(std::uint64_t id);
 void dismiss_dialog(std::uint64_t id);
 bool dialog_visible();
 
-} // namespace psprism::host
+} // namespace refract::host

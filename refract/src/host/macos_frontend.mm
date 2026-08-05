@@ -1,5 +1,5 @@
 #include "host.hpp"
-#if defined(PSPRISM_HAS_DESKTOP_DIALOGS)
+#if defined(REFRACT_HAS_DESKTOP_DIALOGS)
 #include "desktop_dialogs.hpp"
 #endif
 
@@ -44,11 +44,11 @@ std::uint32_t normalized_vram_address(std::uint32_t address) {
 
 struct GeometryBatch {
   MTLPrimitiveType type;
-  std::vector<psprism::host::GeometryVertex> vertices;
+  std::vector<refract::host::GeometryVertex> vertices;
   std::shared_ptr<const std::vector<std::uint8_t>> texture;
   std::uint32_t texture_width{};
   std::uint32_t texture_height{};
-  psprism::host::GeometryState state;
+  refract::host::GeometryState state;
 };
 
 struct FragmentState {
@@ -173,8 +173,8 @@ bool update_keyboard_key(unsigned short key_code, bool pressed) {
   return true;
 }
 
-#if defined(PSPRISM_HAS_DESKTOP_DIALOGS)
-psprism::desktop::DialogFrame current_dialog_frame();
+#if defined(REFRACT_HAS_DESKTOP_DIALOGS)
+refract::desktop::DialogFrame current_dialog_frame();
 #endif
 
 @interface PsprismRenderer : NSObject <MTKViewDelegate>
@@ -452,7 +452,7 @@ psprism::desktop::DialogFrame current_dialog_frame();
 
 - (id<MTLRenderPipelineState>)blendPipelineForView:(MTKView*)view
                                            textured:(BOOL)textured
-                                              state:(const psprism::host::GeometryState&)state {
+                                              state:(const refract::host::GeometryState&)state {
   const auto source_fixed_class = state.blend_source >= 10U
                                       ? (state.blend_fix_a == 0U ? 1U
                                          : state.blend_fix_a == 0x00ffffffU ? 2U
@@ -656,7 +656,7 @@ psprism::desktop::DialogFrame current_dialog_frame();
                             alpha:1.0];
       }
       [encoder setVertexBytes:batch.vertices.data()
-                       length:batch.vertices.size() * sizeof(psprism::host::GeometryVertex)
+                       length:batch.vertices.size() * sizeof(refract::host::GeometryVertex)
                       atIndex:0];
       [encoder drawPrimitives:batch.type
                   vertexStart:0
@@ -689,7 +689,7 @@ psprism::desktop::DialogFrame current_dialog_frame();
                         vertexStart:0
                         vertexCount:3];
   }
-#if defined(PSPRISM_HAS_DESKTOP_DIALOGS)
+#if defined(REFRACT_HAS_DESKTOP_DIALOGS)
   const auto dialog_frame = current_dialog_frame();
   if (!dialog_frame.pixels.empty() && self.dialogPipeline != nil) {
     if (self.dialogTexture == nil || self.dialogTexture.width != dialog_frame.width ||
@@ -751,20 +751,20 @@ PsprismRenderer* renderer;
 PsprismApplicationDelegate* application_delegate;
 GCController* active_controller;
 std::once_flag frontend_once;
-#if defined(PSPRISM_HAS_DESKTOP_DIALOGS)
-std::unique_ptr<psprism::desktop::DialogFrontend> desktop_dialogs;
+#if defined(REFRACT_HAS_DESKTOP_DIALOGS)
+std::unique_ptr<refract::desktop::DialogFrontend> desktop_dialogs;
 NSTimer* dialog_timer;
 std::uint32_t previous_dialog_buttons{};
 bool dialog_controller_armed{};
 
-psprism::desktop::DialogFrame current_dialog_frame() {
+refract::desktop::DialogFrame current_dialog_frame() {
   const auto scale = window != nil ? window.backingScaleFactor : 1.0;
   const auto size = metal_view != nil ? metal_view.bounds.size : CGSizeZero;
   return desktop_dialogs != nullptr
              ? desktop_dialogs->rendered_frame(
                    scale, static_cast<std::uint32_t>(std::ceil(size.width)),
                    static_cast<std::uint32_t>(std::ceil(size.height)))
-             : psprism::desktop::DialogFrame{};
+             : refract::desktop::DialogFrame{};
 }
 #endif
 
@@ -788,7 +788,7 @@ std::uint32_t gamepad_buttons(GCExtendedGamepad* pad) {
   return result;
 }
 
-#if defined(PSPRISM_HAS_DESKTOP_DIALOGS)
+#if defined(REFRACT_HAS_DESKTOP_DIALOGS)
 std::u16string event_text(NSEvent* event) {
   NSString* characters = event.characters;
   std::u16string result(characters.length, u'\0');
@@ -861,7 +861,7 @@ std::uint8_t axis_to_byte(float value) {
   return static_cast<std::uint8_t>(std::clamp<long>(scaled, 0, 255));
 }
 
-namespace psprism::host {
+namespace refract::host {
 
 void set_verbose_logging(bool enabled) {
   verbose_logging.store(enabled, std::memory_order_relaxed);
@@ -916,13 +916,13 @@ void initialize_frontend() {
                 }];
     if (GCController.controllers.count != 0)
       active_controller = GCController.controllers.firstObject;
-#if defined(PSPRISM_HAS_DESKTOP_DIALOGS)
+#if defined(REFRACT_HAS_DESKTOP_DIALOGS)
     dialog_timer = [NSTimer
         scheduledTimerWithTimeInterval:1.0 / 60.0
                                 repeats:YES
                                   block:^(NSTimer* timer) {
                                     static_cast<void>(timer);
-                                    psprism::desktop::process_desktop_dialog_events();
+                                    refract::desktop::process_desktop_dialog_events();
                                     if (desktop_dialogs == nullptr ||
                                         !desktop_dialogs->visible()) {
                                       previous_dialog_buttons = 0;
@@ -952,7 +952,7 @@ void initialize_frontend() {
                                     handler:^NSEvent*(NSEvent* event) {
                                       const auto pressed =
                                           event.type == NSEventTypeKeyDown;
-#if defined(PSPRISM_HAS_DESKTOP_DIALOGS)
+#if defined(REFRACT_HAS_DESKTOP_DIALOGS)
                                       if (desktop_dialogs != nullptr &&
                                           desktop_dialogs->visible()) {
                                         if (!pressed) return nil;
@@ -1008,7 +1008,7 @@ void initialize_frontend() {
                                             event.keyCode);
                                       return handled ? nil : event;
                                     }];
-#if defined(PSPRISM_HAS_DESKTOP_DIALOGS)
+#if defined(REFRACT_HAS_DESKTOP_DIALOGS)
     mouse_event_monitor = [NSEvent
         addLocalMonitorForEventsMatchingMask:NSEventMaskLeftMouseDown |
                                               NSEventMaskLeftMouseUp |
@@ -1152,7 +1152,7 @@ void submit_ge_primitive(std::uint32_t type,
 
 ControllerState controller_state() {
   ControllerState result;
-#if defined(PSPRISM_HAS_DESKTOP_DIALOGS)
+#if defined(REFRACT_HAS_DESKTOP_DIALOGS)
   if (desktop_dialogs != nullptr && desktop_dialogs->visible()) return result;
 #endif
   result.buttons = keyboard_buttons.load(std::memory_order_relaxed) |
@@ -1177,11 +1177,11 @@ ControllerState controller_state() {
 }
 
 void present_dialog(DialogModel model) {
-#if defined(PSPRISM_HAS_DESKTOP_DIALOGS)
+#if defined(REFRACT_HAS_DESKTOP_DIALOGS)
   auto shared = std::make_shared<DialogModel>(std::move(model));
   dispatch_async(dispatch_get_main_queue(), ^{
     if (desktop_dialogs == nullptr)
-      desktop_dialogs = std::make_unique<psprism::desktop::DialogFrontend>();
+      desktop_dialogs = std::make_unique<refract::desktop::DialogFrontend>();
     keyboard_buttons.store(0, std::memory_order_relaxed);
     keyboard_latched_buttons.store(0, std::memory_order_relaxed);
     keyboard_analog_directions.store(0, std::memory_order_relaxed);
@@ -1195,7 +1195,7 @@ void present_dialog(DialogModel model) {
 }
 
 std::optional<DialogResult> poll_dialog_result(std::uint64_t id) {
-#if defined(PSPRISM_HAS_DESKTOP_DIALOGS)
+#if defined(REFRACT_HAS_DESKTOP_DIALOGS)
   return desktop_dialogs != nullptr ? desktop_dialogs->take_result(id)
                                     : std::nullopt;
 #else
@@ -1205,7 +1205,7 @@ std::optional<DialogResult> poll_dialog_result(std::uint64_t id) {
 }
 
 void dismiss_dialog(std::uint64_t id) {
-#if defined(PSPRISM_HAS_DESKTOP_DIALOGS)
+#if defined(REFRACT_HAS_DESKTOP_DIALOGS)
   dispatch_async(dispatch_get_main_queue(), ^{
     if (desktop_dialogs == nullptr) return;
     desktop_dialogs->dismiss(id);
@@ -1216,11 +1216,11 @@ void dismiss_dialog(std::uint64_t id) {
 }
 
 bool dialog_visible() {
-#if defined(PSPRISM_HAS_DESKTOP_DIALOGS)
+#if defined(REFRACT_HAS_DESKTOP_DIALOGS)
   return desktop_dialogs != nullptr && desktop_dialogs->visible();
 #else
   return false;
 #endif
 }
 
-} // namespace psprism::host
+} // namespace refract::host

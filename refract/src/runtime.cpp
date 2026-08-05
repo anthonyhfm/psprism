@@ -1,5 +1,5 @@
-#include <psprism/psprism.hpp>
-#include <psprism/psp_sdk_stubs.hpp>
+#include <refract/refract.hpp>
+#include <refract/psp_sdk_stubs.hpp>
 
 #include "host/host.hpp"
 #include "utility_data.hpp"
@@ -27,7 +27,7 @@
 #include <unordered_set>
 #include <vector>
 
-namespace psprism {
+namespace refract {
 namespace {
 
 constexpr std::uint32_t unimplemented = 0x8002013aU;
@@ -741,9 +741,9 @@ namespace pspsdk {
 
 #define PSPSDK_STUB(name)                                                  \
   void name(psprecomp::State& state) {                                     \
-    ::psprism::name(Runtime::instance().implementation(), state);          \
+    ::refract::name(Runtime::instance().implementation(), state);          \
   }
-#include <psprism/psp_sdk_stubs.inc>
+#include <refract/psp_sdk_stubs.inc>
 #undef PSPSDK_STUB
 } // namespace pspsdk
 
@@ -790,24 +790,24 @@ void Runtime::configure(std::uint8_t* memory, std::size_t size,
         {user_memory_start, image_start - user_memory_start});
   }
   if (configuration.disc_root.empty()) {
-    if (const auto* value = std::getenv("PSPRISM_DISC_ROOT")) {
+    if (const auto* value = std::getenv("REFRACT_DISC_ROOT")) {
       configuration.disc_root = value;
     } else {
       configuration.disc_root = std::filesystem::current_path() / "disc";
     }
   }
   if (configuration.writable_root.empty()) {
-    if (const auto* value = std::getenv("PSPRISM_WRITABLE_ROOT")) {
+    if (const auto* value = std::getenv("REFRACT_WRITABLE_ROOT")) {
       configuration.writable_root = value;
     } else {
       configuration.writable_root =
-          std::filesystem::current_path() / ".psprism" / "ms0";
+          std::filesystem::current_path() / ".refract" / "ms0";
     }
   }
   std::filesystem::create_directories(configuration.writable_root);
   implementation_->configuration = std::move(configuration);
   implementation_->current_directory = implementation_->configuration.disc_root;
-  if (const auto* value = std::getenv("PSPRISM_DISC_IMAGE")) {
+  if (const auto* value = std::getenv("REFRACT_DISC_IMAGE")) {
     implementation_->disc_image = value;
   } else {
     implementation_->disc_image =
@@ -890,4 +890,4 @@ void Runtime::warn_unimplemented(psprecomp::State& state,
   }
 }
 
-} // namespace psprism
+} // namespace refract

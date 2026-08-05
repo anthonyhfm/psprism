@@ -8,7 +8,7 @@
 #include <functional>
 #include <string_view>
 
-namespace psprism {
+namespace refract {
 
 struct Configuration {
   std::filesystem::path disc_root;
@@ -42,4 +42,4 @@ private:
   Implementation* implementation_;
 };
 
-} // namespace psprism
+} // namespace refract

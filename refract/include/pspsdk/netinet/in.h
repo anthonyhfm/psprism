@@ -37,8 +37,8 @@
  */
 
 // clang-format off
-#ifndef _PSPRISM_PSPSDK_NETINET_IN_H_
-#define _PSPRISM_PSPSDK_NETINET_IN_H_
+#ifndef _REFRACT_PSPSDK_NETINET_IN_H_
+#define _REFRACT_PSPSDK_NETINET_IN_H_
 
 #if !defined(__PSP__)
 #include_next <netinet/in.h>
@@ -287,5 +287,5 @@ struct ip_mreq {
 
 #endif /* !_NETINET_IN_H_ */
 #endif /* !__PSP__ */
-#endif /* !_PSPRISM_PSPSDK_NETINET_IN_H_ */
+#endif /* !_REFRACT_PSPSDK_NETINET_IN_H_ */
 #pragma clang-format on

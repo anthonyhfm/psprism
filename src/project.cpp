@@ -153,7 +153,7 @@ std::string generated_readme(const ExportConfig& config, InputKind kind,
          "- `platform/platform.h`: complete imported-API contract\n"
          "- `platform/psp/`: PSP entry point, ABI bridge and real SCE calls\n"
          "- `platform/macos/`: native entry point and psprism adapter\n"
-         "- `psprism/`: vendored, game-editable PSP-to-host runtime engine\n"
+         "- `refract/`: vendored, game-editable PSP-to-host runtime engine\n"
          "- `include/psprecomp/`: portable runtime used by generated code\n"
          "- `config/`: the optional code map used for this export\n"
          "- `disc/`: extracted original disc filesystem (ISO inputs only)\n"
@@ -208,9 +208,9 @@ std::string root_makefile(const ExportConfig& config, bool has_disc,
          "macos-debug:\n"
          "\t$(MAKE) macos MACOS_BUILD_TYPE=Debug\n\n"
          "macos-run: macos\n"
-         "\tPSPRISM_DISC_ROOT=\"$(CURDIR)/disc\" "
-         "PSPRISM_DISC_IMAGE=\"$(CURDIR)/original/disc.iso\" "
-         "PSPRISM_WRITABLE_ROOT=\"$(CURDIR)/.psprism/ms0\" "
+         "\tREFRACT_DISC_ROOT=\"$(CURDIR)/disc\" "
+         "REFRACT_DISC_IMAGE=\"$(CURDIR)/original/disc.iso\" "
+         "REFRACT_WRITABLE_ROOT=\"$(CURDIR)/.refract/ms0\" "
          "\"$(CURDIR)/build/macos/"
       << config.project_name << ".app/Contents/MacOS/" << config.project_name
       << "\" $(MACOS_RUN_ARGS)\n\n"
@@ -351,7 +351,7 @@ std::string macos_cmake(const ExportConfig& config) {
          "include(CheckIPOSupported)\n"
          "check_ipo_supported(RESULT PSPRECOMP_IPO_SUPPORTED)\n"
          "include(src/generated/generated_sources.cmake)\n\n"
-         "add_subdirectory(psprism)\n\n"
+         "add_subdirectory(refract)\n\n"
          "add_executable("
       << config.project_name
       << " MACOSX_BUNDLE\n"
@@ -366,12 +366,12 @@ std::string macos_cmake(const ExportConfig& config) {
       << " PRIVATE . include src/generated)\n"
          "target_link_libraries("
       << config.project_name
-      << " PRIVATE psprism)\n"
+      << " PRIVATE refract)\n"
          "target_compile_options("
       << config.project_name
       << " PRIVATE -Wno-tautological-compare)\n"
          "if(PSPRECOMP_IPO_SUPPORTED)\n"
-         "  set_property(TARGET psprism PROPERTY "
+         "  set_property(TARGET refract PROPERTY "
          "INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)\n"
          "  set_property(TARGET "
       << config.project_name
@@ -465,9 +465,9 @@ ExportSummary export_codebase(const ExportConfig& config) {
     throw std::runtime_error("cannot find PSPRecomp runtime headers at: " +
                              runtime_source.string());
   }
-  if (!std::filesystem::is_directory(config.psprism_directory)) {
-    throw std::runtime_error("cannot find psprism engine at: " +
-                             config.psprism_directory.string());
+  if (!std::filesystem::is_directory(config.refract_directory)) {
+    throw std::runtime_error("cannot find refract engine at: " +
+                             config.refract_directory.string());
   }
 
   const auto info = inspect_source(config.input);
@@ -580,7 +580,7 @@ ExportSummary export_codebase(const ExportConfig& config) {
     std::filesystem::create_directories(staging / "include");
     std::filesystem::copy(runtime_source, staging / "include" / "psprecomp",
                           std::filesystem::copy_options::recursive);
-    std::filesystem::copy(config.psprism_directory, staging / "psprism",
+    std::filesystem::copy(config.refract_directory, staging / "refract",
                           std::filesystem::copy_options::recursive);
     GeneratedProjectOptions emitter_options;
     emitter_options.display_name = config.display_name;
@@ -614,7 +614,7 @@ ExportSummary export_codebase(const ExportConfig& config) {
                "src/generated/*.prx\nsrc/generated/*.PBP\n"
                "src/generated/PARAM.SFO\nsrc/generated/SND0.AT3\n"
                "disc/\noriginal/\ndist/\nbuild/\n.psprecomp/\n"
-               ".psprism/\n.DS_Store\n");
+               ".refract/\n.DS_Store\n");
     write_text(
         staging / "README.md",
         generated_readme(

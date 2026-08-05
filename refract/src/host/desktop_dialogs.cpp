@@ -26,7 +26,7 @@
 #include <functional>
 #include <mutex>
 
-namespace psprism::desktop {
+namespace refract::desktop {
 namespace {
 
 constexpr std::uint32_t psp_start = 0x000008U;
@@ -51,7 +51,7 @@ QApplication* ensure_application() {
                         "/platforms";
   const auto plugins = QDir(deployed).exists()
       ? deployed
-      : QStringLiteral(PSPRISM_QT_PLATFORM_PLUGIN_PATH);
+      : QStringLiteral(REFRACT_QT_PLATFORM_PLUGIN_PATH);
   qputenv("QT_QPA_PLATFORM_PLUGIN_PATH", plugins.toUtf8());
   static int argument_count = 1;
   static char program_name[] = "psprism";
@@ -542,4 +542,4 @@ void process_desktop_dialog_events() {
   if (qApp != nullptr) QCoreApplication::processEvents();
 }
 
-} // namespace psprism::desktop
+} // namespace refract::desktop

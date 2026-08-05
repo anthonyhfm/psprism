@@ -7,7 +7,7 @@
 #include <chrono>
 #include <thread>
 
-namespace psprism::host {
+namespace refract::host {
 
 std::uint64_t monotonic_microseconds() {
   return static_cast<std::uint64_t>(
@@ -27,4 +27,4 @@ void sleep_microseconds(std::uint32_t duration) {
   std::this_thread::sleep_for(std::chrono::microseconds(duration));
 }
 
-} // namespace psprism::host
+} // namespace refract::host

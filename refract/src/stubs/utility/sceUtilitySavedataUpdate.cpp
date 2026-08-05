@@ -142,8 +142,8 @@ void sceUtilitySavedataUpdate(Implementation& implementation, psprecomp::State& 
           std::memcpy(parameters + 28U, &parameter_error,
                       sizeof(parameter_error));
         } else {
-          const auto staging = save_directory.string() + ".psprism.tmp";
-          const auto backup = save_directory.string() + ".psprism.backup";
+          const auto staging = save_directory.string() + ".refract.tmp";
+          const auto backup = save_directory.string() + ".refract.backup";
           std::error_code directory_error;
           std::filesystem::remove_all(staging, directory_error);
           directory_error.clear();

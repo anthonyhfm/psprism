@@ -2,12 +2,12 @@
 
 #include <psprecomp/runtime.hpp>
 
-namespace psprism::pspsdk {
+namespace refract::pspsdk {
 
 #define PSPSDK_STUB(name) void name(psprecomp::State& state);
 
-#include <psprism/psp_sdk_stubs.inc>
+#include <refract/psp_sdk_stubs.inc>
 
 #undef PSPSDK_STUB
 
-} // namespace psprism::pspsdk
+} // namespace refract::pspsdk

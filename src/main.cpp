@@ -248,7 +248,7 @@ int run_init(InitArguments arguments) {
   config.input = arguments.input;
   config.output_directory = arguments.output;
   config.runtime_include_directory = PSPRECOMP_SOURCE_INCLUDE_DIR;
-  config.psprism_directory = PSPRECOMP_PSPRISM_DIR;
+  config.refract_directory = REFRACT_REFRACT_DIR;
   config.code_map = arguments.code_map;
   config.display_name = arguments.display_name;
   config.project_name = arguments.project_name;

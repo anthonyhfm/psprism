@@ -24,7 +24,7 @@ struct ExportConfig {
   std::filesystem::path input;
   std::filesystem::path output_directory;
   std::filesystem::path runtime_include_directory;
-  std::filesystem::path psprism_directory;
+  std::filesystem::path refract_directory;
   std::optional<std::filesystem::path> code_map;
   std::string display_name;
   std::string project_name;

@@ -10,7 +10,7 @@ there when a title needs behavior that should not yet become a global default.
 
 Currently implemented building blocks include logging, process exit, clocks,
 delays, controller-neutral input, UMD status and synchronous/async-style file
-I/O against the exported `disc/` and `.psprism/ms0/` trees. Unknown imports are
+I/O against the exported `disc/` and `.refract/ms0/` trees. Unknown imports are
 reported once and return PSP's `SCE_KERNEL_ERROR_LIBRARY_NOT_YET_LINKED` value.
 
 Savedata, message dialogs and the on-screen keyboard use asynchronous Qt 6
@@ -24,7 +24,7 @@ Qt is an optional system-dialog renderer for desktop targets only. It does not
 own the game window, graphics backend, filesystem, controller implementation or
 portable runtime API. Non-desktop targets such as PSP or future Wii/homebrew
 ports select their own host dialog backend and build with
-`PSPRISM_DESKTOP_DIALOGS=OFF`.
+`REFRACT_DESKTOP_DIALOGS=OFF`.
 
 The macOS game window accepts standard game controllers. Its keyboard fallback
 is arrows for the D-pad, WASD for the analog stick, I/J/K/L for

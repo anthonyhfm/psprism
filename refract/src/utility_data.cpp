@@ -4,7 +4,7 @@
 #include <array>
 #include <cstring>
 
-namespace psprism::utility {
+namespace refract::utility {
 namespace {
 
 std::string fixed_string(const std::uint8_t* value, std::size_t size) {
@@ -104,4 +104,4 @@ std::vector<std::uint8_t> make_savedata_sfo(std::string_view title,
   return result;
 }
 
-} // namespace psprism::utility
+} // namespace refract::utility

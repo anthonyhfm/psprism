@@ -79,7 +79,7 @@ Set `PPSSPP=/path/to/ppsspp` if the command is not in `PATH`.
 `platform/psp` satisfies it using the original SCE ABI and owns the PSP entry
 point. For `make macos-run`, the generated `platform/macos` adapter sends those
 imports to the statically linked `psprism/` engine. The Makefile also points
-psprism at `disc/` and a private `.psprism/ms0/` writable tree. The translated
+psprism at `disc/` and a private `.refract/ms0/` writable tree. The translated
 CPU code under `src/generated` therefore has no direct dependency on PSP SDK
 headers or SCE functions.
 

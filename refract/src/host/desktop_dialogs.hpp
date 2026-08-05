@@ -8,7 +8,7 @@
 #include <string_view>
 #include <vector>
 
-namespace psprism::desktop {
+namespace refract::desktop {
 
 struct DialogFrame {
   std::vector<std::uint8_t> pixels;
@@ -50,4 +50,4 @@ int run_desktop_dialog_event_loop();
 void request_desktop_dialog_event_loop_exit();
 void process_desktop_dialog_events();
 
-} // namespace psprism::desktop
+} // namespace refract::desktop
