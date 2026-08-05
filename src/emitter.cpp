@@ -2236,7 +2236,7 @@ void emit_project(const ElfImage& image, const std::filesystem::path& directory,
                 .generic_string();
         const auto refract_sources =
             std::filesystem::relative(
-                platform_directory.parent_path().parent_path() / "refract" /
+                platform_directory.parent_path() / "refract" /
                     "src",
                 directory)
                 .generic_string();

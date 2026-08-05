@@ -502,6 +502,14 @@ struct Runtime::Implementation {
     int maximum{};
   };
 
+  struct Mutex {
+    std::mutex mutex;
+    std::condition_variable changed;
+    std::string name;
+    int lock_count{};
+    int owner_thread_id{-1};
+  };
+
   struct EventFlag {
     std::mutex mutex;
     std::condition_variable changed;
@@ -571,6 +579,7 @@ struct Runtime::Implementation {
   std::mutex objects_mutex;
   std::unordered_map<int, std::shared_ptr<GuestThread>> threads;
   std::unordered_map<int, std::shared_ptr<Semaphore>> semaphores;
+  std::unordered_map<int, std::shared_ptr<Mutex>> mutexes;
   std::unordered_map<int, std::shared_ptr<EventFlag>> event_flags;
   std::unordered_map<int, MemoryBlock> memory_blocks;
   std::unordered_map<int, std::shared_ptr<FixedPool>> fixed_pools;
@@ -871,7 +880,7 @@ void Runtime::wait_for_guest_threads() {
     if (pending.empty())
       return;
     for (const auto& thread : pending) {
-      if (thread->host_thread.joinable())
+      if (thread->uid != current_thread_id && thread->host_thread.joinable())
         thread->host_thread.join();
     }
   }

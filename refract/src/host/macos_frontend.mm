@@ -677,6 +677,19 @@ refract::desktop::DialogFrame current_dialog_frame();
       [commands renderCommandEncoderWithDescriptor:display_pass];
   [display_encoder setRenderPipelineState:self.pipeline];
   [display_encoder setDepthStencilState:self.depthStates[0]];
+  const double view_w = static_cast<double>(view.drawableSize.width);
+  const double view_h = static_cast<double>(view.drawableSize.height);
+  const double target_aspect = 480.0 / 272.0;
+  double vp_w = view_w;
+  double vp_h = view_w / target_aspect;
+  if (vp_h > view_h) {
+    vp_h = view_h;
+    vp_w = view_h * target_aspect;
+  }
+  const double vp_x = (view_w - vp_w) * 0.5;
+  const double vp_y = (view_h - vp_h) * 0.5;
+  const MTLViewport display_viewport{vp_x, vp_y, vp_w, vp_h, 0.0, 1.0};
+  [display_encoder setViewport:display_viewport];
   if (display_texture != nil) {
     const float texture_scale[2]{
         std::min(1.0F, 480.0F / static_cast<float>(display_texture.width)),
@@ -887,6 +900,7 @@ void initialize_frontend() {
                     backing:NSBackingStoreBuffered
                       defer:NO];
     window.title = @"psprism";
+    window.contentAspectRatio = NSMakeSize(480, 272);
     window.delegate = application_delegate;
     window.acceptsMouseMovedEvents = YES;
     metal_view = [[MTKView alloc] initWithFrame:frame device:device];

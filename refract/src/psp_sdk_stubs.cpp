@@ -31,6 +31,9 @@ using PspSdkFunction = std::uint32_t (*)(...);
 
 inline std::uint32_t call_sdk_api(PspSdkFunction function,
                                  const psprecomp::State& state) {
+  if (reinterpret_cast<void*>(function) == nullptr) {
+    return 0x80000001U;
+  }
   return function(
       state.gpr[4], state.gpr[5], state.gpr[6], state.gpr[7],
       stack_argument(state, 0), stack_argument(state, 1),
@@ -43,9 +46,10 @@ inline std::uint32_t call_sdk_api(PspSdkFunction function,
 
 } // namespace
 
-// Declare all symbols as variadic to support generic forwarding without
-// requiring per-function signatures.
-#define PSPSDK_STUB(name) extern "C" std::uint32_t name(...);
+// Declare all symbols as variadic weak symbols to support generic forwarding
+// without requiring per-function signatures or forcing links on missing PSPSDK stubs.
+#define PSPSDK_STUB(name) \
+  extern "C" __attribute__((weak)) std::uint32_t name(...);
 #include <refract/psp_sdk_stubs.inc>
 #undef PSPSDK_STUB
 
