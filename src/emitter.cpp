@@ -2234,6 +2234,12 @@ void emit_project(const ElfImage& image, const std::filesystem::path& directory,
         const auto psp_sources =
             std::filesystem::relative(platform_directory / "psp", directory)
                 .generic_string();
+        const auto refract_sources =
+            std::filesystem::relative(
+                platform_directory.parent_path().parent_path() / "refract" /
+                    "src",
+                directory)
+                .generic_string();
         const auto project_root =
             std::filesystem::relative(platform_directory.parent_path(),
                                       directory)
@@ -2247,8 +2253,10 @@ void emit_project(const ElfImage& image, const std::filesystem::path& directory,
                << "\n"
                   "VPATH = "
                << make_value(psp_sources)
+               << " "
+               << make_value(refract_sources)
                << "\n"
-                  "OBJS = main.o platform.o dispatch.o";
+                  "OBJS = main.o platform.o dispatch.o psp_sdk_stubs.o";
         for (const auto& name : source_names) {
             if (name.rfind("shard_", 0) == 0 ||
                 name.rfind("func_", 0) == 0) {
