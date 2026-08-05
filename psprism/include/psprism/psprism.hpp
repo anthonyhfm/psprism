@@ -20,12 +20,15 @@ struct Configuration {
 
 class Runtime final {
 public:
+  struct Implementation;
   static Runtime& instance();
 
   void configure(std::uint8_t* memory, std::size_t size, std::uint32_t base,
                  Configuration configuration = {});
+  Implementation& implementation();
   void set_verbose(bool enabled);
-  void dispatch(psprecomp::State& state, std::string_view import_name);
+  void warn_unimplemented(psprecomp::State& state,
+                          std::string_view import_name);
   void log(const char* format, std::uint32_t first, std::uint32_t second);
   void prepare_state(psprecomp::State& state);
   void run_host_loop();
@@ -36,8 +39,6 @@ private:
   ~Runtime();
   Runtime(const Runtime&) = delete;
   Runtime& operator=(const Runtime&) = delete;
-
-  struct Implementation;
   Implementation* implementation_;
 };
 
