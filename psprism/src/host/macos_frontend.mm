@@ -7,6 +7,8 @@
 #error "This psprism frontend requires macOS"
 #endif
 
+#include <netinet/in.h>
+
 #import <AppKit/AppKit.h>
 #import <GameController/GameController.h>
 #import <Metal/Metal.h>
@@ -119,6 +121,7 @@ std::atomic_uint32_t keyboard_latched_buttons{};
 std::atomic_uint32_t keyboard_analog_directions{};
 std::atomic_bool verbose_logging{};
 id keyboard_event_monitor;
+id mouse_event_monitor;
 
 constexpr std::uint32_t analog_left = 1U << 0U;
 constexpr std::uint32_t analog_right = 1U << 1U;
@@ -219,8 +222,12 @@ psprism::desktop::DialogFrame current_dialog_frame();
     }
     vertex VertexOut psprism_dialog_vertex(
         uint id [[vertex_id]], constant float2& clip_scale [[buffer(0)]]) {
-      constexpr float2 positions[] = {{-1.0,-1.0},{3.0,-1.0},{-1.0,3.0}};
-      constexpr float2 texcoords[] = {{0.0,1.0},{2.0,1.0},{0.0,-1.0}};
+      constexpr float2 positions[] = {
+          {-1.0,-1.0},{1.0,-1.0},{-1.0,1.0},
+          {-1.0,1.0},{1.0,-1.0},{1.0,1.0}};
+      constexpr float2 texcoords[] = {
+          {0.0,1.0},{1.0,1.0},{0.0,0.0},
+          {0.0,0.0},{1.0,1.0},{1.0,0.0}};
       return {float4(positions[id] * clip_scale, 0.0, 1.0), texcoords[id]};
     }
     struct GeometryVertex {
@@ -699,22 +706,13 @@ psprism::desktop::DialogFrame current_dialog_frame();
                          mipmapLevel:0
                            withBytes:dialog_frame.pixels.data()
                          bytesPerRow:dialog_frame.width * 4U];
-    const auto view_aspect = static_cast<float>(view.drawableSize.width /
-                                                view.drawableSize.height);
-    const auto dialog_aspect = static_cast<float>(dialog_frame.width) /
-                               static_cast<float>(dialog_frame.height);
-    constexpr float dialog_extent = 0.90F;
-    const float dialog_scale[2]{
-        dialog_aspect > view_aspect
-            ? dialog_extent
-            : dialog_extent * dialog_aspect / view_aspect,
-        dialog_aspect > view_aspect
-            ? dialog_extent * view_aspect / dialog_aspect
-            : dialog_extent};
+    constexpr float dialog_scale[2]{1.0F, 1.0F};
     [display_encoder setRenderPipelineState:self.dialogPipeline];
     [display_encoder setVertexBytes:dialog_scale length:sizeof(dialog_scale) atIndex:0];
     [display_encoder setFragmentTexture:self.dialogTexture atIndex:0];
-    [display_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+    [display_encoder drawPrimitives:MTLPrimitiveTypeTriangle
+                        vertexStart:0
+                        vertexCount:6];
   }
 #endif
   [display_encoder endEncoding];
@@ -760,8 +758,13 @@ std::uint32_t previous_dialog_buttons{};
 bool dialog_controller_armed{};
 
 psprism::desktop::DialogFrame current_dialog_frame() {
-  return desktop_dialogs != nullptr ? desktop_dialogs->rendered_frame()
-                                    : psprism::desktop::DialogFrame{};
+  const auto scale = window != nil ? window.backingScaleFactor : 1.0;
+  const auto size = metal_view != nil ? metal_view.bounds.size : CGSizeZero;
+  return desktop_dialogs != nullptr
+             ? desktop_dialogs->rendered_frame(
+                   scale, static_cast<std::uint32_t>(std::ceil(size.width)),
+                   static_cast<std::uint32_t>(std::ceil(size.height)))
+             : psprism::desktop::DialogFrame{};
 }
 #endif
 
@@ -885,6 +888,7 @@ void initialize_frontend() {
                       defer:NO];
     window.title = @"psprism";
     window.delegate = application_delegate;
+    window.acceptsMouseMovedEvents = YES;
     metal_view = [[MTKView alloc] initWithFrame:frame device:device];
     metal_view.colorPixelFormat = MTLPixelFormatBGRA8Unorm;
     metal_view.depthStencilPixelFormat = MTLPixelFormatDepth32Float;
@@ -925,8 +929,11 @@ void initialize_frontend() {
                                       dialog_controller_armed = false;
                                       return;
                                     }
-                                    const auto buttons = gamepad_buttons(
+                                    ControllerState physical_controller;
+                                    physical_controller.buttons = gamepad_buttons(
                                         active_controller.extendedGamepad);
+                                    const auto buttons =
+                                        physical_controller.buttons;
                                     if (!dialog_controller_armed) {
                                       previous_dialog_buttons = buttons;
                                       dialog_controller_armed = buttons == 0U;
@@ -1001,6 +1008,40 @@ void initialize_frontend() {
                                             event.keyCode);
                                       return handled ? nil : event;
                                     }];
+#if defined(PSPRISM_HAS_DESKTOP_DIALOGS)
+    mouse_event_monitor = [NSEvent
+        addLocalMonitorForEventsMatchingMask:NSEventMaskLeftMouseDown |
+                                              NSEventMaskLeftMouseUp |
+                                              NSEventMaskMouseMoved |
+                                              NSEventMaskLeftMouseDragged
+                                    handler:^NSEvent*(NSEvent* event) {
+                                      if (desktop_dialogs == nullptr ||
+                                          !desktop_dialogs->visible() ||
+                                          event.window != window)
+                                        return event;
+                                      const NSPoint point = [metal_view
+                                          convertPoint:event.locationInWindow
+                                             fromView:nil];
+                                      if (!NSPointInRect(point, metal_view.bounds))
+                                        return event;
+                                      const auto x = static_cast<double>(point.x);
+                                      const auto y = static_cast<double>(
+                                          NSMaxY(metal_view.bounds) - point.y);
+                                      switch (event.type) {
+                                        case NSEventTypeLeftMouseDown:
+                                          desktop_dialogs->handle_mouse_press(x, y);
+                                          break;
+                                        case NSEventTypeLeftMouseUp:
+                                          desktop_dialogs->handle_mouse_release(x, y);
+                                          break;
+                                        default:
+                                          desktop_dialogs->handle_mouse_move(x, y);
+                                          break;
+                                      }
+                                      [metal_view setNeedsDisplay:YES];
+                                      return nil;
+                                    }];
+#endif
   });
 }
 

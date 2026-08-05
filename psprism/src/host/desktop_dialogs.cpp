@@ -13,6 +13,7 @@
 #include <QLabel>
 #include <QLibraryInfo>
 #include <QLineEdit>
+#include <QMouseEvent>
 #include <QPainter>
 #include <QPointer>
 #include <QPushButton>
@@ -21,6 +22,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <functional>
 #include <mutex>
 
@@ -175,11 +177,37 @@ struct DialogFrontend::Implementation {
   QLabel* detail{};
   std::vector<QLineEdit*> editors;
   std::vector<QPushButton*> osk_buttons;
+  QPointer<QWidget> mouse_target;
   std::size_t selected_item{};
   std::size_t selected_field{};
   std::size_t selected_key{};
   bool affirmative{true};
   bool finishing{};
+
+  void send_mouse_event(QEvent::Type type, double x, double y) {
+    auto* root = dialog.data();
+    if (!model || root == nullptr) return;
+    const QPoint root_position{static_cast<int>(std::floor(x)),
+                               static_cast<int>(std::floor(y))};
+    QWidget* target = mouse_target.data();
+    if (type == QEvent::MouseButtonPress || target == nullptr) {
+      target = root->childAt(root_position);
+      if (target == nullptr) target = root;
+    }
+    if (type == QEvent::MouseButtonPress) mouse_target = target;
+    const QPointF local_position{target->mapFrom(root, root_position)};
+    const QPointF global_position{root->mapToGlobal(root_position)};
+    const auto button = type == QEvent::MouseMove ? Qt::NoButton
+                                                   : Qt::LeftButton;
+    const auto buttons = type == QEvent::MouseButtonPress ||
+                                 (type == QEvent::MouseMove && mouse_target)
+                             ? Qt::LeftButton
+                             : Qt::NoButton;
+    QMouseEvent event(type, local_position, global_position, button, buttons,
+                      Qt::NoModifier);
+    QCoreApplication::sendEvent(target, &event);
+    if (type == QEvent::MouseButtonRelease) mouse_target.clear();
+  }
 
   void complete(bool cancelled) {
     if (!model || finishing) return;
@@ -450,6 +478,21 @@ void DialogFrontend::handle_backspace() {
   implementation_->backspace();
 }
 
+void DialogFrontend::handle_mouse_move(double x, double y) {
+  std::lock_guard lock(implementation_->mutex);
+  implementation_->send_mouse_event(QEvent::MouseMove, x, y);
+}
+
+void DialogFrontend::handle_mouse_press(double x, double y) {
+  std::lock_guard lock(implementation_->mutex);
+  implementation_->send_mouse_event(QEvent::MouseButtonPress, x, y);
+}
+
+void DialogFrontend::handle_mouse_release(double x, double y) {
+  std::lock_guard lock(implementation_->mutex);
+  implementation_->send_mouse_event(QEvent::MouseButtonRelease, x, y);
+}
+
 std::optional<host::DialogResult> DialogFrontend::take_result(std::uint64_t id) {
   std::lock_guard lock(implementation_->mutex);
   if (!implementation_->result || implementation_->result->id != id)
@@ -459,11 +502,23 @@ std::optional<host::DialogResult> DialogFrontend::take_result(std::uint64_t id) 
   return result;
 }
 
-DialogFrame DialogFrontend::rendered_frame() const {
+DialogFrame DialogFrontend::rendered_frame(double device_pixel_ratio,
+                                           std::uint32_t logical_width,
+                                           std::uint32_t logical_height) const {
   std::lock_guard lock(implementation_->mutex);
   auto* dialog = implementation_->dialog.data();
   if (!implementation_->model || dialog == nullptr) return {};
-  QImage image(dialog->size(), QImage::Format_RGBA8888_Premultiplied);
+  if (logical_width != 0U && logical_height != 0U) {
+    dialog->resize(static_cast<int>(logical_width),
+                   static_cast<int>(logical_height));
+    if (dialog->layout() != nullptr) dialog->layout()->activate();
+  }
+  const auto scale = std::max(1.0, device_pixel_ratio);
+  const QSize pixel_size{
+      static_cast<int>(std::ceil(dialog->width() * scale)),
+      static_cast<int>(std::ceil(dialog->height() * scale))};
+  QImage image(pixel_size, QImage::Format_RGBA8888_Premultiplied);
+  image.setDevicePixelRatio(scale);
   image.fill(Qt::transparent);
   QPainter painter(&image);
   dialog->render(&painter);

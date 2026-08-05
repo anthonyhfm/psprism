@@ -33,8 +33,13 @@ class DialogFrontend {
   void cancel();
   void handle_text(std::u16string_view text);
   void handle_backspace();
+  void handle_mouse_move(double x, double y);
+  void handle_mouse_press(double x, double y);
+  void handle_mouse_release(double x, double y);
   std::optional<host::DialogResult> take_result(std::uint64_t id);
-  DialogFrame rendered_frame() const;
+  DialogFrame rendered_frame(double device_pixel_ratio = 1.0,
+                             std::uint32_t logical_width = 0,
+                             std::uint32_t logical_height = 0) const;
 
  private:
   struct Implementation;
