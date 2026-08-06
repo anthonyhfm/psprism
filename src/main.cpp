@@ -1,5 +1,6 @@
 #include "elf.hpp"
 #include "emitter.hpp"
+#include "iso_patch.hpp"
 #include "project.hpp"
 
 #include <filesystem>
@@ -279,6 +280,32 @@ int run_init(InitArguments arguments) {
   return 0;
 }
 
+int run_patch_iso(int argc, char **argv) {
+  // psprism patch-iso <original.iso> <output.iso> <iso_path>=<local_file>...
+  if (argc < 5) {
+    throw std::runtime_error(
+        "usage: patch-iso <original.iso> <output.iso> "
+        "<iso_path>=<local_file> [...]");
+  }
+  const std::filesystem::path original = argv[2];
+  const std::filesystem::path output = argv[3];
+  std::vector<psprecomp::IsoPatchReplacement> replacements;
+  for (int i = 4; i < argc; ++i) {
+    const std::string_view argument(argv[i]);
+    const auto separator = argument.find('=');
+    if (separator == std::string_view::npos) {
+      throw std::runtime_error(
+          "expected <iso_path>=<local_file>, got: " + std::string(argument));
+    }
+    replacements.push_back({std::string(argument.substr(0, separator)),
+                            std::filesystem::path(
+                                argument.substr(separator + 1U))});
+  }
+  psprecomp::patch_iso_preserving_layout(original, output, replacements);
+  std::cout << "Patched ISO written to " << output.string() << '\n';
+  return 0;
+}
+
 int run_legacy(int argc, char **argv) {
   if (argc < 3) {
     throw std::runtime_error("missing output mode");
@@ -351,6 +378,9 @@ int main(int argc, char **argv) {
     }
     if (std::string_view(argv[1]) == "init") {
       return run_init(parse_init_arguments(argc, argv, 2));
+    }
+    if (std::string_view(argv[1]) == "patch-iso") {
+      return run_patch_iso(argc, argv);
     }
     if (argc == 2) {
       InitArguments arguments;

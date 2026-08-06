@@ -174,6 +174,7 @@ std::string root_makefile(const ExportConfig& config, bool has_disc,
   std::ostringstream out;
   out << "PPSSPP ?= ppsspp\n"
          "CMAKE ?= cmake\n"
+         "CXX ?= c++\n"
          "MACOS_BUILD_TYPE ?= Release\n"
          "MACOS_RUN_ARGS ?=\n"
          "\n"
@@ -186,14 +187,23 @@ std::string root_makefile(const ExportConfig& config, bool has_disc,
          "\t$(MAKE) -C src/generated\n\n";
   if (has_disc) {
     out << "psp:" << (preserve_original_psp ? "\n" : " psp-binary\n")
-        <<
-           "\tsh tools/prepare_psp_run.sh\n"
-           "\tsh tools/build_psp_iso.sh \"$(CURDIR)/.psprecomp/run\" "
+        << "\tmkdir -p dist .psprecomp\n"
+           "\t$(CXX) -std=c++20 -O2 -o .psprecomp/iso_patch "
+           "tools/iso_patch.cpp\n"
+           "\t.psprecomp/iso_patch \"$(CURDIR)/original/disc.iso\" "
            "\"$(CURDIR)/dist/"
-        << config.project_name
-        << ".iso\"\n\n"
+        << config.project_name << ".iso\""
+        << (preserve_original_psp
+                ? "\n"
+                : " \"" + std::string(disc_executable) +
+                      "\"=\"$(CURDIR)/src/generated/" + config.project_name +
+                      ".prx\" "
+                      "\"PSP_GAME/PARAM.SFO\"=\"$(CURDIR)/src/generated/"
+                      "PARAM.SFO\"\n")
+        << "\n"
            "psp-run: psp\n"
-           "\t$(PPSSPP) \"$(CURDIR)/.psprecomp/run\"\n\n";
+           "\t$(PPSSPP) \"$(CURDIR)/dist/"
+        << config.project_name << ".iso\"\n\n";
   } else {
     out << "psp: psp-binary\n"
            "\t@echo \"Built src/generated/EBOOT.PBP (an ISO input is "
@@ -249,94 +259,356 @@ std::string root_makefile(const ExportConfig& config, bool has_disc,
   return out.str();
 }
 
-std::string psp_run_script(const ExportConfig& config,
-                           std::string_view disc_executable,
-                           bool preserve_original_psp) {
-  const auto executable_name =
-      std::filesystem::path(disc_executable).filename().string();
-  std::ostringstream out;
-  out << "#!/bin/sh\n"
-         "set -eu\n\n"
-         "ROOT=$(CDPATH= cd -- \"$(dirname -- \"$0\")/..\" && pwd)\n"
-         "DISC=$ROOT/disc\n"
-         "STATE=$ROOT/.psprecomp\n"
-         "RUN=$STATE/run\n\n"
-         "if [ ! -d \"$DISC/PSP_GAME\" ]; then\n"
-         "  echo \"psprecomp: extracted disc tree is missing\" >&2\n"
-         "  exit 1\n"
-         "fi\n"
-         "if [ -e \"$RUN\" ] && [ ! -f \"$STATE/run.marker\" ]; then\n"
-         "  echo \"psprecomp: refusing to replace an unowned run directory: "
-         "$RUN\" >&2\n"
-         "  exit 1\n"
-         "fi\n\n"
-         "rm -rf \"$RUN\"\n"
-         "mkdir -p \"$RUN/PSP_GAME/SYSDIR\"\n"
-         ": > \"$STATE/run.marker\"\n\n"
-         "for source in \"$DISC\"/*; do\n"
-         "  [ -e \"$source\" ] || continue\n"
-         "  [ \"${source##*/}\" = PSP_GAME ] || ln -s \"$source\" "
-         "\"$RUN/${source##*/}\"\n"
-         "done\n"
-         "for source in \"$DISC/PSP_GAME\"/*; do\n"
-         "  [ -e \"$source\" ] || continue\n"
-         "  case ${source##*/} in PARAM.SFO|SYSDIR) continue ;; esac\n"
-         "  ln -s \"$source\" \"$RUN/PSP_GAME/${source##*/}\"\n"
-         "done\n"
-         "for source in \"$DISC/PSP_GAME/SYSDIR\"/*; do\n"
-         "  [ -e \"$source\" ] || continue\n"
-         "  [ \"${source##*/}\" = \""
-      << executable_name
-      << "\" ] || ln -s \"$source\" \"$RUN/PSP_GAME/SYSDIR/${source##*/}\"\n"
-         "done\n\n"
-      << (preserve_original_psp
-              ? "ln -s \"$DISC/" +
-                    std::filesystem::path(disc_executable).generic_string() +
-                    "\" \"$RUN/" +
-                    std::filesystem::path(disc_executable).generic_string() +
-                    "\"\nln -s \"$DISC/PSP_GAME/PARAM.SFO\" "
-                    "\"$RUN/PSP_GAME/PARAM.SFO\"\n"
-              : "cp \"$ROOT/src/generated/" + config.project_name +
-                    ".prx\" \"$RUN/" +
-                    std::filesystem::path(disc_executable).generic_string() +
-                    "\"\ncp \"$ROOT/src/generated/PARAM.SFO\" "
-                    "\"$RUN/PSP_GAME/PARAM.SFO\"\n")
-      << "echo \"Prepared lightweight PPSSPP run tree at $RUN\"\n";
-  return out.str();
+//
+// Source for a small, dependency-free host tool that rebuilds the PSP disc
+// image while preserving the logical block address (LBA) of every file that
+// is not being replaced.
+//
+// A naive from-scratch ISO repack (mkisofs/xorriso/hdiutil on the extracted
+// tree) lays every file out again using its own ordering rules. Several PSP
+// games (observed with Need for Speed: Most Wanted) resolve large assets
+// through raw sector addressing baked into their own code
+// (`disc0:/sce_lbnXXXXX_sizeYYY`), bypassing the filesystem entirely. A
+// repack silently relocates that data, so those games load garbage/corrupted
+// modules instead of the real ones and crash or hang instead of booting.
+// Copying the original image and only relocating the handful of files that
+// changed (patching just their directory record) keeps every untouched
+// asset's LBA byte-identical to the retail disc.
+std::string iso_patch_tool_source() {
+  return R"CPP(// Generated by psprism: rebuilds a PSP disc image while preserving the
+// logical block address (LBA) of every file that is not explicitly replaced.
+// See src/project.cpp (iso_patch_tool_source) in the psprism repository for
+// the full rationale.
+#include <algorithm>
+#include <cctype>
+#include <cstdint>
+#include <filesystem>
+#include <fstream>
+#include <iostream>
+#include <map>
+#include <set>
+#include <stdexcept>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
+
+namespace {
+
+constexpr std::uint32_t sector_size = 2048U;
+
+struct Replacement {
+  std::string iso_path;
+  std::filesystem::path local_path;
+};
+
+std::string normalized_path(std::string_view value) {
+  std::string result;
+  result.reserve(value.size());
+  for (const auto character : value) {
+    if (character == '\\') {
+      result.push_back('/');
+    } else if (character != '/') {
+      result.push_back(static_cast<char>(
+          std::toupper(static_cast<unsigned char>(character))));
+    } else if (!result.empty() && result.back() != '/') {
+      result.push_back('/');
+    }
+  }
+  while (!result.empty() && result.front() == '/') {
+    result.erase(result.begin());
+  }
+  while (!result.empty() && result.back() == '/') {
+    result.pop_back();
+  }
+  return result;
 }
 
-std::string psp_iso_script() {
-  return R"SH(#!/bin/sh
-set -eu
+std::uint32_t read_u32(const std::vector<std::uint8_t> &data,
+                       std::size_t offset) {
+  if (offset > data.size() || data.size() - offset < 4U) {
+    throw std::runtime_error("truncated ISO 9660 field");
+  }
+  return static_cast<std::uint32_t>(data[offset]) |
+         static_cast<std::uint32_t>(data[offset + 1U]) << 8U |
+         static_cast<std::uint32_t>(data[offset + 2U]) << 16U |
+         static_cast<std::uint32_t>(data[offset + 3U]) << 24U;
+}
 
-SOURCE=$1
-OUTPUT=$2
-mkdir -p "$(dirname -- "$OUTPUT")"
+// Every 32-bit numeric field in an ISO 9660 directory record (and the PVD)
+// is stored twice: once little-endian, once big-endian, back to back. Both
+// copies must stay consistent or strict readers reject the image.
+void write_both_endian_u32(std::fstream &stream, std::uint64_t le_offset,
+                           std::uint32_t value) {
+  std::uint8_t le[4] = {
+      static_cast<std::uint8_t>(value & 0xFFU),
+      static_cast<std::uint8_t>((value >> 8U) & 0xFFU),
+      static_cast<std::uint8_t>((value >> 16U) & 0xFFU),
+      static_cast<std::uint8_t>((value >> 24U) & 0xFFU)};
+  std::uint8_t be[4] = {le[3], le[2], le[1], le[0]};
+  stream.seekp(static_cast<std::streamoff>(le_offset));
+  stream.write(reinterpret_cast<const char *>(le), 4);
+  stream.write(reinterpret_cast<const char *>(be), 4);
+  if (!stream) {
+    throw std::runtime_error("failed to patch ISO 9660 directory record");
+  }
+}
 
-if command -v xorriso >/dev/null 2>&1; then
-  xorriso -as mkisofs -follow-links -iso-level 3 -V PSP_RECOMP \
-    -o "$OUTPUT" "$SOURCE"
-elif command -v mkisofs >/dev/null 2>&1; then
-  mkisofs -follow-links -iso-level 3 -V PSP_RECOMP -o "$OUTPUT" "$SOURCE"
-elif command -v hdiutil >/dev/null 2>&1; then
-  STATE=$(dirname -- "$SOURCE")
-  STAGE=$STATE/iso-tree
-  if [ -e "$STAGE" ] && [ ! -f "$STATE/iso-tree.marker" ]; then
-    echo "psprecomp: refusing to replace an unowned ISO staging tree" >&2
-    exit 1
-  fi
-  rm -rf "$STAGE"
-  cp -cRL "$SOURCE" "$STAGE"
-  : > "$STATE/iso-tree.marker"
-  hdiutil makehybrid -quiet -ov -iso -joliet -iso-volume-name PSP_RECOMP \
-    -o "$OUTPUT" "$STAGE"
-else
-  echo "psprecomp: install xorriso/mkisofs, or build on macOS with hdiutil" >&2
-  exit 1
-fi
+struct DirectoryRecordInfo {
+  std::uint64_t record_offset{}; // absolute byte offset of the record itself
+  std::uint32_t extent{};
+  std::uint32_t size{};
+};
 
-echo "Built PSP ISO: $OUTPUT"
-)SH";
+std::vector<std::uint8_t> read_range(std::ifstream &stream,
+                                     std::uint64_t offset, std::size_t size) {
+  stream.clear();
+  stream.seekg(static_cast<std::streamoff>(offset));
+  std::vector<std::uint8_t> result(size);
+  if (size != 0U) {
+    stream.read(reinterpret_cast<char *>(result.data()),
+                static_cast<std::streamsize>(size));
+  }
+  if (!stream) {
+    throw std::runtime_error("failed while reading ISO image");
+  }
+  return result;
+}
+
+std::string record_name(const std::uint8_t *record, std::size_t length) {
+  if (length < 34U) {
+    throw std::runtime_error("invalid ISO 9660 directory record");
+  }
+  const auto name_length = record[32];
+  if (33U + name_length > length) {
+    throw std::runtime_error("truncated ISO 9660 file name");
+  }
+  if (name_length == 1U && (record[33] == 0U || record[33] == 1U)) {
+    return {};
+  }
+  std::string name(reinterpret_cast<const char *>(record + 33U), name_length);
+  if (const auto version = name.find(';'); version != std::string::npos) {
+    name.resize(version);
+  }
+  while (!name.empty() && name.back() == '.') {
+    name.pop_back();
+  }
+  return name;
+}
+
+// Walks the ISO 9660 tree rooted at the primary volume descriptor and
+// records, for every file, where its directory record physically lives in
+// the image (so it can be patched later) alongside its current extent/size.
+std::map<std::string, DirectoryRecordInfo>
+index_directory_records(std::ifstream &stream) {
+  std::map<std::string, DirectoryRecordInfo> result;
+
+  const auto descriptor = read_range(stream, 16ULL * sector_size, sector_size);
+  if (descriptor[0] != 1U ||
+      std::string_view(reinterpret_cast<const char *>(descriptor.data() + 1U),
+                       5U) != "CD001" ||
+      descriptor[6] != 1U) {
+    throw std::runtime_error("input is not an ISO 9660 image");
+  }
+  const auto root_length = descriptor[156];
+  if (root_length < 34U || 156U + root_length > descriptor.size()) {
+    throw std::runtime_error("ISO image has an invalid root directory");
+  }
+  const auto root_extent = read_u32(descriptor, 158U);
+  const auto root_size = read_u32(descriptor, 166U);
+
+  struct PendingDirectory {
+    std::string path;
+    std::uint32_t extent;
+    std::uint32_t size;
+  };
+  std::vector<PendingDirectory> pending{{{}, root_extent, root_size}};
+  std::set<std::pair<std::uint32_t, std::uint32_t>> visited;
+  while (!pending.empty()) {
+    const auto directory = pending.back();
+    pending.pop_back();
+    if (!visited.emplace(directory.extent, directory.size).second) {
+      continue;
+    }
+    const auto base_offset =
+        static_cast<std::uint64_t>(directory.extent) * sector_size;
+    const auto bytes = read_range(stream, base_offset, directory.size);
+    std::size_t cursor = 0;
+    while (cursor < bytes.size()) {
+      const auto length = bytes[cursor];
+      if (length == 0U) {
+        cursor = ((cursor / sector_size) + 1U) * sector_size;
+        continue;
+      }
+      if (cursor + length > bytes.size() || length < 34U) {
+        throw std::runtime_error("invalid ISO directory record");
+      }
+      const auto *record = bytes.data() + cursor;
+      const auto name = record_name(record, length);
+      if (!name.empty()) {
+        const auto extent = read_u32(bytes, cursor + 2U);
+        const auto size = read_u32(bytes, cursor + 10U);
+        const bool is_directory = (record[25] & 2U) != 0U;
+        auto entry_path = directory.path.empty() ? name
+                                                  : directory.path + "/" + name;
+        result[normalized_path(entry_path)] =
+            DirectoryRecordInfo{base_offset + cursor, extent, size};
+        if (is_directory) {
+          pending.push_back({entry_path, extent, size});
+        }
+      }
+      cursor += length;
+    }
+  }
+  return result;
+}
+
+void patch_iso_preserving_layout(
+    const std::filesystem::path &original, const std::filesystem::path &output,
+    const std::vector<Replacement> &replacements) {
+  {
+    std::ifstream probe(original, std::ios::binary);
+    if (!probe) {
+      throw std::runtime_error("cannot open ISO image: " + original.string());
+    }
+  }
+
+  std::map<std::string, DirectoryRecordInfo> records;
+  {
+    std::ifstream source(original, std::ios::binary);
+    records = index_directory_records(source);
+  }
+
+  std::filesystem::create_directories(output.parent_path());
+  std::filesystem::copy_file(
+      original, output, std::filesystem::copy_options::overwrite_existing);
+
+  std::fstream target(output,
+                      std::ios::binary | std::ios::in | std::ios::out);
+  if (!target) {
+    throw std::runtime_error("cannot open ISO image for patching: " +
+                             output.string());
+  }
+  target.seekg(0, std::ios::end);
+  const auto original_size = static_cast<std::uint64_t>(target.tellg());
+  if (original_size % sector_size != 0U) {
+    throw std::runtime_error("ISO image size is not sector aligned");
+  }
+  std::uint64_t append_sector = original_size / sector_size;
+  const auto original_sector_count = append_sector;
+
+  for (const auto &replacement : replacements) {
+    const auto key = normalized_path(replacement.iso_path);
+    const auto found = records.find(key);
+    if (found == records.end()) {
+      throw std::runtime_error("ISO image has no file at: " +
+                               replacement.iso_path);
+    }
+    const auto &info = found->second;
+
+    std::ifstream local(replacement.local_path,
+                        std::ios::binary | std::ios::ate);
+    if (!local) {
+      throw std::runtime_error("cannot open replacement file: " +
+                               replacement.local_path.string());
+    }
+    const auto local_size = static_cast<std::uint64_t>(local.tellg());
+    local.seekg(0);
+    std::vector<char> content(local_size);
+    if (local_size != 0U) {
+      local.read(content.data(), static_cast<std::streamsize>(local_size));
+    }
+    if (!local) {
+      throw std::runtime_error("failed reading replacement file: " +
+                               replacement.local_path.string());
+    }
+
+    const std::uint64_t needed_sectors =
+        (local_size + sector_size - 1U) / sector_size;
+    const std::uint64_t original_sectors =
+        (static_cast<std::uint64_t>(info.size) + sector_size - 1U) /
+        sector_size;
+
+    std::uint64_t data_sector;
+    if (original_sectors != 0U && needed_sectors <= original_sectors) {
+      // Fits in the space the original file already occupied: keep the
+      // same LBA so every other file's raw-sector references stay valid.
+      data_sector = info.extent;
+    } else {
+      // Does not fit: append past the current end of the image (sector
+      // aligned) and repoint only this file's directory record there.
+      data_sector = append_sector;
+      append_sector += needed_sectors;
+    }
+
+    const std::uint64_t write_offset = data_sector * sector_size;
+    const std::uint64_t padded_size =
+        (data_sector == info.extent ? original_sectors : needed_sectors) *
+        sector_size;
+    target.seekp(static_cast<std::streamoff>(write_offset));
+    target.write(content.data(), static_cast<std::streamsize>(local_size));
+    for (std::uint64_t i = local_size; i < padded_size; ++i) {
+      target.put('\0');
+    }
+    if (!target) {
+      throw std::runtime_error("failed writing replacement content for: " +
+                               replacement.iso_path);
+    }
+
+    write_both_endian_u32(target, info.record_offset + 2U,
+                          static_cast<std::uint32_t>(data_sector));
+    write_both_endian_u32(target, info.record_offset + 10U,
+                          static_cast<std::uint32_t>(local_size));
+  }
+
+  if (append_sector > original_sector_count) {
+    // Keep the PVD's declared volume size consistent with the (now larger)
+    // image; several readers sanity-check this against the actual size.
+    write_both_endian_u32(target, 16ULL * sector_size + 80U,
+                          static_cast<std::uint32_t>(append_sector));
+  }
+
+  target.flush();
+  if (!target) {
+    throw std::runtime_error("failed finalizing patched ISO image: " +
+                             output.string());
+  }
+}
+
+} // namespace
+
+int main(int argc, char **argv) {
+  try {
+    if (argc < 3) {
+      std::cerr << "usage: " << argv[0]
+                << " <original.iso> <output.iso> [<iso_path>=<local_file> "
+                   "...]\n";
+      return 1;
+    }
+    const std::filesystem::path original = argv[1];
+    const std::filesystem::path output = argv[2];
+    std::vector<Replacement> replacements;
+    for (int i = 3; i < argc; ++i) {
+      const std::string_view argument(argv[i]);
+      const auto separator = argument.find('=');
+      if (separator == std::string_view::npos) {
+        std::cerr << "expected <iso_path>=<local_file>, got: " << argument
+                  << '\n';
+        return 1;
+      }
+      replacements.push_back(
+          {std::string(argument.substr(0, separator)),
+           std::filesystem::path(argument.substr(separator + 1U))});
+    }
+    patch_iso_preserving_layout(original, output, replacements);
+    std::cout << "Built PSP ISO: " << output.string() << '\n';
+    return 0;
+  } catch (const std::exception &error) {
+    std::cerr << "iso_patch: " << error.what() << '\n';
+    return 1;
+  }
+}
+)CPP";
 }
 
 std::string macos_cmake(const ExportConfig& config) {
@@ -584,7 +856,13 @@ ExportSummary export_codebase(const ExportConfig& config) {
                           std::filesystem::copy_options::recursive);
     GeneratedProjectOptions emitter_options;
     emitter_options.display_name = config.display_name;
-    emitter_options.module_name = config.project_name.substr(0, 27U);
+    // PspModuleInfo::modname is char[27]. In C++ translation units
+    // PSP_MODULE_INFO stringifies its already-quoted name argument, so the
+    // literal gains two escaped quote characters on top of the NUL
+    // terminator (len + 2 quotes + 1 NUL <= 27 => len <= 24). Names longer
+    // than this silently failed to build ("initializer-string ... too
+    // long") for any game whose project name exceeded ~24-27 characters.
+    emitter_options.module_name = config.project_name.substr(0, 24U);
     emitter_options.target_name = config.project_name;
     emitter_options.include_path = "../../include";
     emitter_options.platform_directory = staging / "platform";
@@ -604,10 +882,7 @@ ExportSummary export_codebase(const ExportConfig& config) {
                              preserve_original_psp));
     write_text(staging / "CMakeLists.txt", macos_cmake(config));
     if (has_disc) {
-      write_text(staging / "tools" / "prepare_psp_run.sh",
-                 psp_run_script(config, info.executable_path,
-                                preserve_original_psp));
-      write_text(staging / "tools" / "build_psp_iso.sh", psp_iso_script());
+      write_text(staging / "tools" / "iso_patch.cpp", iso_patch_tool_source());
     }
     write_text(staging / ".gitignore",
                "src/generated/*.o\nsrc/generated/*.elf\n"

@@ -1589,6 +1589,15 @@ void emit_project(const ElfImage& image, const std::filesystem::path& directory,
                 symbol == "sceKernelGetModuleId" ||
                 symbol == "sceKernelSetCompilerVersion" ||
                 symbol == "sceMpegAvcDecodeFlush" ||
+                symbol == "sceKernelMemset" ||
+                symbol == "sceKernelMemcpy" ||
+                symbol == "sceKernelStopUnloadSelfModuleWithStatus" ||
+                symbol == "sceKernelSetCompiledSdkVersion603_605" ||
+                symbol == "scePowerGetBatteryChargePercent" ||
+                symbol == "sceNpDrmEdataSetupKey" ||
+                symbol == "sceNpDrmSetLicenseeKey" ||
+                symbol == "sceAtracGetBufferInfoForResetting" ||
+                symbol == "sceAtracSetAA3DataAndGetID" ||
                 !declared.insert(symbol).second) {
                 continue;
             }
@@ -1596,6 +1605,24 @@ void emit_project(const ElfImage& image, const std::filesystem::path& directory,
         }
         stream << "extern \"C\" int sceKernelPrintf(const char*, ...);\n"
                   "extern \"C\" std::uint32_t sceKernelGetModuleId() "
+                  "{ return 0; }\n"
+                  "extern \"C\" void* sceKernelMemset(void* dst, int, "
+                  "std::size_t) { return dst; }\n"
+                  "extern \"C\" void* sceKernelMemcpy(void* dst, const void*, "
+                  "std::size_t) { return dst; }\n"
+                  "extern \"C\" std::uint32_t "
+                  "sceKernelStopUnloadSelfModuleWithStatus() { return 0; }\n"
+                  "extern \"C\" std::uint32_t "
+                  "sceKernelSetCompiledSdkVersion603_605() { return 0; }\n"
+                  "extern \"C\" std::uint32_t "
+                  "scePowerGetBatteryChargePercent() { return 100; }\n"
+                  "extern \"C\" std::uint32_t sceNpDrmEdataSetupKey() "
+                  "{ return 0; }\n"
+                  "extern \"C\" std::uint32_t sceNpDrmSetLicenseeKey() "
+                  "{ return 0; }\n"
+                  "extern \"C\" std::uint32_t "
+                  "sceAtracGetBufferInfoForResetting() { return 0; }\n"
+                  "extern \"C\" std::uint32_t sceAtracSetAA3DataAndGetID() "
                   "{ return 0; }\n"
                   "extern \"C\" std::uint32_t sceKernelSetCompilerVersion("
                   "std::uint32_t) { return 0; }\n"
@@ -1924,6 +1951,7 @@ void emit_project(const ElfImage& image, const std::filesystem::path& directory,
                   "PSP_MAIN_THREAD_ATTR(THREAD_ATTR_USER | THREAD_ATTR_VFPU);\n"
                   "PSP_MAIN_THREAD_STACK_SIZE_KB(256);\n"
                   "PSP_HEAP_SIZE_KB(1024);\n\n"
+                  "PSP_NO_CREATE_MAIN_THREAD();\n\n"
                   "extern \"C\" unsigned char guest_image_start[];\n"
                   "extern \"C\" unsigned char guest_relocations_start[];\n\n"
                   "namespace {\n"

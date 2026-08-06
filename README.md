@@ -121,8 +121,8 @@ make native
 
 ---
 
-## 🤖 AI Acknowledgment & Origin
+## 🤖 AI Acknowledgment & Transparency
 
-This project started as an experiment after being genuinely surprised by how effectively modern AI (Codex) handled initial MIPS instruction lifting and static recompilation prototypes. What began as a small weekend test quickly evolved into `psprism`.
+A significant portion of the `psprism` codebase and translation runtime was built with the assistance of AI technology, developed under close human guidance, architectural review, and testing.
 
-While a majority of the codebase and runtime translation stubs were generated with AI assistance, every module, architectural decision, and host bridge is human-guided, reviewed, and verified on real PSP hardware. We embrace AI tools to accelerate reverse engineering and long-term game preservation.
+This project uses AI as a force multiplier for software preservation—accelerating complex MIPS/VFPU instruction lifting, subsystem stubbing, and host translation layers that would otherwise require thousands of hours of manual labor. Every component is audited and verified against real PSP hardware to ensure correctness, stability, and open-source longevity.

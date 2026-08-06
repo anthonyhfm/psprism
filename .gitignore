@@ -17,6 +17,8 @@ PARAM.SFO
 
 # Game dumps, extracted discs and reverse-engineering projects
 /daxter/
+/tetris/
+/god_of_war_ghost_of_sparta/
 /PSP_GAME/
 /UMD_DATA.BIN
 *.iso

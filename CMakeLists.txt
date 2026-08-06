@@ -11,6 +11,7 @@ add_executable(psprism
     src/elf.cpp
     src/emitter.cpp
     src/iso.cpp
+    src/iso_patch.cpp
     src/nids.cpp
     src/project.cpp
 )

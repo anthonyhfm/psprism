@@ -34,14 +34,19 @@ inline std::uint32_t call_sdk_api(PspSdkFunction function,
   if (reinterpret_cast<void*>(function) == nullptr) {
     return 0x80000001U;
   }
+  // PSP syscall stubs are not ordinary MIPS o32 functions: the compiled game
+  // code calling into a PSPSDK import leaves arguments 5-8 in $t0-$t3
+  // (gpr[8..11]) rather than pushing them onto the stack, since the stub
+  // itself is a bare "syscall" with no prologue to marshal them elsewhere.
+  // Only arguments beyond the eighth (exceedingly rare in PSPSDK APIs) are
+  // passed on the stack starting at $sp+16.
   return function(
       state.gpr[4], state.gpr[5], state.gpr[6], state.gpr[7],
+      state.gpr[8], state.gpr[9], state.gpr[10], state.gpr[11],
       stack_argument(state, 0), stack_argument(state, 1),
       stack_argument(state, 2), stack_argument(state, 3),
       stack_argument(state, 4), stack_argument(state, 5),
-      stack_argument(state, 6), stack_argument(state, 7),
-      stack_argument(state, 8), stack_argument(state, 9),
-      stack_argument(state, 10), stack_argument(state, 11));
+      stack_argument(state, 6), stack_argument(state, 7));
 }
 
 } // namespace
