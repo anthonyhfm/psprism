@@ -290,6 +290,13 @@ ElfImage load_elf(const std::filesystem::path& path) {
             header.size < 0x34) {
             continue;
         }
+        // gp_value lives at struct offset 0x20 (SceModuleInfo::gp_value).
+        // Unlike stub_begin/stub_end, its raw stored value is only an
+        // addend for a runtime R_MIPS_32 relocation (typically against the
+        // small-data segment), so we must not resolve it here: just record
+        // where the field lives so the generated runtime can read the
+        // already-relocated value from guest memory after relocations run.
+        image.gp_pointer_offset = image_offset(header.address + 0x20);
         const auto stub_begin = image_offset(image_u32(header.address + 0x2c));
         const auto stub_end = image_offset(image_u32(header.address + 0x30));
         if (stub_begin > stub_end || stub_end > flat_image.size()) {

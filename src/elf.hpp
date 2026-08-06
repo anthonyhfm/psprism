@@ -37,6 +37,14 @@ struct Import {
 struct ElfImage {
     std::uint32_t entry{};
     std::uint32_t preferred_base{};
+    // Flat image offset of the `gp_value` field inside the module's
+    // .rodata.sceModuleInfo header (SceModuleInfo::gp_value). The value
+    // stored there is subject to a normal R_MIPS_32 relocation against the
+    // small-data segment, so it must be read from guest memory *after*
+    // apply_psp_relocations() has run, not computed here at parse time.
+    // 0xffffffffU means "not found" (module lacks the header, or is too
+    // small); callers must treat that as "no $gp initialization available".
+    std::uint32_t gp_pointer_offset{0xffffffffU};
     std::vector<ExecutableSection> executable_sections;
     std::vector<LoadSegment> load_segments;
     std::vector<Relocation> relocations;

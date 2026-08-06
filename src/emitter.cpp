@@ -1137,6 +1137,7 @@ void emit_project(const ElfImage& image, const std::filesystem::path& directory,
                   "bool patch_imports(State& state);\n"
                   "bool dispatch_import(State& state, "
                   "std::uint32_t current_pc);\n"
+                  "std::uint32_t guest_gp_value();\n"
                   "} // namespace psprecomp::platform\n";
     }
 
@@ -1234,7 +1235,9 @@ void emit_project(const ElfImage& image, const std::filesystem::path& directory,
                   "inline constexpr std::uint32_t guest_entry = "
                << hex(entry) << ";\n"
                << "inline constexpr std::uint32_t guest_memory_size = "
-               << hex(image.memory_size()) << ";\n";
+               << hex(image.memory_size()) << ";\n"
+               << "inline constexpr std::uint32_t guest_gp_pointer_offset = "
+               << hex(image.gp_pointer_offset) << ";\n";
         if (!function_mode) {
             for (const auto& [shard, unused] : shards) {
                 static_cast<void>(unused);
@@ -1594,6 +1597,7 @@ void emit_project(const ElfImage& image, const std::filesystem::path& directory,
                 symbol == "sceKernelStopUnloadSelfModuleWithStatus" ||
                 symbol == "sceKernelSetCompiledSdkVersion603_605" ||
                 symbol == "scePowerGetBatteryChargePercent" ||
+                symbol == "scePowerGetPllClockFrequencyFloat" ||
                 symbol == "sceNpDrmEdataSetupKey" ||
                 symbol == "sceNpDrmSetLicenseeKey" ||
                 symbol == "sceAtracGetBufferInfoForResetting" ||
@@ -1616,6 +1620,8 @@ void emit_project(const ElfImage& image, const std::filesystem::path& directory,
                   "sceKernelSetCompiledSdkVersion603_605() { return 0; }\n"
                   "extern \"C\" std::uint32_t "
                   "scePowerGetBatteryChargePercent() { return 100; }\n"
+                  "extern \"C\" float scePowerGetPllClockFrequencyFloat() "
+                  "{ return 222.0f; }\n"
                   "extern \"C\" std::uint32_t sceNpDrmEdataSetupKey() "
                   "{ return 0; }\n"
                   "extern \"C\" std::uint32_t sceNpDrmSetLicenseeKey() "
@@ -1637,6 +1643,7 @@ void emit_project(const ElfImage& image, const std::filesystem::path& directory,
                   "std::uint8_t* shared_memory;\n"
                   "std::size_t shared_memory_size;\n"
                   "std::uint32_t shared_memory_base;\n"
+                  "std::uint32_t shared_memory_gp;\n"
                   "struct ThreadSlot { std::uint32_t entry; std::uint32_t "
                   "stack_size; std::uint8_t* guest_stack; bool used; };\n"
                   "ThreadSlot thread_slots[32]{};\n"
@@ -1668,6 +1675,9 @@ void emit_project(const ElfImage& image, const std::filesystem::path& directory,
                   "reinterpret_cast<std::uintptr_t>(slot.guest_stack + "
                   "slot.stack_size - 64U));\n"
                   "  state.gpr[31] = thread_return_address;\n"
+                  "  state.gpr[28] = shared_memory_gp;\n"
+                  "  asm volatile(\"move $gp, %0\" :: \"r\"(shared_memory_gp) "
+                  ");\n"
                   "  generated::run(state, thread_return_address, "
                   "0x7fffffffffffffffULL);\n"
                   "  sceKernelPrintf(\"[psprecomp] guest stopped slot=%u "
@@ -1732,7 +1742,19 @@ void emit_project(const ElfImage& image, const std::filesystem::path& directory,
                   "std::size_t size, std::uint32_t base) {\n"
                   "  shared_memory = memory; shared_memory_size = size; "
                   "shared_memory_base = base;\n"
+                  "  shared_memory_gp = generated::guest_gp_pointer_offset "
+                  "!= 0xffffffffU && generated::guest_gp_pointer_offset <= "
+                  "size - 4U ? (static_cast<std::uint32_t>("
+                  "memory[generated::guest_gp_pointer_offset]) | "
+                  "(static_cast<std::uint32_t>(memory["
+                  "generated::guest_gp_pointer_offset + 1U]) << 8U) | "
+                  "(static_cast<std::uint32_t>(memory["
+                  "generated::guest_gp_pointer_offset + 2U]) << 16U) | "
+                  "(static_cast<std::uint32_t>(memory["
+                  "generated::guest_gp_pointer_offset + 3U]) << 24U)) : 0U;\n"
                   "}\n\n"
+                  "std::uint32_t guest_gp_value() { return "
+                  "shared_memory_gp; }\n\n"
                   "bool patch_imports(State& state) {\n";
         for (const auto& import : image.imports) {
             const auto symbol = import_symbol(import, code_map);
@@ -1759,12 +1781,25 @@ void emit_project(const ElfImage& image, const std::filesystem::path& directory,
                 continue;
             }
             stream << "  case " << hex(import.stub_address) << ": ";
-            if (!is_psp_sdk_stub(symbol)) {
-                throw std::runtime_error(
-                    "missing pspsdk stub for import symbol: " +
-                    std::string(symbol));
+            if (symbol == "sceKernelCreateThread") {
+                // Route thread creation through create_guest_thread so the
+                // new thread's real native entry point is our own
+                // run_guest_thread<Slot> trampoline (which re-enters the
+                // translated interpreter), instead of forwarding the raw
+                // guest PC to the real SDK function. Without this, the OS
+                // would later jump directly into the untranslated original
+                // guest machine code for every spawned thread, bypassing
+                // psprecomp's C++ translation (and its virtual $gp/register
+                // state) entirely.
+                stream << "create_guest_thread(state); ";
+            } else {
+                if (!is_psp_sdk_stub(symbol)) {
+                    throw std::runtime_error(
+                        "missing pspsdk stub for import symbol: " +
+                        std::string(symbol));
+                }
+                stream << "refract::pspsdk::" << symbol << "(state); ";
             }
-            stream << "refract::pspsdk::" << symbol << "(state); ";
             stream << "state.pc = state.gpr[31]; return true;\n";
         }
         stream << "  default: return false;\n"
@@ -2017,6 +2052,9 @@ void emit_project(const ElfImage& image, const std::filesystem::path& directory,
                "  state.gpr[31] = return_address;\n"
                "  psprecomp::platform::configure_runtime("
                "memory, embedded_image_size, base);\n"
+               "  state.gpr[28] = psprecomp::platform::guest_gp_value();\n"
+               "  { const std::uint32_t real_gp = state.gpr[28];"
+               " asm volatile(\"move $gp, %0\" :: \"r\"(real_gp)); }\n"
                "  if (!psprecomp::platform::patch_imports(state)) "
                "return -3;\n"
                "  sceKernelPrintf(\"[psprecomp] entering module_start\\n\");\n"
@@ -2199,6 +2237,7 @@ void emit_project(const ElfImage& image, const std::filesystem::path& directory,
                "  state.gpr[31] = return_address;\n"
                "  psprecomp::platform::configure_runtime(memory.data(), "
                "memory.size(), guest_base);\n"
+               "  state.gpr[28] = psprecomp::platform::guest_gp_value();\n"
                "  if (!psprecomp::platform::patch_imports(state)) return 3;\n"
                "  std::fprintf(stderr, "
                "\"[psprecomp:macos] entering module_start\\n\");\n"
@@ -2315,7 +2354,8 @@ void emit_project(const ElfImage& image, const std::filesystem::path& directory,
                   "-lpspmpegbase -lpspatrac3 "
                   "-lpspsascore -lpspaudio -lpspctrl -lpspdisplay -lpspge "
                   "-lpsppower -lpspusb -lpspumd -lpspwlan "
-                  "-lpspnet_adhocctl -lpspnet_adhoc -lpspnet\n\n"
+                  "-lpspnet_adhocctl -lpspnet_adhocmatching -lpspnet_adhoc "
+                  "-lpspnet\n\n"
                   "include $(PSPSDK)/lib/build.mak\n\n"
                   "guest_image.o: guest_image.bin\n"
                   "\tbin2o -n -i -a 64 $< $@ guest_image\n\n"
