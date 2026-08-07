@@ -547,9 +547,6 @@ std::string emit_instruction(std::uint32_t pc, std::uint32_t instruction,
         case 0x13:
             out << "state.lo = " << reg(rs) << ";";
             break;
-        case 0x16:
-            out << reg(rd) << " = std::countl_zero(" << reg(rs) << ");";
-            break;
         case 0x18:
             out << "{ const auto product = static_cast<std::int64_t>(as_s32("
                 << reg(rs) << ")) * static_cast<std::int64_t>(as_s32("
@@ -576,7 +573,7 @@ std::string emit_instruction(std::uint32_t pc, std::uint32_t instruction,
                    "static_cast<std::uint32_t>(dividend); } "
                    "else if (static_cast<std::uint32_t>(dividend) == "
                    "0x80000000U && "
-                   "divisor == -1) { state.lo = 0x80000000U; state.hi = 0; } "
+                   "divisor == -1) { state.lo = 0x80000000U; state.hi = 0xffffffffU; } "
                    "else { "
                    "state.lo = static_cast<std::uint32_t>(dividend / divisor); "
                    "state.hi "
@@ -584,10 +581,31 @@ std::string emit_instruction(std::uint32_t pc, std::uint32_t instruction,
             break;
         case 0x1b:
             out << "{ const auto divisor = " << reg(rt)
-                << "; if (divisor == 0) { state.lo = 0xffffffffU; state.hi = "
-                << reg(rs) << "; } else { state.lo = " << reg(rs)
-                << " / divisor; state.hi = " << reg(rs) << " % divisor; } }";
+                << "; const auto dividend = " << reg(rs)
+                << "; if (divisor == 0) { state.lo = dividend <= 0xffffU ? 0xffffU : 0xffffffffU; state.hi = dividend; } else { state.lo = dividend / divisor; state.hi = dividend % divisor; } }";
             break;
+        case 0x1c: { // madd
+            out << "{ const auto product = static_cast<std::int64_t>(as_s32("
+                << reg(rs) << ")) * static_cast<std::int64_t>(as_s32("
+                << reg(rt)
+                << ")); const auto acc = static_cast<std::uint64_t>(state.lo) "
+                   "| (static_cast<std::uint64_t>(state.hi) << 32U); "
+                   "const auto result = static_cast<std::uint64_t>("
+                   "static_cast<std::int64_t>(acc) + product); "
+                   "state.lo = static_cast<std::uint32_t>(result); "
+                   "state.hi = static_cast<std::uint32_t>(result >> 32U); }";
+            break;
+        }
+        case 0x1d: { // maddu
+            out << "{ const auto product = static_cast<std::uint64_t>("
+                << reg(rs) << ") * static_cast<std::uint64_t>(" << reg(rt)
+                << "); const auto acc = static_cast<std::uint64_t>(state.lo) "
+                   "| (static_cast<std::uint64_t>(state.hi) << 32U); "
+                   "const auto result = acc + product; "
+                   "state.lo = static_cast<std::uint32_t>(result); "
+                   "state.hi = static_cast<std::uint32_t>(result >> 32U); }";
+            break;
+        }
         case 0x20:
         case 0x21:
             out << reg(rd) << " = " << reg(rs) << " + " << reg(rt) << ";";
@@ -615,14 +633,28 @@ std::string emit_instruction(std::uint32_t pc, std::uint32_t instruction,
         case 0x2b:
             out << reg(rd) << " = " << reg(rs) << " < " << reg(rt) << ";";
             break;
-        case 0x2c:
-            out << reg(rd) << " = as_s32(" << reg(rs) << ") > as_s32("
-                << reg(rt) << ") ? " << reg(rs) << " : " << reg(rt) << ";";
+        case 0x2e: { // msub
+            out << "{ const auto product = static_cast<std::int64_t>(as_s32("
+                << reg(rs) << ")) * static_cast<std::int64_t>(as_s32("
+                << reg(rt)
+                << ")); const auto acc = static_cast<std::uint64_t>(state.lo) "
+                   "| (static_cast<std::uint64_t>(state.hi) << 32U); "
+                   "const auto result = static_cast<std::uint64_t>("
+                   "static_cast<std::int64_t>(acc) - product); "
+                   "state.lo = static_cast<std::uint32_t>(result); "
+                   "state.hi = static_cast<std::uint32_t>(result >> 32U); }";
             break;
-        case 0x2d:
-            out << reg(rd) << " = as_s32(" << reg(rs) << ") < as_s32("
-                << reg(rt) << ") ? " << reg(rs) << " : " << reg(rt) << ";";
+        }
+        case 0x2f: { // msubu
+            out << "{ const auto product = static_cast<std::uint64_t>("
+                << reg(rs) << ") * static_cast<std::uint64_t>(" << reg(rt)
+                << "); const auto acc = static_cast<std::uint64_t>(state.lo) "
+                   "| (static_cast<std::uint64_t>(state.hi) << 32U); "
+                   "const auto result = acc - product; "
+                   "state.lo = static_cast<std::uint32_t>(result); "
+                   "state.hi = static_cast<std::uint32_t>(result >> 32U); }";
             break;
+        }
         default:
             return "/* unsupported/reserved PSP word */ "
                    "state.stop_reason = StopReason::invalid_pc;";
@@ -712,6 +744,27 @@ std::string emit_instruction(std::uint32_t pc, std::uint32_t instruction,
             << branch_target(pc, instruction, relocated)
             << "; } else { state.pc = state.memory_base + " << hex(pc + 8U)
             << "; }";
+        break;
+    case 0x1c:
+        switch (function) {
+        case 0x20: // clz
+            out << reg(rd) << " = std::countl_zero(" << reg(rs) << ");";
+            break;
+        case 0x21: // clo
+            out << reg(rd) << " = std::countl_one(" << reg(rs) << ");";
+            break;
+        case 0x2c: // max
+            out << reg(rd) << " = as_s32(" << reg(rs) << ") > as_s32("
+                << reg(rt) << ") ? " << reg(rs) << " : " << reg(rt) << ";";
+            break;
+        case 0x2d: // min
+            out << reg(rd) << " = as_s32(" << reg(rs) << ") < as_s32("
+                << reg(rt) << ") ? " << reg(rs) << " : " << reg(rt) << ";";
+            break;
+        default:
+            return "/* unsupported/reserved PSP word */ "
+                   "state.stop_reason = StopReason::invalid_pc;";
+        }
         break;
     case 0x08:
     case 0x09:
@@ -920,6 +973,15 @@ std::string emit_instruction(std::uint32_t pc, std::uint32_t instruction,
     case 0x2f:
         out << "/* cache: no generated-runtime cache */";
         break;
+    case 0x30: // ll - load linked (treat as lw on PSP user-mode)
+        out << reg(rt) << " = PSPRECOMP_LOAD32(state, " << reg(rs)
+            << signed_imm(instruction, relocated) << ");";
+        break;
+    case 0x38: // sc - store conditional (always succeeds on PSP user-mode)
+        out << "PSPRECOMP_STORE32(state, " << reg(rs)
+            << signed_imm(instruction, relocated) << ", " << reg(rt) << "); "
+            << reg(rt) << " = 1U;";
+        break;
     case 0x31:
         out << "state.fpr[" << rt << "] = PSPRECOMP_LOAD32(state, " << reg(rs)
             << signed_imm(instruction, relocated) << ");";
@@ -930,6 +992,23 @@ std::string emit_instruction(std::uint32_t pc, std::uint32_t instruction,
             << "]);";
         break;
     case 0x1f: {
+        if (function == 0x20 && shift == 0x14) {
+            // bitrev
+            out << reg(rd) << " = reverse_bits(" << reg(rt) << ");";
+            break;
+        }
+        if (function == 0x20 && shift == 0x02) {
+            // wsbh - swap bytes within halfwords
+            out << reg(rd) << " = ((" << reg(rt)
+                << " & 0xff00ff00U) >> 8U) | ((" << reg(rt)
+                << " & 0x00ff00ffU) << 8U);";
+            break;
+        }
+        if (function == 0x20 && shift == 0x03) {
+            // wsbw - full byte swap
+            out << reg(rd) << " = byte_swap(" << reg(rt) << ");";
+            break;
+        }
         if (function == 0x20 && shift == 0x10) {
             out << reg(rd)
                 << " = static_cast<std::uint32_t>(static_cast<std::int32_t>("

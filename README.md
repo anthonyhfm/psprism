@@ -86,7 +86,7 @@ For native execution on host platforms, `psprism` implements native host bridges
 
 ### 1. Build psprism
 ```bash
-git clone https://github.com/anthonyhfm/psp-recomp.git psprism
+git clone https://github.com/anthonyhfm/psprism.git
 cd psprism
 
 cmake -S . -B build
@@ -95,7 +95,7 @@ cmake --build build -j
 
 ### 2. Recompile a PSP Executable
 ```bash
-./build/psprecomp game.iso
+./build/psprism game.iso
 ```
 The interactive wizard parses executable relocations, extracts disc assets, and generates a standalone C++ CMake project.
 

@@ -115,7 +115,7 @@ inline bool interpret_allegrex(State& state, std::uint32_t current_pc) {
             } else if (left == std::numeric_limits<std::int32_t>::min() &&
                        right == -1) {
                 state.lo = static_cast<std::uint32_t>(left);
-                state.hi = 0;
+                state.hi = 0xffffffffU;
             } else {
                 state.lo = static_cast<std::uint32_t>(left / right);
                 state.hi = static_cast<std::uint32_t>(left % right);
@@ -124,13 +124,55 @@ inline bool interpret_allegrex(State& state, std::uint32_t current_pc) {
         }
         case 0x1b:
             if (state.gpr[rt] == 0U) {
-                state.lo = 0xffffffffU;
+                state.lo = state.gpr[rs] <= 0xffffU ? 0xffffU : 0xffffffffU;
                 state.hi = state.gpr[rs];
             } else {
                 state.lo = state.gpr[rs] / state.gpr[rt];
                 state.hi = state.gpr[rs] % state.gpr[rt];
             }
             break;
+        case 0x1c: { // madd
+            const auto product = static_cast<std::int64_t>(as_s32(state.gpr[rs])) *
+                                 static_cast<std::int64_t>(as_s32(state.gpr[rt]));
+            const auto acc = static_cast<std::uint64_t>(state.lo) |
+                             (static_cast<std::uint64_t>(state.hi) << 32U);
+            const auto result = static_cast<std::uint64_t>(
+                static_cast<std::int64_t>(acc) + product);
+            state.lo = static_cast<std::uint32_t>(result);
+            state.hi = static_cast<std::uint32_t>(result >> 32U);
+            break;
+        }
+        case 0x1d: { // maddu
+            const auto product = static_cast<std::uint64_t>(state.gpr[rs]) *
+                                 static_cast<std::uint64_t>(state.gpr[rt]);
+            const auto acc = static_cast<std::uint64_t>(state.lo) |
+                             (static_cast<std::uint64_t>(state.hi) << 32U);
+            const auto result = acc + product;
+            state.lo = static_cast<std::uint32_t>(result);
+            state.hi = static_cast<std::uint32_t>(result >> 32U);
+            break;
+        }
+        case 0x2e: { // msub
+            const auto product = static_cast<std::int64_t>(as_s32(state.gpr[rs])) *
+                                 static_cast<std::int64_t>(as_s32(state.gpr[rt]));
+            const auto acc = static_cast<std::uint64_t>(state.lo) |
+                             (static_cast<std::uint64_t>(state.hi) << 32U);
+            const auto result = static_cast<std::uint64_t>(
+                static_cast<std::int64_t>(acc) - product);
+            state.lo = static_cast<std::uint32_t>(result);
+            state.hi = static_cast<std::uint32_t>(result >> 32U);
+            break;
+        }
+        case 0x2f: { // msubu
+            const auto product = static_cast<std::uint64_t>(state.gpr[rs]) *
+                                 static_cast<std::uint64_t>(state.gpr[rt]);
+            const auto acc = static_cast<std::uint64_t>(state.lo) |
+                             (static_cast<std::uint64_t>(state.hi) << 32U);
+            const auto result = acc - product;
+            state.lo = static_cast<std::uint32_t>(result);
+            state.hi = static_cast<std::uint32_t>(result >> 32U);
+            break;
+        }
         case 0x20:
         case 0x21: state.gpr[rd] = state.gpr[rs] + state.gpr[rt]; break;
         case 0x22:
@@ -254,6 +296,7 @@ inline bool interpret_allegrex(State& state, std::uint32_t current_pc) {
     case 0x17: branch(as_s32(state.gpr[rs]) > 0, true); break;
     case 0x1c:
         if (function == 0x20) state.gpr[rd] = std::countl_zero(state.gpr[rs]);
+        else if (function == 0x21) state.gpr[rd] = std::countl_one(state.gpr[rs]);
         else if (function == 0x2c)
             state.gpr[rd] = as_s32(state.gpr[rs]) > as_s32(state.gpr[rt])
                                 ? state.gpr[rs] : state.gpr[rt];
@@ -273,6 +316,16 @@ inline bool interpret_allegrex(State& state, std::uint32_t current_pc) {
             const auto positioned = mask << shift;
             state.gpr[rt] = (state.gpr[rt] & ~positioned) |
                             ((state.gpr[rs] << shift) & positioned);
+        } else if (function == 0x20 && shift == 0x14) {
+            // bitrev
+            state.gpr[rd] = reverse_bits(state.gpr[rt]);
+        } else if (function == 0x20 && shift == 0x02) {
+            // wsbh
+            state.gpr[rd] = ((state.gpr[rt] & 0xff00ff00U) >> 8U) |
+                            ((state.gpr[rt] & 0x00ff00ffU) << 8U);
+        } else if (function == 0x20 && shift == 0x03) {
+            // wsbw
+            state.gpr[rd] = byte_swap(state.gpr[rt]);
         } else if (function == 0x20 && shift == 0x10) {
             state.gpr[rd] = static_cast<std::uint32_t>(
                 static_cast<std::int32_t>(static_cast<std::int8_t>(state.gpr[rt])));
@@ -303,9 +356,11 @@ inline bool interpret_allegrex(State& state, std::uint32_t current_pc) {
     case 0x2e: store_word_right(state, address, state.gpr[rt]); break;
     case 0x2f:
     case 0x33: break;
-    case 0x30: state.gpr[rt] = PSPRECOMP_LOAD32(state, address); break;
+    case 0x30: // ll - load linked (treat as lw)
+        state.gpr[rt] = PSPRECOMP_LOAD32(state, address);
+        break;
     case 0x31: state.fpr[rt] = PSPRECOMP_LOAD32(state, address); break;
-    case 0x38:
+    case 0x38: // sc - store conditional (always succeeds)
         PSPRECOMP_STORE32(state, address, state.gpr[rt]);
         state.gpr[rt] = 1U;
         break;

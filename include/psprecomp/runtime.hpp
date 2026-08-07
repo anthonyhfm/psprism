@@ -542,4 +542,19 @@ inline std::uint32_t rounded_word(float value, std::uint32_t mode) {
     return static_cast<std::uint32_t>(static_cast<std::int32_t>(rounded));
 }
 
+inline std::uint32_t reverse_bits(std::uint32_t value) {
+    value = ((value & 0x55555555U) << 1U) | ((value & 0xAAAAAAAAU) >> 1U);
+    value = ((value & 0x33333333U) << 2U) | ((value & 0xCCCCCCCCU) >> 2U);
+    value = ((value & 0x0F0F0F0FU) << 4U) | ((value & 0xF0F0F0F0U) >> 4U);
+    value = ((value & 0x00FF00FFU) << 8U) | ((value & 0xFF00FF00U) >> 8U);
+    return (value << 16U) | (value >> 16U);
+}
+
+inline std::uint32_t byte_swap(std::uint32_t value) {
+    return ((value & 0x000000FFU) << 24U) |
+           ((value & 0x0000FF00U) << 8U)  |
+           ((value & 0x00FF0000U) >> 8U)  |
+           ((value & 0xFF000000U) >> 24U);
+}
+
 } // namespace psprecomp
