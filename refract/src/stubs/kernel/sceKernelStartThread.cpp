@@ -28,26 +28,12 @@ void sceKernelStartThread(Implementation& implementation, psprecomp::State& stat
   thread->state->gpr[26] = thread->tls_address;
   thread->state->gpr[27] = thread->tls_address + 0x80U;
   thread->state->gpr[29] = thread->stack_address + thread->stack_size - 64U;
-  bool argument_on_guest_stack = false;
   if (argument_size != 0) {
-    std::lock_guard lock(implementation.objects_mutex);
-    const auto argument_end =
-        static_cast<std::uint64_t>(argument_pointer) + argument_size;
-    for (const auto& [uid, candidate] : implementation.threads) {
-      (void)uid;
-      if (candidate.get() == thread.get())
-        continue;
-      const auto stack_end = static_cast<std::uint64_t>(candidate->stack_address) +
-                             candidate->stack_size;
-      if (argument_pointer >= candidate->stack_address &&
-          argument_end <= stack_end) {
-        argument_on_guest_stack = true;
-        break;
-      }
-    }
-  }
-  if (argument_on_guest_stack) {
     const auto copied_size = (argument_size + 15U) & ~15U;
+    if (copied_size > thread->stack_size - 64U) {
+      state.gpr[2] = unimplemented;
+      return;
+    }
     const auto copied_argument_pointer =
         thread->stack_address + thread->stack_size - copied_size;
     const auto* source =
@@ -58,19 +44,18 @@ void sceKernelStartThread(Implementation& implementation, psprecomp::State& stat
       state.gpr[2] = unimplemented;
       return;
     }
-    std::memcpy(destination, source, argument_size);
+    std::memmove(destination, source, argument_size);
     thread->state->gpr[5] = copied_argument_pointer;
     thread->state->gpr[29] = copied_argument_pointer - 64U;
   }
   thread->state->gpr[31] = return_address;
-  const auto executor = implementation.configuration.guest_executor;
   const auto verbose = implementation.verbose;
-  thread->host_thread = std::thread([thread, executor, verbose] {
+  thread->host_thread = std::thread([thread, verbose, &implementation] {
     current_thread_id = thread->uid;
     if (verbose)
       std::fprintf(stderr, "[psprism:thread] start uid=%d name=%s\n",
                    thread->uid, thread->name.c_str());
-    executor(*thread->state);
+    execute_guest(implementation, *thread->state);
     thread->result = static_cast<std::int32_t>(thread->state->gpr[2]);
     thread->finished = true;
     if (verbose) {

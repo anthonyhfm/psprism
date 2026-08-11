@@ -35,6 +35,11 @@ if(BUILD_TESTING)
     target_link_libraries(iso_tests PRIVATE ${CMAKE_DL_LIBS})
     add_test(NAME iso_tests COMMAND iso_tests)
 
+    add_executable(elf_tests tests/elf_tests.cpp src/elf.cpp)
+    target_include_directories(elf_tests PRIVATE src)
+    target_compile_options(elf_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+    add_test(NAME elf_tests COMMAND elf_tests)
+
     add_executable(refract_utility_tests
         tests/refract_utility_tests.cpp
         refract/src/utility_data.cpp)

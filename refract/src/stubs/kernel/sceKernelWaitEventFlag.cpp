@@ -16,15 +16,20 @@ void sceKernelWaitEventFlag(Implementation& implementation, psprecomp::State& st
                             : (event->bits & pattern) == pattern;
   };
   std::unique_lock lock(event->mutex);
-  event->changed.wait(
-      lock, [&] { return matched() || implementation.exit_requested; });
-  const auto observed = event->bits;
+  std::uint32_t observed{};
+  {
+    GuestExecutionPause pause(implementation);
+    event->changed.wait(
+        lock, [&] { return matched() || implementation.exit_requested; });
+    observed = event->bits;
+    if ((mode & 0x20U) != 0)
+      event->bits = 0;
+    else if ((mode & 0x10U) != 0)
+      event->bits &= ~pattern;
+    lock.unlock();
+  }
   if (auto* output = guest_pointer<std::uint32_t>(state, state.gpr[7]))
     *output = observed;
-  if ((mode & 0x20U) != 0)
-    event->bits = 0;
-  else if ((mode & 0x10U) != 0)
-    event->bits &= ~pattern;
   state.gpr[2] = 0;
   return;
 #else

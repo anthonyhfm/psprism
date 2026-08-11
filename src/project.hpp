@@ -16,6 +16,7 @@ struct SourceInfo {
   std::string suggested_display_name;
   std::string disc_id;
   std::string executable_path;
+  std::string sfo_path;
   bool executable_encrypted{};
   std::size_t disc_entries{};
 };

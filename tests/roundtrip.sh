@@ -8,7 +8,15 @@ PSP_GXX=$4
 HOST_CXX=$5
 SOURCE_DIR=$6
 ROUNDTRIP_TMP=$(mktemp -d "${TMPDIR:-/tmp}/psprecomp-roundtrip.XXXXXX")
-trap 'rm -rf "$ROUNDTRIP_TMP"' EXIT HUP INT TERM
+PPSSPP_PID=
+cleanup() {
+    if [ -n "$PPSSPP_PID" ]; then
+        kill "$PPSSPP_PID" 2>/dev/null || true
+        wait "$PPSSPP_PID" 2>/dev/null || true
+    fi
+    rm -rf "$ROUNDTRIP_TMP"
+}
+trap cleanup EXIT HUP INT TERM
 
 "$PSP_GCC" -O1 -G0 -mno-abicalls -fno-pic -c \
     "$SOURCE_DIR/tests/fixtures/arithmetic.c" -o "$ROUNDTRIP_TMP/arithmetic.o"
@@ -144,4 +152,158 @@ test -s "$ROUNDTRIP_TMP/exported/src/generated/EBOOT.PBP"
 if [ "$(uname -s)" = Darwin ]; then
     make -C "$ROUNDTRIP_TMP/exported" macos
     test -x "$ROUNDTRIP_TMP/exported/build/macos/roundtrip_export.app/Contents/MacOS/roundtrip_export"
+fi
+
+# Exercise the native PSP bridge used for relocatable retail-style PRX files.
+# This path embeds the original Allegrex image, applies its loader relocations,
+# reconstructs the import tables, and enters module_start without translating
+# the CPU instructions through C++ first.
+PSP_SDK_DIR=$("$PSP_BIN_DIR/psp-config" --pspsdk-path)
+"$PSP_GCC" -O1 -G0 -D_PSP_FW_VERSION=600 -I"$PSP_SDK_DIR/include" -c \
+    "$SOURCE_DIR/tests/fixtures/relocatable_prx.c" \
+    -o "$ROUNDTRIP_TMP/relocatable-fixture.o"
+"$PSP_GCC" -L"$PSP_SDK_DIR/../lib" -L"$PSP_SDK_DIR/lib" \
+    -specs="$PSP_SDK_DIR/lib/prxspecs" -Wl,-q \
+    -T"$PSP_SDK_DIR/lib/linkfile.prx" \
+    "$ROUNDTRIP_TMP/relocatable-fixture.o" \
+    "$PSP_SDK_DIR/lib/prxexports.o" -lpspdebug -lpspkernel \
+    -o "$ROUNDTRIP_TMP/relocatable-fixture.elf"
+"$PSP_BIN_DIR/psp-fixup-imports" \
+    "$ROUNDTRIP_TMP/relocatable-fixture.elf"
+"$PSP_BIN_DIR/psp-prxgen" "$ROUNDTRIP_TMP/relocatable-fixture.elf" \
+    "$ROUNDTRIP_TMP/relocatable-fixture.prx"
+"$PSP_BIN_DIR/psp-nm" -n --defined-only \
+    "$ROUNDTRIP_TMP/relocatable-fixture.elf" | \
+    awk '$2 == "T" || $2 == "t" { print "function 0x" $1 " " $3 }' \
+    > "$ROUNDTRIP_TMP/relocatable.map"
+overlay_address=$("$PSP_BIN_DIR/psp-nm" \
+    "$ROUNDTRIP_TMP/relocatable-fixture.elf" | \
+    awk '$3 == "overlay_target" { print $1 }')
+callee_address=$("$PSP_BIN_DIR/psp-nm" \
+    "$ROUNDTRIP_TMP/relocatable-fixture.elf" | \
+    awk '$3 == "unchanged_callee" { print $1 }')
+test -n "$overlay_address"
+test -n "$callee_address"
+overlay_resume=$("$PSP_BIN_DIR/psp-objdump" -d \
+    "$ROUNDTRIP_TMP/relocatable-fixture.elf" | \
+    awk '/<overlay_target>:/ { in_overlay = 1; next }
+         in_overlay && /jal.*<unchanged_callee>/ {
+             sub(":", "", $1)
+             printf "%08x", ("0x" $1) + 8
+             exit
+         }
+         in_overlay && /^$/ { in_overlay = 0 }')
+test -n "$overlay_resume"
+printf 'overlay 0x%s\n' "$overlay_address" \
+    >> "$ROUNDTRIP_TMP/relocatable.map"
+"$RECOMPILER" init "$ROUNDTRIP_TMP/relocatable-fixture.prx" \
+    --display-name "Relocatable Fixture" \
+    --project-name relocatable_fixture \
+    --output "$ROUNDTRIP_TMP/relocatable-exported" \
+    --code-map "$ROUNDTRIP_TMP/relocatable.map" \
+    --yes
+overlay_source="$ROUNDTRIP_TMP/relocatable-exported/src/generated/func_${overlay_address}.cpp"
+test -s "$overlay_source"
+grep -q 'state[.]gpr\[2\] = state[.]gpr\[2\] + 0x00000007U;' \
+    "$overlay_source"
+sed 's/+ 0x00000007U;/+ 0x00000064U;/' "$overlay_source" \
+    > "$ROUNDTRIP_TMP/modified-overlay.cpp"
+mv "$ROUNDTRIP_TMP/modified-overlay.cpp" "$overlay_source"
+grep -q 'state[.]gpr\[2\] = state[.]gpr\[2\] + 0x00000064U;' \
+    "$overlay_source"
+"$HOST_CXX" -std=c++20 -O2 -I"$SOURCE_DIR/include" \
+    -I"$ROUNDTRIP_TMP/relocatable-exported/src/generated" \
+    -DPSPRECOMP_PSP_OVERLAY \
+    -DPSPRECOMP_OVERLAY_FUNCTION=run_function_${overlay_address} \
+    -DPSPRECOMP_OVERLAY_START=0x${overlay_address}U \
+    -DPSPRECOMP_OVERLAY_CALLEE=0x${callee_address}U \
+    -DPSPRECOMP_OVERLAY_RESUME=0x${overlay_resume}U \
+    "$overlay_source" "$SOURCE_DIR/tests/overlay_runner.cpp" \
+    -o "$ROUNDTRIP_TMP/overlay-runner"
+"$ROUNDTRIP_TMP/overlay-runner"
+grep -q '^OBJS = .*overlay[.]o .*psp_overlays[.]o .*native_guest_image[.]o' \
+    "$ROUNDTRIP_TMP/relocatable-exported/src/generated/Makefile"
+grep -q 'apply_compact_psp_relocations' \
+    "$ROUNDTRIP_TMP/relocatable-exported/platform/psp/main.cpp"
+grep -q 'native_guest_image_start' \
+    "$ROUNDTRIP_TMP/relocatable-exported/platform/psp/main.cpp"
+grep -q 'psprecomp_install_overlays' \
+    "$ROUNDTRIP_TMP/relocatable-exported/platform/psp/main.cpp"
+grep -q 'mfvc.*[$]128' \
+    "$ROUNDTRIP_TMP/relocatable-exported/src/generated/psp_overlays.S"
+grep -q '^psprecomp_overlay_stub_1:' \
+    "$ROUNDTRIP_TMP/relocatable-exported/src/generated/psp_overlays.S"
+grep -Fq 'addiu $k0, $zero, 1' \
+    "$ROUNDTRIP_TMP/relocatable-exported/src/generated/psp_overlays.S"
+grep -Fq 'sw $gp, 112($sp)' \
+    "$ROUNDTRIP_TMP/relocatable-exported/src/generated/psp_overlays.S"
+grep -Fq 'lw $gp, 112($sp)' \
+    "$ROUNDTRIP_TMP/relocatable-exported/src/generated/psp_overlays.S"
+grep -Fq 'mfhi $k0' \
+    "$ROUNDTRIP_TMP/relocatable-exported/src/generated/psp_overlays.S"
+grep -Fq 'mthi $k0' \
+    "$ROUNDTRIP_TMP/relocatable-exported/src/generated/psp_overlays.S"
+grep -Fq 'swc1 $f0, 136($sp)' \
+    "$ROUNDTRIP_TMP/relocatable-exported/src/generated/psp_overlays.S"
+grep -Fq 'lwc1 $f31, 260($sp)' \
+    "$ROUNDTRIP_TMP/relocatable-exported/src/generated/psp_overlays.S"
+grep -Fq 'sv.q C000, 272($sp)' \
+    "$ROUNDTRIP_TMP/relocatable-exported/src/generated/psp_overlays.S"
+grep -Fq 'lv.q C730, 768($sp)' \
+    "$ROUNDTRIP_TMP/relocatable-exported/src/generated/psp_overlays.S"
+grep -Fq 'mtvc $k0, $143' \
+    "$ROUNDTRIP_TMP/relocatable-exported/src/generated/psp_overlays.S"
+grep -q -- '-DPSPRECOMP_PSP_OVERLAY' \
+    "$ROUNDTRIP_TMP/relocatable-exported/src/generated/Makefile"
+test "$(wc -c < "$ROUNDTRIP_TMP/relocatable-exported/src/generated/native_guest_image.bin")" \
+    = "$(wc -c < "$ROUNDTRIP_TMP/relocatable-exported/src/generated/guest_image.bin")"
+make -C "$ROUNDTRIP_TMP/relocatable-exported" psp -j2
+test -s "$ROUNDTRIP_TMP/relocatable-exported/src/generated/relocatable_fixture.prx"
+overlay_native_address=$("$PSP_BIN_DIR/psp-nm" \
+    "$ROUNDTRIP_TMP/relocatable-exported/src/generated/relocatable_fixture.elf" | \
+    awk -v target="run_function_${overlay_address}" \
+    '$3 ~ target { print $1; exit }')
+overlay_native_size=$("$PSP_BIN_DIR/psp-nm" -S \
+    "$ROUNDTRIP_TMP/relocatable-exported/src/generated/relocatable_fixture.elf" | \
+    awk -v target="run_function_${overlay_address}" \
+    '$4 ~ target { print $2; exit }')
+test -n "$overlay_native_address"
+test -n "$overlay_native_size"
+overlay_native_end=$(printf '%x' \
+    "$((0x$overlay_native_address + 0x$overlay_native_size))")
+"$PSP_BIN_DIR/psp-objdump" -d \
+    --start-address="0x$overlay_native_address" \
+    --stop-address="0x$overlay_native_end" \
+    "$ROUNDTRIP_TMP/relocatable-exported/src/generated/relocatable_fixture.prx" | \
+    grep -q 'addiu.*100'
+
+# When PPSSPP is installed, execute the generated PRX as part of the
+# regression. The expected 124 crosses both directions of the hybrid bridge:
+# translated 8 -> unchanged Allegrex callee (24) -> translated +100.
+if command -v PPSSPPSDL >/dev/null 2>&1; then
+    ppsspp_log="$ROUNDTRIP_TMP/ppsspp-overlay.log"
+    PPSSPPSDL -i --windowed \
+        "$ROUNDTRIP_TMP/relocatable-exported/src/generated/EBOOT.PBP" \
+        >"$ppsspp_log" 2>&1 &
+    PPSSPP_PID=$!
+    overlay_executed=false
+    attempt=0
+    while [ "$attempt" -lt 100 ]; do
+        if grep -q 'PSPRECOMP_OVERLAY_RESULT=124' "$ppsspp_log"; then
+            overlay_executed=true
+            break
+        fi
+        if ! kill -0 "$PPSSPP_PID" 2>/dev/null; then
+            break
+        fi
+        attempt=$((attempt + 1))
+        sleep 0.1
+    done
+    kill "$PPSSPP_PID" 2>/dev/null || true
+    wait "$PPSSPP_PID" 2>/dev/null || true
+    PPSSPP_PID=
+    if [ "$overlay_executed" != true ]; then
+        tail -100 "$ppsspp_log" >&2
+        exit 1
+    fi
 fi

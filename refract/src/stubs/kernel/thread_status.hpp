@@ -14,13 +14,15 @@ struct Snapshot {
 };
 
 inline std::mutex& mutex() {
-  static std::mutex value;
-  return value;
+  // Guest threads are joined from Runtime's static destructor.  Keep this
+  // bookkeeping alive until process teardown has fully stopped those threads.
+  static auto* value = new std::mutex;
+  return *value;
 }
 
 inline std::unordered_map<int, Snapshot>& snapshots() {
-  static std::unordered_map<int, Snapshot> value;
-  return value;
+  static auto* value = new std::unordered_map<int, Snapshot>;
+  return *value;
 }
 
 inline void set_running(int uid) {

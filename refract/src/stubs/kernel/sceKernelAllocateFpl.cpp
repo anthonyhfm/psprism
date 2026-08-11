@@ -10,13 +10,20 @@ void sceKernelAllocateFpl(Implementation& implementation, psprecomp::State& stat
     pool = found->second;
   }
   std::unique_lock lock(pool->mutex);
-  pool->changed.wait(lock, [&] {
-    return !pool->available.empty() || implementation.exit_requested;
-  });
-  if (pool->available.empty())
+  std::uint32_t address{};
+  {
+    GuestExecutionPause pause(implementation);
+    pool->changed.wait(lock, [&] {
+      return !pool->available.empty() || implementation.exit_requested;
+    });
+    if (!pool->available.empty()) {
+      address = pool->available.back();
+      pool->available.pop_back();
+    }
+    lock.unlock();
+  }
+  if (address == 0U)
     return;
-  const auto address = pool->available.back();
-  pool->available.pop_back();
   if (auto* output = guest_pointer<std::uint32_t>(state, state.gpr[5]))
     *output = address;
   state.gpr[2] = 0;

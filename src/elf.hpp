@@ -32,6 +32,7 @@ struct Import {
     std::string library;
     std::uint32_t nid{};
     std::uint32_t stub_address{};
+    std::uint32_t library_flags{};
 };
 
 struct ElfImage {
@@ -45,6 +46,10 @@ struct ElfImage {
     // 0xffffffffU means "not found" (module lacks the header, or is too
     // small); callers must treat that as "no $gp initialization available".
     std::uint32_t gp_pointer_offset{0xffffffffU};
+    // Base-relative value installed into gp_pointer_offset by the PRX
+    // relocation stream. This is also the module $gp PSP must assign to
+    // native guest threads and callbacks.
+    std::uint32_t gp_value_offset{};
     std::vector<ExecutableSection> executable_sections;
     std::vector<LoadSegment> load_segments;
     std::vector<Relocation> relocations;
@@ -68,6 +73,10 @@ struct CodeMap {
     std::uint32_t entry{};
     std::vector<std::uint32_t> function_starts;
     std::vector<FunctionSymbol> function_symbols;
+    // Functions selected for the PSP hybrid overlay path. Their translated
+    // func_*.cpp bodies are compiled for Allegrex and detour only these entry
+    // points; every other function continues to execute from the Guest image.
+    std::vector<std::uint32_t> overlay_starts;
     std::vector<AddressRange> excluded_ranges;
 
     [[nodiscard]] bool contains(std::uint32_t address) const;

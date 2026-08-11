@@ -27,7 +27,12 @@ void sceKernelAllocateVplCB(Implementation& implementation, psprecomp::State& st
   };
   auto address = allocate();
   while (address == 0 && !implementation.exit_requested) {
-    pool->changed.wait(lock);
+    {
+      GuestExecutionPause pause(implementation);
+      pool->changed.wait(lock);
+      lock.unlock();
+    }
+    lock.lock();
     address = allocate();
   }
   if (address == 0) {

@@ -41,8 +41,8 @@ inline constexpr bool vfpu_opcode_supported(std::uint32_t instruction) {
         const auto group = (instruction >> 21U) & 31U;
         const auto type = (instruction >> 16U) & 31U;
         if (group == 0) {
-            return type == 0 || type == 1 || type == 2 || type == 4 ||
-                   type == 5 || type == 6 ||
+            return type == 0 || type == 1 || type == 2 || type == 3 ||
+                   type == 4 || type == 5 || type == 6 ||
                    type == 7 || (type >= 16 && type <= 26);
         }
         if (group == 1) {
@@ -499,6 +499,21 @@ inline void execute_vfpu(State& state, std::uint32_t instruction,
     } else if (op == 0x34) {
         const auto group = (instruction >> 21U) & 31U;
         const auto type = (instruction >> 16U) & 31U;
+        if (group == 0 && type == 3) {
+            const auto offset_mask = size >= 3 ? 3U : 1U;
+            const auto identity_lane = vd & offset_mask;
+            for (int i = 0; i < size; ++i) {
+                result[i] = static_cast<std::uint32_t>(i) == identity_lane
+                                ? 1.0F
+                                : 0.0F;
+                if ((state.vfpu_ctrl[0] & (1U << (16 + i))) != 0U)
+                    result[i] = -result[i];
+            }
+            vfpu_apply_destination_prefix(state, result, size);
+            vfpu_write_vector(state, vd, size, result);
+            vfpu_eat_prefixes(state);
+            return;
+        }
         if (group == 3 && type <= 19) {
             constexpr std::array<float, 20> constants = {
                 0.0F,

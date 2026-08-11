@@ -37,6 +37,8 @@ struct State {
     std::size_t scratchpad_size{};
     std::uint8_t* video_memory{};
     std::size_t video_memory_size{};
+    std::uint8_t* volatile_memory{};
+    std::size_t volatile_memory_size{};
     // PSP-native builds may access real user/VRAM addresses returned by the
     // firmware in addition to the relocated module image.
     bool direct_memory_access{};
@@ -77,6 +79,10 @@ inline std::uint8_t* mapped_address(const State& state, std::uint32_t address,
     if (state.video_memory != nullptr &&
         within(address, 0x04000000U, state.video_memory_size)) {
         return state.video_memory + address - 0x04000000U;
+    }
+    if (state.volatile_memory != nullptr &&
+        within(address, 0x08400000U, state.volatile_memory_size)) {
+        return state.volatile_memory + address - 0x08400000U;
     }
     return nullptr;
 }

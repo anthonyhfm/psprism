@@ -2,9 +2,16 @@
 
 void sceKernelDelayThread(Implementation& implementation, psprecomp::State& state) {
 #if !defined(__PSP__)
-  (void)implementation;
+  static thread_local std::uint32_t logged_delays{};
+  if (implementation.verbose && logged_delays++ < 8U) {
+    std::fprintf(stderr, "[psprism:thread] delay thread=%d usec=%u\n",
+                 current_thread_id, state.gpr[4]);
+  }
   thread_status::ScopedWait delay_status(current_thread_id, 2, 0);
-  host::sleep_microseconds(state.gpr[4]);
+  {
+    GuestExecutionPause pause(implementation);
+    host::sleep_microseconds(state.gpr[4]);
+  }
   state.gpr[2] = 0;
   return;
 #else

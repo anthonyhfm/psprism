@@ -8,6 +8,12 @@ void sceKernelCreateSema(Implementation& implementation, psprecomp::State& state
   std::lock_guard lock(implementation.objects_mutex);
   const auto uid = implementation.allocate_uid();
   implementation.semaphores.emplace(uid, semaphore);
+  if (implementation.verbose) {
+    std::fprintf(stderr,
+                 "[psprism:sema] create uid=%d name=%s count=%d max=%d\n",
+                 uid, semaphore->name.c_str(), semaphore->count,
+                 semaphore->maximum);
+  }
   state.gpr[2] = static_cast<std::uint32_t>(uid);
   return;
 #else

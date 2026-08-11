@@ -18,10 +18,8 @@ void sceKernelLockMutex(Implementation& implementation, psprecomp::State& state)
   const auto available = [&] {
     return mutex->lock_count == 0 || mutex->owner_thread_id == current_thread_id;
   };
-  if (state.gpr[6] == 0) {
-    mutex->changed.wait(lock, available);
-  } else {
-    std::uint32_t timeout_microseconds = 0;
+  std::uint32_t timeout_microseconds = 0;
+  if (state.gpr[6] != 0) {
     const auto* timeout = psprecomp::mapped_address(
         state, state.gpr[6], sizeof(timeout_microseconds));
     if (timeout == nullptr) {
@@ -29,15 +27,23 @@ void sceKernelLockMutex(Implementation& implementation, psprecomp::State& state)
       return;
     }
     std::memcpy(&timeout_microseconds, timeout, sizeof(timeout_microseconds));
-    if (!mutex->changed.wait_for(
-            lock, std::chrono::microseconds(timeout_microseconds), available)) {
-      state.gpr[2] = wait_timeout;
-      return;
-    }
   }
-  mutex->owner_thread_id = current_thread_id;
-  mutex->lock_count += static_cast<int>(state.gpr[5] ? state.gpr[5] : 1);
-  state.gpr[2] = 0;
+  bool acquired = true;
+  {
+    GuestExecutionPause pause(implementation);
+    if (state.gpr[6] == 0) {
+      mutex->changed.wait(lock, available);
+    } else {
+      acquired = mutex->changed.wait_for(
+          lock, std::chrono::microseconds(timeout_microseconds), available);
+    }
+    if (acquired) {
+      mutex->owner_thread_id = current_thread_id;
+      mutex->lock_count += static_cast<int>(state.gpr[5] ? state.gpr[5] : 1);
+    }
+    lock.unlock();
+  }
+  state.gpr[2] = acquired ? 0U : wait_timeout;
   return;
 #else
   (void)implementation;

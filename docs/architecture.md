@@ -67,6 +67,17 @@ file. A comment directly above its definition records the original PSP binary
 range. This keeps the physical source layout aligned with the semantic function
 layout and makes individual functions easy to inspect or replace.
 
+For relocatable PSP PRX output, the compatibility baseline runs the unchanged
+Guest Allegrex image directly. Code-map `overlay` entries form a hybrid layer:
+only their edited `func_*.cpp` runners are compiled into the new PRX, and their
+Guest entries are patched to generated Allegrex trampolines after relocation.
+The trampolines preserve the Guest integer, GP, HI/LO, FPU and, when used,
+VFPU state. A translated call into an unselected function restores that state,
+runs the original Allegrex callee, and returns through an address-derived
+continuation trampoline into the translated caller. Normal returns resume the
+original caller. This keeps unmodified game logic byte-native while making
+selected generated logic effective in PSP builds.
+
 Delay slots remain explicit. A control instruction records the pending target,
 the delay instruction executes, and only then does generated control flow apply
 the target. Branch-likely instructions annul the delay slot on the untaken path.

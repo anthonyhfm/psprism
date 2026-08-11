@@ -14,6 +14,15 @@ void sceKernelSignalSema(Implementation& implementation, psprecomp::State& state
     semaphore->count =
         std::min(semaphore->maximum,
                  semaphore->count + static_cast<int>(state.gpr[5]));
+    static thread_local std::uint32_t logged_signals{};
+    if (implementation.verbose &&
+        (logged_signals < 16U || (logged_signals & 0xffffU) == 0U)) {
+      std::fprintf(stderr,
+                   "[psprism:sema] signal thread=%d uid=%u add=%u count=%d\n",
+                   current_thread_id, state.gpr[4], state.gpr[5],
+                   semaphore->count);
+    }
+    ++logged_signals;
   }
   semaphore->changed.notify_all();
   state.gpr[2] = 0;

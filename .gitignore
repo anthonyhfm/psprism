@@ -42,3 +42,4 @@ generated_sources.cmake
 *.swp
 *~
 AGENTS.md
+/isos

@@ -2,6 +2,7 @@
 #include <refract/psp_sdk_stubs.hpp>
 
 #include "host/host.hpp"
+#include "stubs/io/io_state.hpp"
 #include "utility_data.hpp"
 
 #include <algorithm>
@@ -33,12 +34,20 @@ namespace {
 constexpr std::uint32_t unimplemented = 0x8002013aU;
 constexpr std::uint32_t io_error = 0x80010005U;
 constexpr std::uint32_t wait_timeout = 0x800201a8U;
+constexpr std::uint32_t semaphore_zero = 0x800201adU;
 constexpr std::uint32_t out_of_memory = 0x80020190U;
 constexpr std::uint32_t utility_busy = 0x80110001U;
 constexpr std::uint32_t utility_cancelled = 0x80110302U;
 constexpr std::uint32_t return_address = 0xfffffff0U;
+constexpr std::uint32_t initial_thread_stack_size = 0x40000U;
 
 thread_local int current_thread_id = 1;
+thread_local bool guest_execution_locked = false;
+// The PSP cannot context-switch normal guest threads while CPU interrupts are
+// suspended.  Keep the state with the host thread that owns each guest
+// context so import-boundary scheduling cannot split an interrupt-protected
+// critical section.
+thread_local bool guest_interrupts_enabled = true;
 
 std::uint32_t align_up(std::uint32_t value, std::uint32_t alignment) {
   return (value + alignment - 1U) & ~(alignment - 1U);
@@ -545,6 +554,18 @@ struct Runtime::Implementation {
     std::uint32_t common_argument{};
   };
 
+  struct GeCallback {
+    std::uint32_t signal_entry{};
+    std::uint32_t signal_argument{};
+    std::uint32_t finish_entry{};
+    std::uint32_t finish_argument{};
+  };
+
+  struct Module {
+    std::filesystem::path path;
+    bool started{};
+  };
+
   struct GraphicsState {
     std::mutex mutex;
     std::array<std::uint32_t, 256> commands{};
@@ -567,16 +588,25 @@ struct Runtime::Implementation {
   std::uint32_t memory_base{};
   std::vector<std::uint8_t> scratchpad;
   std::vector<std::uint8_t> video_memory;
+  std::vector<std::uint8_t> volatile_memory;
   Configuration configuration;
   std::unordered_set<std::string> warned;
   std::unordered_map<int, int> files;
-  std::unordered_map<int, std::uint64_t> file_bases;
+  std::unordered_map<int, io_state::FileView> file_views;
   std::unordered_map<int, std::int64_t> async_results;
   std::unordered_map<int, Directory> directories;
   std::filesystem::path current_directory;
   std::filesystem::path disc_image;
   std::unordered_map<std::string, std::uint32_t> disc_sectors;
   std::mutex objects_mutex;
+  // Allegrex user threads share one CPU.  Generated guest code therefore
+  // runs cooperatively under this lock and releases it only while an HLE call
+  // blocks, matching PSP scheduling instead of racing guest memory on several
+  // host cores.
+  std::mutex guest_execution_mutex;
+  std::condition_variable guest_execution_changed;
+  std::uint64_t next_guest_ticket{};
+  std::uint64_t serving_guest_ticket{};
   std::unordered_map<int, std::shared_ptr<GuestThread>> threads;
   std::unordered_map<int, std::shared_ptr<Semaphore>> semaphores;
   std::unordered_map<int, std::shared_ptr<Mutex>> mutexes;
@@ -585,6 +615,8 @@ struct Runtime::Implementation {
   std::unordered_map<int, std::shared_ptr<FixedPool>> fixed_pools;
   std::unordered_map<int, std::shared_ptr<VariablePool>> variable_pools;
   std::unordered_map<int, Callback> callbacks;
+  std::unordered_map<int, GeCallback> ge_callbacks;
+  std::unordered_map<int, Module> modules;
   int next_file{3};
   int next_uid{0x100};
   std::uint32_t heap_cursor{};
@@ -704,19 +736,130 @@ struct Runtime::Implementation {
 
 using Implementation = Runtime::Implementation;
 
+void acquire_guest_execution(Implementation& implementation) {
+  std::unique_lock lock(implementation.guest_execution_mutex);
+  const auto ticket = implementation.next_guest_ticket++;
+  implementation.guest_execution_changed.wait(
+      lock, [&] { return ticket == implementation.serving_guest_ticket; });
+  guest_execution_locked = true;
+}
+
+void release_guest_execution(Implementation& implementation) {
+  {
+    std::lock_guard lock(implementation.guest_execution_mutex);
+    guest_execution_locked = false;
+    ++implementation.serving_guest_ticket;
+  }
+  implementation.guest_execution_changed.notify_all();
+}
+
+struct GuestExecutionLock {
+  explicit GuestExecutionLock(Implementation& implementation)
+      : implementation_(implementation) {
+    acquire_guest_execution(implementation_);
+  }
+
+  ~GuestExecutionLock() { release_guest_execution(implementation_); }
+
+  GuestExecutionLock(const GuestExecutionLock&) = delete;
+  GuestExecutionLock& operator=(const GuestExecutionLock&) = delete;
+
+private:
+  Implementation& implementation_;
+};
+
+struct GuestExecutionPause {
+  explicit GuestExecutionPause(Implementation& implementation)
+      : implementation_(implementation), paused_(guest_execution_locked) {
+    if (paused_) {
+      release_guest_execution(implementation_);
+    }
+  }
+
+  ~GuestExecutionPause() {
+    if (paused_) {
+      acquire_guest_execution(implementation_);
+    }
+  }
+
+  GuestExecutionPause(const GuestExecutionPause&) = delete;
+  GuestExecutionPause& operator=(const GuestExecutionPause&) = delete;
+
+private:
+  Implementation& implementation_;
+  bool paused_{};
+};
+
+void execute_guest(Implementation& implementation, psprecomp::State& state) {
+  GuestExecutionLock execution_lock(implementation);
+  implementation.configuration.guest_executor(state);
+}
+
+void yield_guest(Implementation& implementation) {
+  if (!guest_interrupts_enabled)
+    return;
+  GuestExecutionPause pause(implementation);
+}
+
 static void prepare_state_for_thread(Implementation& implementation,
                                     psprecomp::State& state) {
   state.scratchpad = implementation.scratchpad.data();
   state.scratchpad_size = implementation.scratchpad.size();
   state.video_memory = implementation.video_memory.data();
   state.video_memory_size = implementation.video_memory.size();
+  state.volatile_memory = implementation.volatile_memory.data();
+  state.volatile_memory_size = implementation.volatile_memory.size();
+}
+
+bool dispatch_guest_callback(Implementation& implementation,
+                             psprecomp::State& state,
+                             std::uint32_t entry,
+                             std::uint32_t first_argument,
+                             std::uint32_t second_argument,
+                             std::uint32_t third_argument = 0U) {
+  if (entry == 0U || !implementation.configuration.guest_executor)
+    return false;
+  constexpr std::uint32_t callback_stack_size = 0x4000U;
+  std::uint32_t stack{};
+  {
+    std::lock_guard lock(implementation.objects_mutex);
+    stack = implementation.allocate_heap(callback_stack_size);
+  }
+  if (stack == 0U)
+    return false;
+  auto callback_state = state;
+  callback_state.pc = entry;
+  std::fill_n(callback_state.gpr, 32U, 0U);
+  callback_state.gpr[4] = first_argument;
+  callback_state.gpr[5] = second_argument;
+  callback_state.gpr[6] = third_argument;
+  callback_state.gpr[29] = stack + callback_stack_size - 64U;
+  callback_state.gpr[31] = return_address;
+  callback_state.branch_pending = false;
+  callback_state.stop_reason = psprecomp::StopReason::running;
+  callback_state.fault_address = 0U;
+  callback_state.fault_instruction = 0U;
+  callback_state.fault_pc = 0U;
+  implementation.configuration.guest_executor(callback_state);
+  {
+    std::lock_guard lock(implementation.objects_mutex);
+    implementation.free_heap(stack, callback_stack_size);
+  }
+  if (implementation.verbose &&
+      callback_state.stop_reason != psprecomp::StopReason::returned) {
+    std::fprintf(stderr,
+                 "[psprism:callback] stop entry=%08x reason=%u pc=%08x "
+                 "fault=%08x\n",
+                 entry, static_cast<unsigned>(callback_state.stop_reason),
+                 callback_state.pc, callback_state.fault_address);
+  }
+  return callback_state.stop_reason == psprecomp::StopReason::returned;
 }
 
 bool dispatch_notify_callback(Implementation& implementation,
                              psprecomp::State& state, int uid,
                              std::uint32_t argument) {
   Implementation::Callback callback;
-  std::uint32_t stack = 0;
   {
     std::lock_guard lock(implementation.objects_mutex);
     const auto found = implementation.callbacks.find(uid);
@@ -724,21 +867,10 @@ bool dispatch_notify_callback(Implementation& implementation,
         !implementation.configuration.guest_executor)
       return false;
     callback = found->second;
-    stack = implementation.allocate_stack(0x4000U);
   }
-  if (stack == 0)
-    return false;
-  auto callback_state = state;
-  callback_state.pc = callback.entry;
-  std::fill_n(callback_state.gpr, 32U, 0U);
-  callback_state.gpr[4] = static_cast<std::uint32_t>(uid);
-  callback_state.gpr[5] = argument;
-  callback_state.gpr[6] = callback.common_argument;
-  callback_state.gpr[29] = stack + 0x4000U;
-  callback_state.gpr[31] = return_address;
-  callback_state.stop_reason = psprecomp::StopReason::running;
-  implementation.configuration.guest_executor(callback_state);
-  return true;
+  return dispatch_guest_callback(implementation, state, callback.entry,
+                                 static_cast<std::uint32_t>(uid), argument,
+                                 callback.common_argument);
 }
 
 namespace {
@@ -750,7 +882,9 @@ namespace pspsdk {
 
 #define PSPSDK_STUB(name)                                                  \
   void name(psprecomp::State& state) {                                     \
-    ::refract::name(Runtime::instance().implementation(), state);          \
+    auto& implementation = Runtime::instance().implementation();           \
+    ::refract::name(implementation, state);                                \
+    yield_guest(implementation);                                           \
   }
 #include <refract/psp_sdk_stubs.inc>
 #undef PSPSDK_STUB
@@ -785,12 +919,16 @@ void Runtime::configure(std::uint8_t* memory, std::size_t size,
   implementation_->memory_base = base;
   implementation_->scratchpad.assign(16U * 1024U, 0);
   implementation_->video_memory.assign(2U * 1024U * 1024U, 0);
+  implementation_->volatile_memory.assign(4U * 1024U * 1024U, 0);
   implementation_->start_monotonic_microseconds =
       host::monotonic_microseconds();
   implementation_->start_unix_seconds = host::unix_seconds();
   implementation_->heap_cursor =
       align_up(static_cast<std::uint32_t>(configuration.image_size), 64U);
-  implementation_->stack_cursor = static_cast<std::uint32_t>(size);
+  implementation_->stack_cursor =
+      size > initial_thread_stack_size
+          ? static_cast<std::uint32_t>(size - initial_thread_stack_size)
+          : static_cast<std::uint32_t>(size);
   constexpr std::uint32_t user_memory_start = 0x08800000U;
   const auto image_start = base + configuration.image_start;
   if (base <= user_memory_start && image_start > user_memory_start &&
@@ -858,6 +996,12 @@ void Runtime::prepare_state(psprecomp::State& state) {
   state.scratchpad_size = implementation_->scratchpad.size();
   state.video_memory = implementation_->video_memory.data();
   state.video_memory_size = implementation_->video_memory.size();
+  state.volatile_memory = implementation_->volatile_memory.data();
+  state.volatile_memory_size = implementation_->volatile_memory.size();
+}
+
+void Runtime::execute_guest(psprecomp::State& state) {
+  ::refract::execute_guest(*implementation_, state);
 }
 
 void Runtime::run_host_loop() {

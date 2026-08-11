@@ -170,6 +170,7 @@ std::string generated_readme(const ExportConfig& config, InputKind kind,
 
 std::string root_makefile(const ExportConfig& config, bool has_disc,
                           std::string_view disc_executable,
+                          std::string_view sfo_path,
                           bool preserve_original_psp) {
   std::ostringstream out;
   out << "PPSSPP ?= ppsspp\n"
@@ -197,9 +198,11 @@ std::string root_makefile(const ExportConfig& config, bool has_disc,
                 ? "\n"
                 : " \"" + std::string(disc_executable) +
                       "\"=\"$(CURDIR)/src/generated/" + config.project_name +
-                      ".prx\" "
-                      "\"PSP_GAME/PARAM.SFO\"=\"$(CURDIR)/src/generated/"
-                      "PARAM.SFO\"\n")
+                      ".prx\"" +
+                      (!sfo_path.empty()
+                           ? " \"" + std::string(sfo_path) +
+                                 "\"=\"$(CURDIR)/src/generated/PARAM.SFO\"\n"
+                           : "\n"))
         << "\n"
            "psp-run: psp\n"
            "\t$(PPSSPP) \"$(CURDIR)/dist/"
@@ -240,7 +243,9 @@ std::string root_makefile(const ExportConfig& config, bool has_disc,
                 ? "\t@echo \"Prepared dist/disc with the original fixed-address PSP executable.\"\n\n"
                 : "\tcp src/generated/" + config.project_name +
                       ".prx dist/disc/" + std::string(disc_executable) +
-                      "\n\tcp src/generated/PARAM.SFO dist/disc/PSP_GAME/PARAM.SFO\n"
+                      (!sfo_path.empty()
+                           ? "\n\tcp src/generated/PARAM.SFO dist/disc/" + std::string(sfo_path) + "\n"
+                           : "\n") +
                       "\t@echo \"Prepared dist/disc with the recompiled executable.\"\n\n");
   } else {
     out << "disc-tree:\n"
@@ -695,6 +700,7 @@ SourceInfo inspect_source(const std::filesystem::path& input) {
   result.suggested_display_name = metadata.title;
   result.disc_id = metadata.disc_id;
   result.executable_path = executable->path.generic_string();
+  result.sfo_path = metadata.sfo_path;
   result.executable_encrypted = is_encrypted_psp_data(image.read(*executable));
   result.disc_entries = image.entries().size();
   return result;
@@ -879,7 +885,7 @@ ExportSummary export_codebase(const ExportConfig& config) {
     const bool preserve_original_psp = elf.preferred_base != 0U;
     write_text(staging / "Makefile",
                root_makefile(config, has_disc, info.executable_path,
-                             preserve_original_psp));
+                             info.sfo_path, preserve_original_psp));
     write_text(staging / "CMakeLists.txt", macos_cmake(config));
     if (has_disc) {
       write_text(staging / "tools" / "iso_patch.cpp", iso_patch_tool_source());

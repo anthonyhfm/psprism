@@ -2,6 +2,12 @@ void sceGeListEnQueue(Implementation& implementation, psprecomp::State& state) {
 #if !defined(__PSP__)
   static std::atomic<std::uint32_t> next_list{1};
   const auto submission = implementation.submitted_ge_lists++;
+  struct PendingCallback {
+    std::uint32_t entry;
+    std::uint32_t command_argument;
+    std::uint32_t common_argument;
+  };
+  std::vector<PendingCallback> pending_callbacks;
   {
     std::lock_guard graphics_lock(implementation.graphics.mutex);
     auto& graphics = implementation.graphics;
@@ -21,6 +27,11 @@ void sceGeListEnQueue(Implementation& implementation, psprecomp::State& state) {
     auto program_counter = state.gpr[4];
     std::uint32_t words{};
     std::uint32_t primitives{};
+    std::uint32_t submitted_primitives{};
+    std::uint32_t invalid_layouts{};
+    std::uint32_t invalid_indices{};
+    std::uint32_t invalid_vertices{};
+    std::uint32_t last_render_target{};
     bool ended{};
     // CALLed display-list fragments count toward this guard as well. Large
     // games can legitimately execute well beyond 64K words before END.
@@ -548,6 +559,7 @@ void sceGeListEnQueue(Implementation& implementation, psprecomp::State& state) {
               render_state.render_target_address =
                   0x04000000U |
                   (graphics.commands[0x9cU] & 0x001ffff0U);
+              last_render_target = render_state.render_target_address;
               render_state.render_target_width = render_target_width;
               render_state.render_target_height = render_target_height;
               render_state.texture_address = texture.address;
@@ -682,7 +694,12 @@ void sceGeListEnQueue(Implementation& implementation, psprecomp::State& state) {
                                         std::move(texture.pixels),
                                         texture.width, texture.height,
                                         render_state);
+              ++submitted_primitives;
+            } else {
+              ++invalid_vertices;
             }
+          } else {
+            ++invalid_indices;
           }
           if (index_type == 0)
             graphics.vertex_address += static_cast<std::uint32_t>(
@@ -690,6 +707,8 @@ void sceGeListEnQueue(Implementation& implementation, psprecomp::State& state) {
           else
             graphics.index_address +=
                 static_cast<std::uint32_t>(index_byte_count);
+        } else {
+          ++invalid_layouts;
         }
         ++primitives;
       } else if (command == 0x08U) {
@@ -716,6 +735,20 @@ void sceGeListEnQueue(Implementation& implementation, psprecomp::State& state) {
           std::fprintf(stderr, "[psprism:ge] return target=%08x\n",
                        program_counter);
         continue;
+      } else if (command == 0x0eU || command == 0x0fU) {
+        const auto callback_id = static_cast<int>(state.gpr[6]);
+        std::lock_guard callback_lock(implementation.objects_mutex);
+        const auto callback = implementation.ge_callbacks.find(callback_id);
+        if (callback != implementation.ge_callbacks.end()) {
+          const auto signal = command == 0x0eU;
+          const auto entry = signal ? callback->second.signal_entry
+                                    : callback->second.finish_entry;
+          const auto common_argument =
+              signal ? callback->second.signal_argument
+                     : callback->second.finish_argument;
+          if (entry != 0U)
+            pending_callbacks.push_back({entry, argument, common_argument});
+        }
       } else if (command == 0x13U) {
         graphics.offset_address = argument << 8U;
       } else if (command == 0xeaU) {
@@ -766,9 +799,11 @@ void sceGeListEnQueue(Implementation& implementation, psprecomp::State& state) {
     if (implementation.verbose && submission < 8U) {
       std::fprintf(stderr,
                    "[psprism:ge] list=%u address=%08x stall=%08x words=%u "
-                   "prims=%u ended=%u commands=",
+                   "prims=%u submitted=%u invalid=%u/%u/%u target=%08x "
+                   "ended=%u commands=",
                    submission, state.gpr[4], state.gpr[5], words, primitives,
-                   ended ? 1U : 0U);
+                   submitted_primitives, invalid_layouts, invalid_indices,
+                   invalid_vertices, last_render_target, ended ? 1U : 0U);
       bool first = true;
       for (std::size_t command = 0; command < commands.size(); ++command) {
         if (commands[command] == 0)
@@ -781,6 +816,11 @@ void sceGeListEnQueue(Implementation& implementation, psprecomp::State& state) {
     }
     host::end_ge_frame();
     host::present_ge_frame();
+  }
+  for (const auto& callback : pending_callbacks) {
+    dispatch_guest_callback(implementation, state, callback.entry,
+                            callback.command_argument,
+                            callback.common_argument);
   }
   state.gpr[2] = next_list++;
   return;

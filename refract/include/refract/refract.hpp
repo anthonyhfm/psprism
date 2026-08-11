@@ -31,6 +31,7 @@ public:
                           std::string_view import_name);
   void log(const char* format, std::uint32_t first, std::uint32_t second);
   void prepare_state(psprecomp::State& state);
+  void execute_guest(psprecomp::State& state);
   void run_host_loop();
   void wait_for_guest_threads();
 

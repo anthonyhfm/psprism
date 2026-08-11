@@ -6,6 +6,7 @@
 #include <fstream>
 #include <iostream>
 #include <limits>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
 
@@ -53,6 +54,13 @@ struct SectionHeader {
     std::uint32_t offset{};
     std::uint32_t size{};
     std::uint32_t info{};
+};
+
+struct ProgramLoadHeader {
+    std::uint32_t file_offset{};
+    std::uint32_t address{};
+    std::uint32_t physical_address{};
+    std::uint32_t file_size{};
 };
 
 } // namespace
@@ -138,6 +146,7 @@ ElfImage load_elf(const std::filesystem::path& path) {
         throw std::runtime_error("invalid ELF program table");
     }
     constexpr std::uint32_t pt_load = 1;
+    std::vector<ProgramLoadHeader> program_load_headers;
     for (std::uint16_t i = 0; i < program_count; ++i) {
         const auto base = static_cast<std::size_t>(program_offset) +
                           static_cast<std::size_t>(i) * program_entry_size;
@@ -146,6 +155,7 @@ ElfImage load_elf(const std::filesystem::path& path) {
         }
         const auto file_offset = u32(data, base + 4);
         const auto address = u32(data, base + 8);
+        const auto physical_address = u32(data, base + 12);
         const auto file_size = u32(data, base + 16);
         const auto memory_size = u32(data, base + 20);
         const auto flags = u32(data, base + 24);
@@ -157,6 +167,8 @@ ElfImage load_elf(const std::filesystem::path& path) {
             {static_cast<std::uint8_t>(i), address, memory_size, flags,
              std::vector<std::uint8_t>(data.begin() + file_offset,
                                        data.begin() + file_offset + file_size)});
+        program_load_headers.push_back(
+            {file_offset, address, physical_address, file_size});
     }
 
     constexpr std::uint32_t psp_user_base = 0x08000000U;
@@ -285,20 +297,73 @@ ElfImage load_elf(const std::filesystem::path& path) {
         }
         throw std::runtime_error("unterminated PSP import string");
     };
+    std::optional<std::uint32_t> module_info_address;
     for (const auto& header : headers) {
-        if (string_at(names, header.name) != ".rodata.sceModuleInfo" ||
-            header.size < 0x34) {
-            continue;
+        if (string_at(names, header.name) == ".rodata.sceModuleInfo" &&
+            header.size >= 0x34) {
+            module_info_address = header.address;
+            break;
         }
+    }
+
+    // Stripped retail PRX files commonly retain the section table but erase
+    // every section name.  For PSP ET_SCE_PRX files, the first load program
+    // header's p_paddr is the file offset of SceModuleInfo.  Translate that
+    // file offset back to its virtual address instead of relying on the
+    // optional .rodata.sceModuleInfo name.
+    constexpr std::uint16_t et_sce_prx = 0xffa0U;
+    if (!module_info_address && u16(data, 16) == et_sce_prx &&
+        !program_load_headers.empty()) {
+        const auto module_info_file_offset =
+            program_load_headers.front().physical_address;
+        for (const auto& segment : program_load_headers) {
+            if (module_info_file_offset >= segment.file_offset &&
+                module_info_file_offset - segment.file_offset <=
+                    segment.file_size &&
+                segment.file_size -
+                        (module_info_file_offset - segment.file_offset) >=
+                    0x34U) {
+                module_info_address =
+                    segment.address +
+                    (module_info_file_offset - segment.file_offset);
+                break;
+            }
+        }
+    }
+
+    if (module_info_address) {
+        const auto address = *module_info_address;
         // gp_value lives at struct offset 0x20 (SceModuleInfo::gp_value).
         // Unlike stub_begin/stub_end, its raw stored value is only an
         // addend for a runtime R_MIPS_32 relocation (typically against the
         // small-data segment), so we must not resolve it here: just record
         // where the field lives so the generated runtime can read the
         // already-relocated value from guest memory after relocations run.
-        image.gp_pointer_offset = image_offset(header.address + 0x20);
-        const auto stub_begin = image_offset(image_u32(header.address + 0x2c));
-        const auto stub_end = image_offset(image_u32(header.address + 0x30));
+        image.gp_pointer_offset = image_offset(address + 0x20);
+        image.gp_value_offset = image_u32(address + 0x20);
+        for (const auto& relocation : image.relocations) {
+            const auto patch = std::find_if(
+                image.load_segments.begin(), image.load_segments.end(),
+                [&](const LoadSegment& segment) {
+                    return segment.program_index == relocation.patch_segment;
+                });
+            if (patch == image.load_segments.end() || relocation.type != 2U ||
+                patch->address + relocation.offset != image.gp_pointer_offset) {
+                continue;
+            }
+            const auto target = std::find_if(
+                image.load_segments.begin(), image.load_segments.end(),
+                [&](const LoadSegment& segment) {
+                    return segment.program_index == relocation.target_segment;
+                });
+            if (target == image.load_segments.end()) {
+                throw std::runtime_error("invalid PSP module gp relocation");
+            }
+            image.gp_value_offset += target->address;
+            break;
+        }
+        const auto stub_begin = image_offset(image_u32(address + 0x2c));
+        const auto stub_end = image_offset(image_u32(address + 0x30));
         if (stub_begin > stub_end || stub_end > flat_image.size()) {
             throw std::runtime_error("invalid PSP module import-table range");
         }
@@ -308,6 +373,7 @@ ElfImage load_elf(const std::filesystem::path& path) {
                 throw std::runtime_error("truncated PSP import table");
             }
             const auto library_address = u32(flat_image, cursor);
+            const auto library_flags = u32(flat_image, cursor + 4);
             const auto length_words = flat_image[cursor + 8];
             const auto function_count = u16(flat_image, cursor + 10);
             const auto nid_table = u32(flat_image, cursor + 12);
@@ -321,7 +387,8 @@ ElfImage load_elf(const std::filesystem::path& path) {
                 image.imports.push_back(
                     {library, image_u32(nid_table + i * 4U),
                      image_offset(stub_table) +
-                         static_cast<std::uint32_t>(i) * 8U});
+                         static_cast<std::uint32_t>(i) * 8U,
+                     library_flags});
             }
             cursor += static_cast<std::uint32_t>(length_words) * 4U;
         }
@@ -367,6 +434,8 @@ CodeMap load_code_map(const std::filesystem::path& path) {
             if (fields >> name) {
                 map.function_symbols.push_back({address, std::move(name)});
             }
+        } else if (kind == "overlay" && !first.empty()) {
+            map.overlay_starts.push_back(parse_address(first));
         } else if (kind == "exclude" && !first.empty() && fields >> second) {
             const auto begin = parse_address(first);
             const auto end = parse_address(second);
@@ -385,6 +454,10 @@ CodeMap load_code_map(const std::filesystem::path& path) {
                                  path.string());
     }
     std::sort(map.function_starts.begin(), map.function_starts.end());
+    std::sort(map.overlay_starts.begin(), map.overlay_starts.end());
+    map.overlay_starts.erase(
+        std::unique(map.overlay_starts.begin(), map.overlay_starts.end()),
+        map.overlay_starts.end());
     std::sort(map.function_symbols.begin(), map.function_symbols.end(),
               [](const FunctionSymbol& left, const FunctionSymbol& right) {
                   return left.address < right.address;

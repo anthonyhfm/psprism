@@ -86,11 +86,17 @@ headers or SCE functions.
 Generated C++ lives in `src/generated`. With a code map, Guest functions are
 written one per address-named `func_*.cpp` file, with the original binary range
 documented above every definition. Without a map, address-based `shard_*.cpp`
-files are emitted. The portable runtime is copied into `include/psprecomp`, and
-the complete psprism
-source is copied into `psprism/`, so moving or archiving the export does not
-break its build. That psprism copy is meant to be edited when a game needs a
-host compatibility quirk.
+files are emitted. Functions marked with `overlay ADDRESS` in the map are also
+compiled into the hybrid PSP PRX, so edits to those generated bodies affect
+`make psp` while all other functions continue using the original Guest code.
+Generated continuation trampolines let an overlay call an unchanged direct or
+indirect Guest function and resume the edited body afterward. Unsupported
+dynamic non-return jumps are reported during export.
+
+The portable runtime is copied into `include/psprecomp`, and the complete
+psprism source is copied into `psprism/`, so moving or archiving the export does
+not break its build. That psprism copy is meant to be edited when a game needs
+a host compatibility quirk.
 
 `disc/` and `original/` are deliberately ignored by the generated `.gitignore`
 to make accidental publication of copyrighted data less likely. Generated C++,

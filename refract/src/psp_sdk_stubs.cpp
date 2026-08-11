@@ -51,8 +51,11 @@ inline std::uint32_t call_sdk_api(PspSdkFunction function,
 
 } // namespace
 
-// Declare all symbols as variadic weak symbols to support generic forwarding
-// without requiring per-function signatures or forcing links on missing PSPSDK stubs.
+// Declare all symbols as variadic weak imports to support generic forwarding
+// without requiring per-function signatures or forcing links on APIs absent
+// from the installed PSPSDK.  These must stay declarations: weak definitions
+// here would satisfy newlib and generated-project references before the linker
+// can extract the real syscall stubs from PSPSDK archives.
 #define PSPSDK_STUB(name) \
   extern "C" __attribute__((weak)) std::uint32_t name(...);
 #include <refract/psp_sdk_stubs.inc>
@@ -61,7 +64,9 @@ inline std::uint32_t call_sdk_api(PspSdkFunction function,
 namespace refract::pspsdk {
 #define PSPSDK_STUB(name)                                                     \
   void name(psprecomp::State& state) {                                       \
-    state.gpr[2] = call_sdk_api(::name, state);                             \
+    state.gpr[2] = call_sdk_api(                                             \
+        reinterpret_cast<PspSdkFunction>(reinterpret_cast<void*>(::name)),  \
+        state);                                                               \
   }
 #include <refract/psp_sdk_stubs.inc>
 #undef PSPSDK_STUB

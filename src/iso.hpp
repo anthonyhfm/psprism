@@ -19,6 +19,7 @@ struct IsoEntry {
 struct PspDiscMetadata {
   std::string title;
   std::string disc_id;
+  std::string sfo_path;
 };
 
 class IsoImage {

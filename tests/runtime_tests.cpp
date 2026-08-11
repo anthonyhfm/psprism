@@ -1,3 +1,5 @@
+#include <psprecomp/overlay.hpp>
+#include <psprecomp/interpreter.hpp>
 #include <psprecomp/relocation.hpp>
 #include <psprecomp/runtime.hpp>
 #include <psprecomp/vfpu.hpp>
@@ -25,6 +27,28 @@ int main() {
     psprecomp::store32(state, 0x80001008U, 0x12345678U);
     CHECK(psprecomp::load32(state, 0xa0001008U) == 0x12345678U);
     CHECK(memory[4] == 0xef && memory[7] == 0x89);
+
+    std::array<std::uint8_t, 16> volatile_memory{};
+    state.volatile_memory = volatile_memory.data();
+    state.volatile_memory_size = volatile_memory.size();
+    psprecomp::store32(state, 0x08400004U, 0x10203040U);
+    CHECK(state.stop_reason == psprecomp::StopReason::running);
+    CHECK(psprecomp::load32(state, 0x08400004U) == 0x10203040U);
+    CHECK(volatile_memory[4] == 0x40 && volatile_memory[7] == 0x10);
+
+    std::array<std::uint8_t, 8> allegrex_bit_count_code{};
+    psprecomp::State bit_count_state;
+    bit_count_state.memory = allegrex_bit_count_code.data();
+    bit_count_state.memory_size = allegrex_bit_count_code.size();
+    bit_count_state.memory_base = 0x2000U;
+    bit_count_state.pc = bit_count_state.memory_base;
+    psprecomp::store32(bit_count_state, 0x2000U, 0x01402816U);
+    psprecomp::store32(bit_count_state, 0x2004U, 0x01403017U);
+    bit_count_state.gpr[10] = 0x00f0ffffU;
+    CHECK(psprecomp::interpret_allegrex(bit_count_state, 0x2000U));
+    CHECK(bit_count_state.gpr[5] == 8U);
+    CHECK(psprecomp::interpret_allegrex(bit_count_state, 0x2004U));
+    CHECK(bit_count_state.gpr[6] == 0U);
 
     (void)psprecomp::load16(state, 0x1001);
     CHECK(state.stop_reason == psprecomp::StopReason::memory_fault);
@@ -56,6 +80,17 @@ int main() {
     state.vfpu[psprecomp::vfpu_index(1, 1)] =
         std::bit_cast<std::uint32_t>(3.0F);
     CHECK(psprecomp::vfpu_float(state, psprecomp::vfpu_index(0, 1)) == 2.0F);
+
+    constexpr std::uint32_t vidt_q_r003 = 0xd00380a3U;
+    CHECK(psprecomp::vfpu_opcode_supported(vidt_q_r003));
+    state.vfpu_ctrl[0] = 0xe4U;
+    state.vfpu_ctrl[2] = 0U;
+    psprecomp::execute_vfpu(state, vidt_q_r003, 0x1000U);
+    float identity_row[4]{};
+    psprecomp::vfpu_read_vector(state, vidt_q_r003 & 0x7fU, 4,
+                               identity_row);
+    CHECK(identity_row[0] == 0.0F && identity_row[1] == 0.0F &&
+          identity_row[2] == 0.0F && identity_row[3] == 1.0F);
 
     // VFPU scalar encodings are 0XXMMMYY.  A non-transposed M000 column
     // therefore walks 0x00, 0x20, 0x40, 0x60 rather than four adjacent
@@ -103,4 +138,33 @@ int main() {
     CHECK(psprecomp::detail::read_u32(relocated.data(), 4) == 0x0a200010U);
     CHECK(psprecomp::detail::read_u32(relocated.data(), 8) == 0x3c080881U);
     CHECK(psprecomp::detail::read_u32(relocated.data(), 12) == 0x25088000U);
+
+    std::array<std::uint8_t, 32> compact_relocated{};
+    psprecomp::detail::write_u32(compact_relocated.data(), 0, 0x00000020U);
+    psprecomp::detail::write_u32(compact_relocated.data(), 4, 0x08000010U);
+    psprecomp::detail::write_u32(compact_relocated.data(), 8, 0x3c080001U);
+    psprecomp::detail::write_u32(compact_relocated.data(), 12, 0x25088000U);
+    const std::uint8_t compact_relocations[] = {1, 0x22, 0x23, 0x24};
+    CHECK(psprecomp::apply_compact_psp_relocations(
+              compact_relocated.data(), compact_relocated.size(),
+              0x08800000U, segments, 1, compact_relocations,
+              sizeof(compact_relocations), 4) ==
+          psprecomp::RelocationResult::success);
+    CHECK(compact_relocated == relocated);
+
+    std::array<std::uint8_t, 40> repeated_relocated{};
+    const psprecomp::PspLoadSegment repeated_segments[] = {
+        {0, repeated_relocated.size(), 0}};
+    psprecomp::detail::write_u32(repeated_relocated.data(), 0, 1U);
+    psprecomp::detail::write_u32(repeated_relocated.data(), 32, 2U);
+    const std::uint8_t repeated_metadata[] = {1, 0x45};
+    CHECK(psprecomp::apply_compact_psp_relocations(
+              repeated_relocated.data(), repeated_relocated.size(),
+              0x08800000U, repeated_segments, 1, repeated_metadata,
+              sizeof(repeated_metadata), 2) ==
+          psprecomp::RelocationResult::success);
+    CHECK(psprecomp::detail::read_u32(repeated_relocated.data(), 0) ==
+          0x08800001U);
+    CHECK(psprecomp::detail::read_u32(repeated_relocated.data(), 32) ==
+          0x08800002U);
 }

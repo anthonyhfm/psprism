@@ -91,6 +91,8 @@ inline bool interpret_allegrex(State& state, std::uint32_t current_pc) {
         case 0x11: state.hi = state.gpr[rs]; break;
         case 0x12: state.gpr[rd] = state.lo; break;
         case 0x13: state.lo = state.gpr[rs]; break;
+        case 0x16: state.gpr[rd] = std::countl_zero(state.gpr[rs]); break;
+        case 0x17: state.gpr[rd] = std::countl_one(state.gpr[rs]); break;
         case 0x18: {
             const auto value = static_cast<std::int64_t>(as_s32(state.gpr[rs])) *
                                static_cast<std::int64_t>(as_s32(state.gpr[rt]));

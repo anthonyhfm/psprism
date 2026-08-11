@@ -300,6 +300,12 @@ PspDiscMetadata read_psp_disc_metadata(const IsoImage &image) {
     const auto data = image.read(*sfo);
     result.title = sfo_string(data, "TITLE");
     result.disc_id = sfo_string(data, "DISC_ID");
+    result.sfo_path = "PSP_GAME/PARAM.SFO";
+  } else if (const auto sfo_root = image.find("PARAM.SFO")) {
+    const auto data = image.read(*sfo_root);
+    result.title = sfo_string(data, "TITLE");
+    result.disc_id = sfo_string(data, "DISC_ID");
+    result.sfo_path = "PARAM.SFO";
   }
   return result;
 }
@@ -319,12 +325,81 @@ std::optional<IsoEntry> find_psp_executable(const IsoImage &image) {
       fallback = entry;
     }
     const auto prefix = image.read(*entry);
-    if (prefix.size() >= 4U && prefix[0] == 0x7fU && prefix[1] == 'E' &&
-        prefix[2] == 'L' && prefix[3] == 'F') {
+    if (prefix.size() >= 4U && ((prefix[0] == 0x7fU && prefix[1] == 'E' &&
+                                 prefix[2] == 'L' && prefix[3] == 'F') ||
+                                (prefix[0] == '~' && prefix[1] == 'P' &&
+                                 prefix[2] == 'S' && prefix[3] == 'P'))) {
       return entry;
     }
   }
-  return fallback;
+  if (fallback) {
+    return fallback;
+  }
+
+  const auto cnf_entry = image.find("SYSTEM.CNF");
+  if (cnf_entry && !cnf_entry->directory) {
+    const auto cnf_bytes = image.read(*cnf_entry);
+    const std::string_view cnf_text(
+        reinterpret_cast<const char *>(cnf_bytes.data()), cnf_bytes.size());
+    std::size_t line_start = 0;
+    while (line_start < cnf_text.size()) {
+      auto line_end = cnf_text.find('\n', line_start);
+      if (line_end == std::string_view::npos) {
+        line_end = cnf_text.size();
+      }
+      auto line = cnf_text.substr(line_start, line_end - line_start);
+      line_start = line_end + 1;
+      if (const auto cr = line.find('\r'); cr != std::string_view::npos) {
+        line = line.substr(0, cr);
+      }
+      if (const auto eq = line.find('='); eq != std::string_view::npos) {
+        auto key = line.substr(0, eq);
+        while (!key.empty() && std::isspace(static_cast<unsigned char>(key.back()))) {
+          key.remove_suffix(1);
+        }
+        while (!key.empty() && std::isspace(static_cast<unsigned char>(key.front()))) {
+          key.remove_prefix(1);
+        }
+        if (key == "BOOT2" || key == "BOOT" || key == "boot2" || key == "boot") {
+          auto val = line.substr(eq + 1);
+          while (!val.empty() && std::isspace(static_cast<unsigned char>(val.front()))) {
+            val.remove_prefix(1);
+          }
+          while (!val.empty() && std::isspace(static_cast<unsigned char>(val.back()))) {
+            val.remove_suffix(1);
+          }
+          if (val.rfind("cdrom0:", 0) == 0 || val.rfind("CDROM0:", 0) == 0) {
+            val.remove_prefix(7);
+          }
+          while (!val.empty() && (val.front() == '\\' || val.front() == '/')) {
+            val.remove_prefix(1);
+          }
+          if (const auto semi = val.find(';'); semi != std::string_view::npos) {
+            val = val.substr(0, semi);
+          }
+          const auto target_entry = image.find(val);
+          if (target_entry && !target_entry->directory) {
+            return target_entry;
+          }
+        }
+      }
+    }
+  }
+
+  for (const auto &entry : image.entries()) {
+    if (entry.directory || entry.size < 4U) {
+      continue;
+    }
+    const auto prefix = image.read(entry);
+    if (prefix.size() >= 4U && ((prefix[0] == 0x7fU && prefix[1] == 'E' &&
+                                 prefix[2] == 'L' && prefix[3] == 'F') ||
+                                (prefix[0] == '~' && prefix[1] == 'P' &&
+                                 prefix[2] == 'S' && prefix[3] == 'P'))) {
+      return entry;
+    }
+  }
+
+  return std::nullopt;
 }
 
 } // namespace psprecomp

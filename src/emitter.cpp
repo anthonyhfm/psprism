@@ -4,6 +4,7 @@
 #include <psprecomp/vfpu.hpp>
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <fstream>
 #include <iomanip>
@@ -14,10 +15,123 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 namespace psprecomp {
 namespace {
+
+std::vector<std::uint8_t>
+compact_relocations(const std::vector<Relocation>& relocations) {
+    std::vector<std::uint8_t> result;
+    result.reserve(relocations.size() * 2U);
+    std::array<std::uint32_t, 256> previous_offsets{};
+    Relocation previous;
+    bool have_metadata = false;
+    for (const auto& relocation : relocations) {
+        const auto previous_offset = previous_offsets[relocation.patch_segment];
+        const auto delta = static_cast<std::int64_t>(relocation.offset) -
+                           static_cast<std::int64_t>(previous_offset);
+        std::uint8_t type_code = 0xffU;
+        switch (relocation.type) {
+        case 0:
+            type_code = 0U;
+            break;
+        case 2:
+            type_code = 1U;
+            break;
+        case 4:
+            type_code = 2U;
+            break;
+        case 5:
+            type_code = 3U;
+            break;
+        case 6:
+            type_code = 4U;
+            break;
+        default:
+            break;
+        }
+        const bool can_use_short =
+            type_code != 0xffU && relocation.patch_segment < 2U &&
+            relocation.target_segment < 2U && delta >= 0 &&
+            (delta & 3) == 0 && delta <= 28;
+        if (can_use_short) {
+            result.push_back(static_cast<std::uint8_t>(
+                (static_cast<std::uint64_t>(delta) / 4U) << 5U |
+                (relocation.target_segment << 4U) |
+                (relocation.patch_segment << 3U) | type_code));
+            previous_offsets[relocation.patch_segment] = relocation.offset;
+            previous = relocation;
+            have_metadata = true;
+            continue;
+        }
+
+        std::uint8_t extended_short_code = 0xffU;
+        if (relocation.type == 2U) {
+            extended_short_code = 5U;
+        } else if (relocation.type == 4U) {
+            extended_short_code = 6U;
+        } else if (relocation.type == 6U) {
+            extended_short_code = 7U;
+        }
+        const bool can_use_extended_short =
+            extended_short_code != 0xffU && relocation.patch_segment == 0U &&
+            relocation.target_segment == 0U && delta >= 0 &&
+            (delta & 3) == 0 && delta <= 124 &&
+            !(extended_short_code == 7U && delta == 124);
+        if (can_use_extended_short) {
+            result.push_back(static_cast<std::uint8_t>(
+                (static_cast<std::uint64_t>(delta) / 4U) << 3U |
+                extended_short_code));
+            previous_offsets[relocation.patch_segment] = relocation.offset;
+            previous = relocation;
+            have_metadata = true;
+            continue;
+        }
+
+        result.push_back(0xffU);
+        const auto zigzag = delta >= 0
+                                ? static_cast<std::uint64_t>(delta) * 2U
+                                : static_cast<std::uint64_t>(-(delta + 1)) *
+                                          2U +
+                                      1U;
+        const bool metadata_changed =
+            !have_metadata || relocation.type != previous.type ||
+            relocation.patch_segment != previous.patch_segment ||
+            relocation.target_segment != previous.target_segment;
+        auto tag = (zigzag << 1U) |
+                   static_cast<std::uint64_t>(metadata_changed);
+        do {
+            auto byte = static_cast<std::uint8_t>(tag & 0x7fU);
+            tag >>= 7U;
+            if (tag != 0U) {
+                byte |= 0x80U;
+            }
+            result.push_back(byte);
+        } while (tag != 0U);
+        if (metadata_changed) {
+            const bool can_pack = relocation.type < 16U &&
+                                  relocation.patch_segment < 4U &&
+                                  relocation.target_segment < 4U;
+            const auto packed = static_cast<std::uint8_t>(
+                relocation.type | (relocation.patch_segment << 4U) |
+                (relocation.target_segment << 6U));
+            if (can_pack && packed != 0xffU) {
+                result.push_back(packed);
+            } else {
+                result.push_back(0xffU);
+                result.push_back(relocation.type);
+                result.push_back(relocation.patch_segment);
+                result.push_back(relocation.target_segment);
+            }
+        }
+        previous_offsets[relocation.patch_segment] = relocation.offset;
+        previous = relocation;
+        have_metadata = true;
+    }
+    return result;
+}
 
 std::string import_symbol(const Import& import, const CodeMap* code_map) {
     if (code_map != nullptr) {
@@ -84,6 +198,8 @@ std::string make_value(std::string_view value) {
     for (const auto character : value) {
         if (character == '$') {
             result += "$$";
+        } else if (character == '\'') {
+            result += "'\\''";
         } else {
             result.push_back(character == '\r' || character == '\n' ||
                                      character == '#'
@@ -546,6 +662,12 @@ std::string emit_instruction(std::uint32_t pc, std::uint32_t instruction,
             break;
         case 0x13:
             out << "state.lo = " << reg(rs) << ";";
+            break;
+        case 0x16: // Allegrex clz
+            out << reg(rd) << " = std::countl_zero(" << reg(rs) << ");";
+            break;
+        case 0x17: // Allegrex clo
+            out << reg(rd) << " = std::countl_one(" << reg(rs) << ");";
             break;
         case 0x18:
             out << "{ const auto product = static_cast<std::int64_t>(as_s32("
@@ -1124,12 +1246,12 @@ void emit_cpp(const ElfImage& image, const std::filesystem::path& output,
 }
 
 bool is_psp_sdk_stub(std::string_view symbol) {
-#define PSPSDK_STUB(name) \
-  if (symbol == #name) \
-    return true;
+  static const std::unordered_set<std::string_view> stubs = {
+#define PSPSDK_STUB(name) #name,
 #include "../refract/include/refract/psp_sdk_stubs.inc"
 #undef PSPSDK_STUB
-  return false;
+  };
+  return stubs.contains(symbol);
 }
 
 void emit_project(const ElfImage& image, const std::filesystem::path& directory,
@@ -1161,6 +1283,7 @@ void emit_project(const ElfImage& image, const std::filesystem::path& directory,
         const Import* source;
         std::string symbol;
         std::string id;
+        std::string psp_symbol;
     };
     std::vector<PlatformImport> platform_imports;
     platform_imports.reserve(image.imports.size());
@@ -1175,7 +1298,26 @@ void emit_project(const ElfImage& image, const std::filesystem::path& directory,
         std::ostringstream id;
         id << "import_" << std::setfill('0') << std::setw(4) << index << "_"
            << identifier(symbol.empty() ? import.library : symbol);
-        platform_imports.push_back({&import, symbol, id.str()});
+        platform_imports.push_back(
+            {&import, symbol, id.str(), "psprecomp_psp_" + id.str()});
+    }
+    const auto native_relocation_bytes =
+        image.preferred_base == 0U ? compact_relocations(image.relocations)
+                                   : std::vector<std::uint8_t>{};
+    std::size_t native_relocation_offset = image.memory_size();
+    if (image.preferred_base == 0U) {
+        std::size_t file_backed_end = 0;
+        for (const auto& segment : image.load_segments) {
+            file_backed_end =
+                std::max(file_backed_end,
+                         static_cast<std::size_t>(segment.address) +
+                             segment.bytes.size());
+        }
+        if (file_backed_end <= image.memory_size() &&
+            native_relocation_bytes.size() <=
+                image.memory_size() - file_backed_end) {
+            native_relocation_offset = file_backed_end;
+        }
     }
     {
         std::ofstream stream(platform_directory / "platform.h",
@@ -1301,6 +1443,106 @@ void emit_project(const ElfImage& image, const std::filesystem::path& directory,
     const auto entry = code_map != nullptr ? code_map->entry : image.entry;
     const auto block_entries =
         potential_block_entries(image, code_map, entry, shard_size);
+
+    struct PspOverlay {
+        std::uint32_t start{};
+        std::uint32_t end{};
+        std::size_t index{};
+        bool uses_vfpu{};
+        std::size_t entry_route{};
+    };
+    struct PspOverlayRoute {
+        std::size_t overlay_index{};
+        std::uint32_t entry{};
+        std::uint32_t link_register{};
+        std::size_t index{};
+        bool resume{};
+        bool uses_vfpu{};
+    };
+    std::vector<PspOverlay> psp_overlays;
+    std::vector<PspOverlayRoute> psp_overlay_routes;
+    if (code_map != nullptr && !code_map->overlay_starts.empty()) {
+        if (image.preferred_base != 0U) {
+            throw std::runtime_error(
+                "PSP overlays require a relocatable PRX image");
+        }
+        for (const auto start : code_map->overlay_starts) {
+            const auto found = functions.find(start);
+            if (found == functions.end() || found->second.size() < 2U) {
+                throw std::runtime_error(
+                    "PSP overlay is not a mapped function with at least "
+                    "two instructions: " +
+                    hex_address(start));
+            }
+            if (relocated.contains(start) || relocated.contains(start + 4U)) {
+                throw std::runtime_error(
+                    "PSP overlay entry detour would hide a relocated "
+                    "instruction: " +
+                    hex_address(start));
+            }
+            const auto end = found->second.back().pc + 4U;
+            for (const auto& emitted : found->second) {
+                const auto op = emitted.instruction >> 26U;
+                const auto function = emitted.instruction & 0x3fU;
+                const auto rs = (emitted.instruction >> 21U) & 0x1fU;
+                const bool dynamic_jump =
+                    op == 0U && function == 0x08U && rs != 31U;
+                if (dynamic_jump) {
+                    throw std::runtime_error(
+                        "PSP overlay contains a dynamic non-return jump: " +
+                        hex_address(start));
+                }
+            }
+            const bool uses_vfpu = std::any_of(
+                found->second.begin(), found->second.end(),
+                [](const EmittedInstruction& emitted) {
+                    return vfpu_opcode_supported(emitted.instruction);
+                });
+            psp_overlays.push_back(
+                {start, end, psp_overlays.size(), uses_vfpu, 0U});
+        }
+        for (auto& overlay : psp_overlays) {
+            overlay.entry_route = psp_overlay_routes.size();
+            psp_overlay_routes.push_back(
+                {overlay.index, overlay.start, 31U,
+                 psp_overlay_routes.size(), false, overlay.uses_vfpu});
+            std::map<std::uint32_t, std::uint32_t> continuations;
+            for (const auto& emitted : functions.at(overlay.start)) {
+                const auto op = emitted.instruction >> 26U;
+                const auto function = emitted.instruction & 0x3fU;
+                const auto rt = (emitted.instruction >> 16U) & 0x1fU;
+                const auto rd = (emitted.instruction >> 11U) & 0x1fU;
+                const bool links =
+                    op == 0x03U ||
+                    (op == 0U && function == 0x09U && rd != 0U) ||
+                    (op == 0x01U && rt >= 0x10U && rt <= 0x13U);
+                if (links) {
+                    const auto link_register =
+                        op == 0U ? rd : static_cast<std::uint32_t>(31U);
+                    const auto [found, inserted] = continuations.emplace(
+                        emitted.pc + 8U, link_register);
+                    if (!inserted && found->second != link_register) {
+                        throw std::runtime_error(
+                            "PSP overlay continuation uses multiple link "
+                            "registers: " +
+                            hex_address(overlay.start));
+                    }
+                }
+            }
+            for (const auto& [continuation, link_register] : continuations) {
+                if (continuation < overlay.start ||
+                    continuation >= overlay.end) {
+                    throw std::runtime_error(
+                        "PSP overlay call continuation is outside its "
+                        "mapped function: " +
+                        hex_address(overlay.start));
+                }
+                psp_overlay_routes.push_back(
+                    {overlay.index, continuation, link_register,
+                     psp_overlay_routes.size(), true, overlay.uses_vfpu});
+            }
+        }
+    }
     {
         std::ofstream header(directory / "generated.hpp",
                              std::ios::binary | std::ios::trunc);
@@ -1458,6 +1700,7 @@ void emit_project(const ElfImage& image, const std::filesystem::path& directory,
                             const auto op = delayed_control->instruction >> 26U;
                             if (op == 0x03U && functions.contains(target)) {
                                 stream
+                                    << "#ifndef PSPRECOMP_PSP_OVERLAY\n"
                                     << "    if (delayed_target == "
                                        "state.memory_base + "
                                     << hex(target)
@@ -1479,11 +1722,13 @@ void emit_project(const ElfImage& image, const std::filesystem::path& directory,
                                         << pc_label(return_pc) << ";\n";
                                 }
                                 stream << "      return true;\n"
-                                          "    }\n";
+                                          "    }\n"
+                                          "#endif\n";
                             } else if (op == 0x02U &&
                                        functions.contains(target) &&
                                        target != function_start) {
                                 stream
+                                    << "#ifndef PSPRECOMP_PSP_OVERLAY\n"
                                     << "    if (delayed_target == "
                                        "state.memory_base + "
                                     << hex(target)
@@ -1491,7 +1736,8 @@ void emit_project(const ElfImage& image, const std::filesystem::path& directory,
                                        "      apply_delayed_branch = false;\n"
                                     << "      return " << function_name(target)
                                     << "(state, delayed_target);\n"
-                                       "    }\n";
+                                       "    }\n"
+                                       "#endif\n";
                             }
                             if (function_owner(target) == function_start &&
                                 block_entries.contains(target)) {
@@ -1654,7 +1900,6 @@ void emit_project(const ElfImage& image, const std::filesystem::path& directory,
         stream << "// Generated by psprecomp. Do not edit.\n"
                   "#include \"generated.hpp\"\n"
                   "#include <platform/platform.h>\n"
-                  "#include <refract/psp_sdk_stubs.hpp>\n"
                   "#include <algorithm>\n"
                   "#include <cstddef>\n"
                   "#include <cstdint>\n"
@@ -1663,56 +1908,11 @@ void emit_project(const ElfImage& image, const std::filesystem::path& directory,
                   "using PspThreadEntry = int (*)(std::uint32_t, void*);\n"
                   "extern \"C\" int sceKernelCreateThread(const char*, "
                   "PspThreadEntry, int, int, std::uint32_t, void*);\n";
-        std::set<std::string> declared;
-        for (const auto& import : image.imports) {
-            const auto symbol = import_symbol(import, code_map);
-            if (symbol.empty() || symbol == "sceKernelCreateThread" ||
-                symbol == "sceKernelPrintf" ||
-                symbol == "sceKernelGetModuleId" ||
-                symbol == "sceKernelSetCompilerVersion" ||
-                symbol == "sceMpegAvcDecodeFlush" ||
-                symbol == "sceKernelMemset" ||
-                symbol == "sceKernelMemcpy" ||
-                symbol == "sceKernelStopUnloadSelfModuleWithStatus" ||
-                symbol == "sceKernelSetCompiledSdkVersion603_605" ||
-                symbol == "scePowerGetBatteryChargePercent" ||
-                symbol == "scePowerGetPllClockFrequencyFloat" ||
-                symbol == "sceNpDrmEdataSetupKey" ||
-                symbol == "sceNpDrmSetLicenseeKey" ||
-                symbol == "sceAtracGetBufferInfoForResetting" ||
-                symbol == "sceAtracSetAA3DataAndGetID" ||
-                !declared.insert(symbol).second) {
-                continue;
-            }
-            stream << "extern \"C\" void " << symbol << "();\n";
+        for (const auto& import : platform_imports) {
+            stream << "extern \"C\" std::uint32_t " << import.psp_symbol
+                   << "(...);\n";
         }
-        stream << "extern \"C\" int sceKernelPrintf(const char*, ...);\n"
-                  "extern \"C\" std::uint32_t sceKernelGetModuleId() "
-                  "{ return 0; }\n"
-                  "extern \"C\" void* sceKernelMemset(void* dst, int, "
-                  "std::size_t) { return dst; }\n"
-                  "extern \"C\" void* sceKernelMemcpy(void* dst, const void*, "
-                  "std::size_t) { return dst; }\n"
-                  "extern \"C\" std::uint32_t "
-                  "sceKernelStopUnloadSelfModuleWithStatus() { return 0; }\n"
-                  "extern \"C\" std::uint32_t "
-                  "sceKernelSetCompiledSdkVersion603_605() { return 0; }\n"
-                  "extern \"C\" std::uint32_t "
-                  "scePowerGetBatteryChargePercent() { return 100; }\n"
-                  "extern \"C\" float scePowerGetPllClockFrequencyFloat() "
-                  "{ return 222.0f; }\n"
-                  "extern \"C\" std::uint32_t sceNpDrmEdataSetupKey() "
-                  "{ return 0; }\n"
-                  "extern \"C\" std::uint32_t sceNpDrmSetLicenseeKey() "
-                  "{ return 0; }\n"
-                  "extern \"C\" std::uint32_t "
-                  "sceAtracGetBufferInfoForResetting() { return 0; }\n"
-                  "extern \"C\" std::uint32_t sceAtracSetAA3DataAndGetID() "
-                  "{ return 0; }\n"
-                  "extern \"C\" std::uint32_t sceKernelSetCompilerVersion("
-                  "std::uint32_t) { return 0; }\n"
-                  "extern \"C\" std::uint32_t sceMpegAvcDecodeFlush(void*) "
-                  "{ return 0; }\n";
+        stream << "extern \"C\" int sceKernelPrintf(const char*, ...);\n";
         stream << "\nnamespace psprecomp::platform {\n"
                   "void log(const char* format, std::uint32_t first, "
                   "std::uint32_t second) {\n"
@@ -1723,6 +1923,35 @@ void emit_project(const ElfImage& image, const std::filesystem::path& directory,
                   "std::size_t shared_memory_size;\n"
                   "std::uint32_t shared_memory_base;\n"
                   "std::uint32_t shared_memory_gp;\n"
+                  "using PspSdkFunction = std::uint32_t (*)(...);\n"
+                  "std::uint32_t stack_argument(const State& state, "
+                  "std::size_t index) {\n"
+                  "  const auto address = canonical_address(state.gpr[29] + "
+                  "16U + static_cast<std::uint32_t>(index * 4U));\n"
+                  "  if (const auto* pointer = mapped_address(state, address, "
+                  "4U)) return static_cast<std::uint32_t>(pointer[0]) | "
+                  "(static_cast<std::uint32_t>(pointer[1]) << 8U) | "
+                  "(static_cast<std::uint32_t>(pointer[2]) << 16U) | "
+                  "(static_cast<std::uint32_t>(pointer[3]) << 24U);\n"
+                  "  if (!state.direct_memory_access || (address & 3U) != 0U "
+                  "|| address < 0x00010000U) return 0U;\n"
+                  "  const auto* bytes = reinterpret_cast<const volatile "
+                  "std::uint8_t*>(static_cast<std::uintptr_t>(address));\n"
+                  "  return static_cast<std::uint32_t>(bytes[0]) | "
+                  "(static_cast<std::uint32_t>(bytes[1]) << 8U) | "
+                  "(static_cast<std::uint32_t>(bytes[2]) << 16U) | "
+                  "(static_cast<std::uint32_t>(bytes[3]) << 24U);\n"
+                  "}\n"
+                  "std::uint32_t call_sdk_api(PspSdkFunction function, "
+                  "const State& state) {\n"
+                  "  return function(state.gpr[4], state.gpr[5], "
+                  "state.gpr[6], state.gpr[7], state.gpr[8], state.gpr[9], "
+                  "state.gpr[10], state.gpr[11], stack_argument(state, 0), "
+                  "stack_argument(state, 1), stack_argument(state, 2), "
+                  "stack_argument(state, 3), stack_argument(state, 4), "
+                  "stack_argument(state, 5), stack_argument(state, 6), "
+                  "stack_argument(state, 7));\n"
+                  "}\n"
                   "struct ThreadSlot { std::uint32_t entry; std::uint32_t "
                   "stack_size; std::uint8_t* guest_stack; bool used; };\n"
                   "ThreadSlot thread_slots[32]{};\n"
@@ -1765,9 +1994,13 @@ void emit_project(const ElfImage& image, const std::filesystem::path& directory,
                   "static_cast<unsigned int>(state.pc - "
                   "shared_memory_base));\n"
                   "  sceKernelPrintf(\"[psprecomp] guest fault=%08x "
-                  "insn=%08x\\n\", static_cast<unsigned int>("
+                  "pc=%08x\\n\", static_cast<unsigned int>("
                   "state.fault_address), static_cast<unsigned int>("
-                  "state.fault_instruction));\n"
+                  "state.fault_pc - shared_memory_base));\n"
+                  "  sceKernelPrintf(\"[psprecomp] guest insn=%08x "
+                  "gp=%08x\\n\", static_cast<unsigned int>("
+                  "state.fault_instruction), static_cast<unsigned int>("
+                  "state.gpr[28]));\n"
                   "  sceKernelPrintf(\"[psprecomp] guest ra=%08x "
                   "sp=%08x\\n\", static_cast<unsigned int>("
                   "state.gpr[31] - shared_memory_base), "
@@ -1835,15 +2068,12 @@ void emit_project(const ElfImage& image, const std::filesystem::path& directory,
                   "std::uint32_t guest_gp_value() { return "
                   "shared_memory_gp; }\n\n"
                   "bool patch_imports(State& state) {\n";
-        for (const auto& import : image.imports) {
-            const auto symbol = import_symbol(import, code_map);
-            if (symbol.empty()) {
-                continue;
-            }
+        for (const auto& import : platform_imports) {
             stream << "  { const auto target = static_cast<std::uint32_t>("
                       "reinterpret_cast<std::uintptr_t>(&"
-                   << symbol << ")); const auto stub = state.memory_base + "
-                   << hex(import.stub_address)
+                   << import.psp_symbol
+                   << ")); const auto stub = state.memory_base + "
+                   << hex(import.source->stub_address)
                    << "; if (((stub + 4U) & 0xf0000000U) != "
                       "(target & 0xf0000000U)) return false; "
                       "store32(state, stub, 0x08000000U | "
@@ -1854,13 +2084,9 @@ void emit_project(const ElfImage& image, const std::filesystem::path& directory,
                   "bool dispatch_import(State& state, std::uint32_t "
                   "current_pc) {\n"
                   "  switch (current_pc - state.memory_base) {\n";
-        for (const auto& import : image.imports) {
-            const auto symbol = import_symbol(import, code_map);
-            if (symbol.empty()) {
-                continue;
-            }
-            stream << "  case " << hex(import.stub_address) << ": ";
-            if (symbol == "sceKernelCreateThread") {
+        for (const auto& import : platform_imports) {
+            stream << "  case " << hex(import.source->stub_address) << ": ";
+            if (import.symbol == "sceKernelCreateThread") {
                 // Route thread creation through create_guest_thread so the
                 // new thread's real native entry point is our own
                 // run_guest_thread<Slot> trampoline (which re-enters the
@@ -1872,12 +2098,10 @@ void emit_project(const ElfImage& image, const std::filesystem::path& directory,
                 // state) entirely.
                 stream << "create_guest_thread(state); ";
             } else {
-                if (!is_psp_sdk_stub(symbol)) {
-                    throw std::runtime_error(
-                        "missing pspsdk stub for import symbol: " +
-                        std::string(symbol));
-                }
-                stream << "refract::pspsdk::" << symbol << "(state); ";
+                stream << "state.gpr[2] = call_sdk_api("
+                          "reinterpret_cast<PspSdkFunction>("
+                          "reinterpret_cast<void*>(&"
+                       << import.psp_symbol << ")), state); ";
             }
             stream << "state.pc = state.gpr[31]; return true;\n";
         }
@@ -2045,30 +2269,199 @@ void emit_project(const ElfImage& image, const std::filesystem::path& directory,
         }
     }
     {
+        auto memory = image.memory_image();
+        if (native_relocation_offset > memory.size()) {
+            throw std::runtime_error("invalid native relocation offset");
+        }
+        if (native_relocation_offset == memory.size()) {
+            memory.insert(memory.end(), native_relocation_bytes.begin(),
+                          native_relocation_bytes.end());
+        } else {
+            if (native_relocation_bytes.size() >
+                memory.size() - native_relocation_offset) {
+                throw std::runtime_error(
+                    "native relocations overlap the guest image");
+            }
+            std::copy(native_relocation_bytes.begin(),
+                      native_relocation_bytes.end(),
+                      memory.begin() + native_relocation_offset);
+        }
+        std::ofstream stream(directory / "native_guest_image.bin",
+                             std::ios::binary | std::ios::trunc);
+        if (!stream) {
+            throw std::runtime_error("cannot create native guest image");
+        }
+        if (!memory.empty()) {
+            stream.write(reinterpret_cast<const char*>(memory.data()),
+                         static_cast<std::streamsize>(memory.size()));
+        }
+    }
+    {
         std::ofstream stream(platform_directory / "psp" / "main.cpp",
                              std::ios::binary | std::ios::trunc);
         if (!stream) {
             throw std::runtime_error("cannot create generated PSP entry point");
         }
-        stream << "// Generated by psprecomp. Do not edit.\n"
+        if (image.preferred_base != 0U) {
+            stream << "// Generated by psprecomp. Do not edit.\n"
+                      "#include \"generated.hpp\"\n"
+                      "#include <platform/platform.h>\n"
+                      "#include <psprecomp/relocation.hpp>\n"
+                      "#include <pspkernel.h>\n"
+                      "#include <cstddef>\n"
+                      "#include <cstdint>\n"
+                      "#include <cstring>\n"
+                      "#include <malloc.h>\n\n"
+                      "PSP_MODULE_INFO(\""
+                   << cpp_string(options.module_name)
+                   << "\", 0, 1, 0);\n"
+                      "PSP_MAIN_THREAD_ATTR(THREAD_ATTR_USER | "
+                      "THREAD_ATTR_VFPU);\n"
+                      "PSP_MAIN_THREAD_STACK_SIZE_KB(256);\n"
+                      "PSP_HEAP_SIZE_KB(1024);\n\n"
+                      "PSP_NO_CREATE_MAIN_THREAD();\n\n"
+                      "extern \"C\" unsigned char guest_image_start[];\n"
+                      "extern \"C\" unsigned char "
+                      "guest_relocations_start[];\n\n"
+                      "namespace {\n"
+                      "constexpr psprecomp::PspLoadSegment segments[] = {\n";
+            for (const auto& segment : image.load_segments) {
+                stream << "  {" << hex(segment.address) << ", "
+                       << hex(segment.memory_size) << ", "
+                       << static_cast<unsigned>(segment.program_index)
+                       << "},\n";
+            }
+            stream
+                << "};\n"
+                   "constexpr std::size_t main_stack_size = 0x40000U;\n"
+                   "constexpr std::uint32_t return_address = 0xfffffff0U;\n"
+                   "} // namespace\n\n"
+                   "int main(int argc, char** argv) {\n"
+                   "  sceKernelPrintf(\"[psprecomp] loader start\\n\");\n"
+                   "  constexpr std::size_t embedded_image_size = "
+                << image.memory_size()
+                << "U;\n"
+                   "  constexpr std::size_t embedded_relocation_size = "
+                << image.relocations.size() * 8U
+                << "U;\n"
+                   "  auto* main_stack = static_cast<std::uint8_t*>("
+                   "memalign(64, main_stack_size));\n"
+                   "  if (main_stack == nullptr || embedded_image_size != "
+                   "psprecomp::generated::guest_memory_size || "
+                   "embedded_relocation_size % sizeof("
+                   "psprecomp::PspRelocationRecord) != 0) return -1;\n"
+                   "  auto* memory = guest_image_start;\n"
+                   "  const auto* embedded_relocations = "
+                   "guest_relocations_start;\n"
+                   "  constexpr auto base = "
+                << hex(image.preferred_base)
+                << ";\n"
+                   "  const auto relocation_result = "
+                   "psprecomp::apply_psp_relocations(memory, "
+                   "embedded_image_size, base, segments, sizeof(segments) / "
+                   "sizeof(segments[0]), reinterpret_cast<const "
+                   "psprecomp::PspRelocationRecord*>(embedded_relocations), "
+                   "embedded_relocation_size / "
+                   "sizeof(psprecomp::PspRelocationRecord));\n"
+                   "  if (relocation_result != "
+                   "psprecomp::RelocationResult::success) return -2;\n"
+                   "  sceKernelPrintf(\"[psprecomp] relocated at %08x\\n\", "
+                   "static_cast<unsigned int>(base));\n"
+                   "  psprecomp::State state;\n"
+                   "  state.memory = memory; state.memory_size = "
+                   "embedded_image_size;\n"
+                   "  state.memory_base = base; state.direct_memory_access = "
+                   "true;\n"
+                   "  state.pc = base + psprecomp::generated::guest_entry;\n"
+                   "  state.gpr[4] = argc > 0 && argv != nullptr && argv[0] "
+                   "!= nullptr ? static_cast<std::uint32_t>("
+                   "std::strlen(argv[0]) + 1U) : 0U;\n"
+                   "  state.gpr[5] = argc > 0 && argv != nullptr ? "
+                   "static_cast<std::uint32_t>(reinterpret_cast<"
+                   "std::uintptr_t>(argv[0])) : 0U;\n"
+                   "  state.gpr[29] = static_cast<std::uint32_t>("
+                   "reinterpret_cast<std::uintptr_t>(main_stack + "
+                   "main_stack_size - 64U));\n"
+                   "  state.gpr[31] = return_address;\n"
+                   "  psprecomp::platform::configure_runtime(memory, "
+                   "embedded_image_size, base);\n"
+                   "  state.gpr[28] = "
+                   "psprecomp::platform::guest_gp_value();\n"
+                   "  if (!psprecomp::platform::patch_imports(state)) "
+                   "return -3;\n"
+                   "  sceKernelPrintf(\"[psprecomp] entering "
+                   "module_start\\n\");\n"
+                   "  psprecomp::generated::run(state, return_address, "
+                   "0x7fffffffffffffffULL);\n"
+                   "  sceKernelPrintf(\"[psprecomp] module_start stopped "
+                   "stop=%u pc=%08x gp=%08x fault=%08x\\n\", "
+                   "static_cast<unsigned int>(state.stop_reason), "
+                   "static_cast<unsigned int>(state.pc - base), "
+                   "static_cast<unsigned int>(state.gpr[28]), "
+                   "static_cast<unsigned int>(state.fault_address));\n"
+                   "  sceKernelSleepThread();\n"
+                   "  return static_cast<int>(state.gpr[2]);\n"
+                   "}\n";
+        } else {
+            stream << "// Generated by psprecomp. Do not edit.\n"
                   "#include \"generated.hpp\"\n"
-                  "#include <platform/platform.h>\n"
                   "#include <psprecomp/relocation.hpp>\n"
                   "#include <pspkernel.h>\n"
                   "#include <cstddef>\n"
                   "#include <cstdint>\n"
-                  "#include <cstring>\n"
-                  "#include <malloc.h>\n\n"
-                  "PSP_MODULE_INFO(\""
+                  "#include <cstring>\n\n"
+                  "extern \"C\" unsigned char native_guest_image_start[];\n"
+                  "extern char __lib_ent_top[], __lib_ent_bottom[];\n"
+                  "extern char __lib_stub_top[], __lib_stub_bottom[];\n"
+                  "extern SceModuleInfo module_info __attribute__((section("
+                  "\".rodata.sceModuleInfo\"), aligned(16), unused)) = {\n"
+                  "  0, {0, 1}, \""
                << cpp_string(options.module_name)
-               << "\", 0, 1, 0);\n"
+               << "\", 0, native_guest_image_start + "
+               << hex(image.gp_value_offset)
+               << ", __lib_ent_top, __lib_ent_bottom, __lib_stub_top, "
+                  "__lib_stub_bottom\n};\n"
                   "PSP_MAIN_THREAD_ATTR(THREAD_ATTR_USER | THREAD_ATTR_VFPU);\n"
                   "PSP_MAIN_THREAD_STACK_SIZE_KB(256);\n"
-                  "PSP_HEAP_SIZE_KB(1024);\n\n"
+                  "// The native bridge performs no dynamic allocation; "
+                  "reserve game RAM.\n"
+                  "PSP_HEAP_SIZE_KB(0);\n"
+                  "PSP_DISABLE_NEWLIB()\n\n"
                   "PSP_NO_CREATE_MAIN_THREAD();\n\n"
-                  "extern \"C\" unsigned char guest_image_start[];\n"
-                  "extern \"C\" unsigned char guest_relocations_start[];\n\n"
-                  "namespace {\n"
+                  "extern \"C\" int psprecomp_call_guest(std::uint32_t, "
+                  "std::uint32_t, std::uint32_t, void*);\n";
+        if (!psp_overlays.empty()) {
+            stream << "extern \"C\" bool psprecomp_install_overlays("
+                      "std::uint8_t*, std::uint32_t);\n";
+        }
+        for (const auto& import : platform_imports) {
+            stream << "extern \"C\" std::uint32_t " << import.psp_symbol
+                   << "(...);\n";
+        }
+        stream << "\nnamespace {\n"
+                  "std::uint32_t read32(const std::uint8_t* bytes) {\n"
+                  "  return static_cast<std::uint32_t>(bytes[0]) | "
+                  "(static_cast<std::uint32_t>(bytes[1]) << 8U) | "
+                  "(static_cast<std::uint32_t>(bytes[2]) << 16U) | "
+                  "(static_cast<std::uint32_t>(bytes[3]) << 24U);\n"
+                  "}\n"
+                  "bool patch_guest_imports(std::uint8_t* memory, "
+                  "std::uint32_t base) {\n";
+        for (const auto& import : platform_imports) {
+            stream << "  { const auto target = static_cast<std::uint32_t>("
+                      "reinterpret_cast<std::uintptr_t>(&"
+                   << import.psp_symbol
+                   << ")); const auto stub = base + "
+                   << hex(import.source->stub_address)
+                   << "; if (((stub + 4U) & 0xf0000000U) != "
+                      "(target & 0xf0000000U)) return false; "
+                      "auto* words = reinterpret_cast<volatile "
+                      "std::uint32_t*>(memory + "
+                   << hex(import.source->stub_address)
+                   << "); words[0] = 0x08000000U | "
+                      "((target >> 2U) & 0x03ffffffU); words[1] = 0U; }\n";
+        }
+        stream << "  return true;\n}\n"
                   "constexpr psprecomp::PspLoadSegment segments[] = {\n";
         for (const auto& segment : image.load_segments) {
             stream << "  {" << hex(segment.address) << ", "
@@ -2077,8 +2470,6 @@ void emit_project(const ElfImage& image, const std::filesystem::path& directory,
         }
         stream
             << "};\n"
-               "constexpr std::size_t main_stack_size = 0x40000U;\n"
-               "constexpr std::uint32_t return_address = 0xfffffff0U;\n"
                "} // namespace\n\n"
                "int main(int argc, char** argv) {\n"
                "  sceKernelPrintf(\"[psprecomp] loader start\\n\");\n"
@@ -2086,17 +2477,15 @@ void emit_project(const ElfImage& image, const std::filesystem::path& directory,
             << image.memory_size()
             << "U;\n"
                "  constexpr std::size_t embedded_relocation_size = "
-            << image.relocations.size() * 8U
+            << native_relocation_bytes.size()
             << "U;\n"
-               "  auto* main_stack = static_cast<std::uint8_t*>("
-               "memalign(64, main_stack_size));\n"
-               "  if (main_stack == nullptr || embedded_image_size != "
-               "psprecomp::generated::guest_memory_size || "
-               "embedded_relocation_size % sizeof("
-               "psprecomp::PspRelocationRecord) != 0) return -1;\n"
-               "  auto* memory = guest_image_start;\n"
+               "  if (embedded_image_size != "
+               "psprecomp::generated::guest_memory_size) return -1;\n"
+               "  auto* memory = native_guest_image_start;\n"
                "  const auto* embedded_relocations = "
-               "guest_relocations_start;\n"
+               "memory + "
+            << native_relocation_offset
+            << "U;\n"
                "  const auto embedded_base = static_cast<std::uint32_t>("
                "reinterpret_cast<std::uintptr_t>(memory));\n"
                "  const auto base = "
@@ -2104,48 +2493,47 @@ void emit_project(const ElfImage& image, const std::filesystem::path& directory,
                                            : hex(image.preferred_base))
             << ";\n"
                "  const auto relocation_result = "
-               "psprecomp::apply_psp_relocations(memory, embedded_image_size, "
-               "base, segments, sizeof(segments) / sizeof(segments[0]), "
-               "reinterpret_cast<const psprecomp::PspRelocationRecord*>("
-               "embedded_relocations), embedded_relocation_size / "
-               "sizeof(psprecomp::PspRelocationRecord));\n"
+               "psprecomp::apply_compact_psp_relocations("
+               "memory, embedded_image_size, base, segments, "
+               "sizeof(segments) / sizeof(segments[0]), "
+               "embedded_relocations, embedded_relocation_size, "
+            << image.relocations.size()
+            << "U);\n"
                "  if (relocation_result != "
                "psprecomp::RelocationResult::success) return -2;\n"
+               "  if ("
+            << native_relocation_offset
+            << "U < embedded_image_size) std::memset(memory + "
+            << native_relocation_offset
+            << "U, 0, embedded_relocation_size);\n"
+               "  if (!patch_guest_imports(memory, base)) return -3;\n";
+        if (!psp_overlays.empty()) {
+            stream << "  if (!psprecomp_install_overlays(memory, base)) "
+                      "return -4;\n";
+        }
+        stream << "  sceKernelDcacheWritebackInvalidateAll();\n"
+               "  sceKernelIcacheInvalidateAll();\n"
                "  sceKernelPrintf(\"[psprecomp] relocated at %08x\\n\", "
                "static_cast<unsigned int>(base));\n"
-               "  psprecomp::State state;\n"
-               "  state.memory = memory; state.memory_size = "
-               "embedded_image_size;\n"
-               "  state.memory_base = base; state.direct_memory_access = "
-               "true;\n"
-               "  state.pc = base + psprecomp::generated::guest_entry;\n"
-               "  state.gpr[4] = argc > 0 && argv != nullptr && argv[0] != "
-               "nullptr "
-               "? static_cast<std::uint32_t>(std::strlen(argv[0]) + 1U) : 0U;\n"
-               "  state.gpr[5] = argc > 0 && argv != nullptr ? "
-               "static_cast<std::uint32_t>(reinterpret_cast<std::uintptr_t>("
-               "argv[0])) : 0U;\n"
-               "  state.gpr[29] = static_cast<std::uint32_t>("
-               "reinterpret_cast<std::uintptr_t>(main_stack + "
-               "main_stack_size - 64U));\n"
-               "  state.gpr[31] = return_address;\n"
-               "  psprecomp::platform::configure_runtime("
-               "memory, embedded_image_size, base);\n"
-               "  state.gpr[28] = psprecomp::platform::guest_gp_value();\n"
-               "  { const std::uint32_t real_gp = state.gpr[28];"
-               " asm volatile(\"move $gp, %0\" :: \"r\"(real_gp)); }\n"
-               "  if (!psprecomp::platform::patch_imports(state)) "
-               "return -3;\n"
-               "  sceKernelPrintf(\"[psprecomp] entering module_start\\n\");\n"
-               "  psprecomp::generated::run(state, return_address, "
-               "0x7fffffffffffffffULL);\n"
-               "  sceKernelPrintf(\"[psprecomp] module_start stopped "
-               "stop=%u pc=%08x\\n\", static_cast<unsigned int>("
-               "state.stop_reason), static_cast<unsigned int>("
-               "state.pc - base));\n"
+               "  const auto gp = psprecomp::generated::"
+               "guest_gp_pointer_offset != 0xffffffffU ? read32(memory + "
+               "psprecomp::generated::guest_gp_pointer_offset) : 0U;\n"
+               "  const auto argument_size = argc > 0 && argv != nullptr && "
+               "argv[0] != nullptr ? static_cast<std::uint32_t>("
+               "std::strlen(argv[0]) + 1U) : 0U;\n"
+               "  void* argument = argc > 0 && argv != nullptr ? argv[0] : "
+               "nullptr;\n"
+               "  sceKernelPrintf(\"[psprecomp] entering native "
+               "module_start\\n\");\n"
+               "  const auto result = psprecomp_call_guest(base + "
+               "psprecomp::generated::guest_entry, gp, argument_size, "
+               "argument);\n"
+               "  sceKernelPrintf(\"[psprecomp] module_start returned "
+               "%08x\\n\", static_cast<unsigned int>(result));\n"
                "  sceKernelSleepThread();\n"
-               "  return static_cast<int>(state.gpr[2]);\n"
+               "  return result;\n"
                "}\n";
+        }
     }
     {
         std::ofstream stream(platform_directory / "macos" / "platform.cpp",
@@ -2212,18 +2600,15 @@ void emit_project(const ElfImage& image, const std::filesystem::path& directory,
                "  switch (current_pc - state.memory_base) {\n";
         for (const auto& import : platform_imports) {
             stream << "  case " << hex(import.source->stub_address) << ": ";
-            if (!import.symbol.empty()) {
-                if (!is_psp_sdk_stub(import.symbol)) {
-                    throw std::runtime_error(
-                        "missing pspsdk stub for import symbol: " +
-                        std::string(import.symbol));
-                }
+            if (!import.symbol.empty() && is_psp_sdk_stub(import.symbol)) {
                 stream << "refract::pspsdk::" << import.symbol
                        << "(state);";
             } else {
-                throw std::runtime_error(
-                    "missing PSP-NID symbol for import at " +
-                    hex(import.source->stub_address));
+                stream << "state.gpr[2] = 0x8002013aU; "
+                          "log(\"[psprecomp] unimplemented import "
+                          "nid=%08x stub=%08x\\n\", "
+                       << hex(import.source->nid)
+                       << ", current_pc - state.memory_base);";
             }
             stream << " state.pc = state.gpr[31]; return true;\n";
         }
@@ -2336,8 +2721,7 @@ void emit_project(const ElfImage& image, const std::filesystem::path& directory,
                "  if (!psprecomp::platform::patch_imports(state)) return 3;\n"
                "  std::fprintf(stderr, "
                "\"[psprecomp:macos] entering module_start\\n\");\n"
-               "  psprecomp::generated::run(state, return_address, "
-               "0x7fffffffffffffffULL);\n"
+               "  refract::Runtime::instance().execute_guest(state);\n"
                "  std::fprintf(stderr, "
                "\"[psprecomp:macos] stopped: "
                "reason=%u pc=%08x\\n\", static_cast<unsigned>("
@@ -2345,6 +2729,419 @@ void emit_project(const ElfImage& image, const std::filesystem::path& directory,
                "  refract::Runtime::instance().run_host_loop();\n"
                "  return static_cast<int>(state.gpr[2]);\n"
                "}\n";
+    }
+    {
+        std::ofstream stream(directory / "psp_entry.S",
+                             std::ios::binary | std::ios::trunc);
+        if (!stream) {
+            throw std::runtime_error("cannot create PSP guest trampoline");
+        }
+        stream << "# Calls relocated Allegrex code while preserving the "
+                  "generated loader's $gp.\n"
+                  ".set noreorder\n.text\n.align 2\n"
+                  ".globl psprecomp_call_guest\n"
+                  ".type psprecomp_call_guest, @function\n"
+                  ".ent psprecomp_call_guest, 0\n"
+                  "psprecomp_call_guest:\n"
+                  "addiu $sp, $sp, -32\n"
+                  "sw $ra, 28($sp)\n"
+                  "sw $gp, 24($sp)\n"
+                  "move $t9, $a0\n"
+                  "move $gp, $a1\n"
+                  "move $a0, $a2\n"
+                  "move $a1, $a3\n"
+                  "jalr $t9\n"
+                  "nop\n"
+                  "lw $gp, 24($sp)\n"
+                  "lw $ra, 28($sp)\n"
+                  "jr $ra\n"
+                  "addiu $sp, $sp, 32\n"
+                  ".end psprecomp_call_guest\n"
+                  ".size psprecomp_call_guest, .-psprecomp_call_guest\n";
+    }
+    if (!psp_overlays.empty()) {
+        {
+            std::ofstream stream(platform_directory / "psp" / "overlay.cpp",
+                                 std::ios::binary | std::ios::trunc);
+            if (!stream) {
+                throw std::runtime_error(
+                    "cannot create generated PSP overlay runtime");
+            }
+            stream << "// Generated by psprecomp. Do not edit.\n"
+                      "#include \"generated.hpp\"\n"
+                      "#include <psprecomp/overlay.hpp>\n"
+                      "#include <cstddef>\n"
+                      "#include <cstdint>\n\n"
+                      "namespace psprecomp::generated {\n";
+            for (const auto& overlay : psp_overlays) {
+                stream << "bool " << function_name(overlay.start)
+                       << "(State&, std::uint32_t);\n";
+            }
+            stream << "} // namespace psprecomp::generated\n\n";
+            for (const auto& route : psp_overlay_routes) {
+                stream << "extern \"C\" void psprecomp_overlay_stub_"
+                       << route.index << "();\n";
+            }
+            stream << "\nnamespace {\n"
+                      "using Runner = bool (*)(psprecomp::State&, "
+                      "std::uint32_t);\n"
+                      "struct Overlay { std::uint32_t start; "
+                      "std::uint32_t end; Runner runner; "
+                      "std::size_t entry_route; };\n"
+                      "struct Route { std::size_t overlay_index; "
+                      "std::uint32_t entry; std::uint32_t link_register; "
+                      "bool resume; void (*stub)(); };\n"
+                      "constexpr Overlay overlays[] = {\n";
+            for (const auto& overlay : psp_overlays) {
+                stream << "  {" << hex(overlay.start) << ", "
+                       << hex(overlay.end)
+                       << ", &psprecomp::generated::"
+                       << function_name(overlay.start)
+                       << ", " << overlay.entry_route
+                       << "},\n";
+            }
+            stream << "};\n"
+                      "constexpr Route routes[] = {\n";
+            for (const auto& route : psp_overlay_routes) {
+                stream << "  {" << route.overlay_index << ", "
+                       << hex(route.entry) << ", " << route.link_register
+                       << ", "
+                       << (route.resume ? "true" : "false")
+                       << ", &psprecomp_overlay_stub_" << route.index
+                       << "},\n";
+            }
+            stream << "};\n"
+                      "std::uint8_t* guest_memory;\n"
+                      "std::uint32_t guest_base;\n"
+                      "bool overlays_ready;\n"
+                      "\n"
+                      "void copy_to_state(const psprecomp::PspOverlayContext& "
+                      "context, psprecomp::State& state) {\n"
+                      "  for (std::size_t i = 0; i < 32U; ++i) "
+                      "state.gpr[i] = context.gpr[i];\n"
+                      "  state.gpr[0] = 0U; state.hi = context.hi; "
+                      "state.lo = context.lo;\n"
+                      "  for (std::size_t i = 0; i < 32U; ++i) "
+                      "state.fpr[i] = context.fpr[i];\n"
+                      "  state.fcr31 = context.fcr31;\n"
+                      "  for (std::size_t matrix = 0; matrix < 8U; "
+                      "++matrix) {\n"
+                      "    for (std::size_t column = 0; column < 4U; "
+                      "++column) {\n"
+                      "      for (std::size_t row = 0; row < 4U; ++row) {\n"
+                      "        const auto physical = (matrix * 4U + column) "
+                      "* 4U + row;\n"
+                      "        const auto logical = matrix * 4U + column + "
+                      "row * 32U;\n"
+                      "        state.vfpu[logical] = context.vfpu[physical];\n"
+                      "      }\n"
+                      "    }\n"
+                      "  }\n"
+                      "  for (std::size_t i = 0; i < 16U; ++i) "
+                      "state.vfpu_ctrl[i] = context.vfpu_ctrl[i];\n"
+                      "}\n"
+                      "\n"
+                      "void copy_from_state(const psprecomp::State& state, "
+                      "psprecomp::PspOverlayContext& context) {\n"
+                      "  for (std::size_t i = 0; i < 32U; ++i) "
+                      "context.gpr[i] = state.gpr[i];\n"
+                      "  context.gpr[0] = 0U; context.hi = state.hi; "
+                      "context.lo = state.lo;\n"
+                      "  for (std::size_t i = 0; i < 32U; ++i) "
+                      "context.fpr[i] = state.fpr[i];\n"
+                      "  context.fcr31 = state.fcr31;\n"
+                      "  for (std::size_t matrix = 0; matrix < 8U; "
+                      "++matrix) {\n"
+                      "    for (std::size_t column = 0; column < 4U; "
+                      "++column) {\n"
+                      "      for (std::size_t row = 0; row < 4U; ++row) {\n"
+                      "        const auto physical = (matrix * 4U + column) "
+                      "* 4U + row;\n"
+                      "        const auto logical = matrix * 4U + column + "
+                      "row * 32U;\n"
+                      "        context.vfpu[physical] = state.vfpu[logical];\n"
+                      "      }\n"
+                      "    }\n"
+                      "  }\n"
+                      "  for (std::size_t i = 0; i < 16U; ++i) "
+                      "context.vfpu_ctrl[i] = state.vfpu_ctrl[i];\n"
+                      "  context.pc = state.pc;\n"
+                      "}\n"
+                      "} // namespace\n\n"
+                      "extern \"C\" bool psprecomp_install_overlays("
+                      "std::uint8_t* memory, std::uint32_t base) {\n"
+                      "  if (memory == nullptr) return false;\n"
+                      "  guest_memory = memory; guest_base = base;\n"
+                      "  for (const auto& overlay : overlays) {\n"
+                      "    if (overlay.start > "
+                      "psprecomp::generated::guest_memory_size || "
+                      "psprecomp::generated::guest_memory_size - "
+                      "overlay.start < 8U) return false;\n"
+                      "    const auto entry = base + overlay.start;\n"
+                      "    const auto& route = routes[overlay.entry_route];\n"
+                      "    const auto target = static_cast<std::uint32_t>("
+                      "reinterpret_cast<std::uintptr_t>(route.stub));\n"
+                      "    if (((entry + 4U) & 0xf0000000U) != "
+                      "(target & 0xf0000000U)) return false;\n"
+                      "    auto* words = reinterpret_cast<volatile "
+                      "std::uint32_t*>(memory + overlay.start);\n"
+                      "    words[0] = 0x08000000U | ((target >> 2U) & "
+                      "0x03ffffffU); words[1] = 0U;\n"
+                      "  }\n"
+                      "  overlays_ready = true; return true;\n"
+                      "}\n\n"
+                      "extern \"C\" void psprecomp_overlay_run("
+                      "std::uint32_t route_index, "
+                      "psprecomp::PspOverlayContext* context) {\n"
+                      "  if (context == nullptr || !overlays_ready || "
+                      "route_index >= sizeof(routes) / sizeof(routes[0])) "
+                      "return;\n"
+                      "  const auto& route = routes[route_index];\n"
+                      "  const auto& overlay = overlays[route.overlay_index];\n"
+                      "  psprecomp::State state; copy_to_state(*context, "
+                      "state);\n"
+                      "  state.memory = guest_memory; state.memory_size = "
+                      "psprecomp::generated::guest_memory_size;\n"
+                      "  state.memory_base = guest_base; "
+                      "state.direct_memory_access = true;\n"
+                      "  state.pc = guest_base + route.entry;\n"
+                      "  if (route.resume) "
+                      "state.gpr[route.link_register] = state.pc;\n"
+                      "  state.stop_reason = psprecomp::StopReason::running;\n"
+                      "  const bool handled = overlay.runner(state, state.pc);\n"
+                      "  const auto overlay_begin = guest_base + "
+                      "overlay.start;\n"
+                      "  const auto overlay_end = guest_base + overlay.end;\n"
+                      "  const bool pc_in_overlay = state.pc >= "
+                      "overlay_begin && state.pc < overlay_end;\n"
+                      "  bool outbound_call = false;\n"
+                      "  if (!pc_in_overlay || state.pc == overlay_begin) {\n"
+                      "    for (const auto& candidate : routes) {\n"
+                      "      if (!candidate.resume || "
+                      "candidate.overlay_index != route.overlay_index || "
+                      "state.gpr[candidate.link_register] != "
+                      "guest_base + candidate.entry) "
+                      "continue;\n"
+                      "      state.gpr[candidate.link_register] = "
+                      "static_cast<std::uint32_t>("
+                      "reinterpret_cast<std::uintptr_t>(candidate.stub));\n"
+                      "      outbound_call = true; break;\n"
+                      "    }\n"
+                      "  }\n"
+                      "  if (!handled || state.stop_reason != "
+                      "psprecomp::StopReason::running || "
+                      "(pc_in_overlay && !(outbound_call && "
+                      "state.pc == overlay_begin))) {\n"
+                      "    copy_from_state(state, *context);\n"
+                      "    context->gpr[2] = 0x80020001U; "
+                      "context->pc = state.gpr[31]; return;\n"
+                      "  }\n"
+                      "  copy_from_state(state, *context);\n"
+                      "}\n";
+        }
+        {
+            std::ofstream stream(directory / "psp_overlays.S",
+                                 std::ios::binary | std::ios::trunc);
+            if (!stream) {
+                throw std::runtime_error(
+                    "cannot create generated PSP overlay trampoline");
+            }
+            stream << "# Generated full Allegrex/FPU/VFPU overlay bridge.\n"
+                      ".set noreorder\n.set noat\n.text\n.align 2\n";
+            for (const auto& route : psp_overlay_routes) {
+                stream << ".globl psprecomp_overlay_stub_" << route.index
+                       << "\n.type psprecomp_overlay_stub_" << route.index
+                       << ", @function\npsprecomp_overlay_stub_"
+                       << route.index << ":\n";
+                stream << "addiu $k0, $zero, "
+                       << (route.uses_vfpu ? 1 : 0) << "\n";
+                if (route.index <= 0x7fffU) {
+                    stream << "addiu $k1, $zero, " << route.index << "\n";
+                } else {
+                    stream << "lui $k1, " << (route.index >> 16U) << "\n"
+                           << "ori $k1, $k1, "
+                           << (route.index & 0xffffU) << "\n";
+                }
+                stream << "b psprecomp_overlay_common\nnop\n"
+                       << ".size psprecomp_overlay_stub_" << route.index
+                       << ", .-psprecomp_overlay_stub_" << route.index
+                       << "\n";
+            }
+            stream << ".align 4\n.type psprecomp_overlay_common, @function\n"
+                      ".ent psprecomp_overlay_common, 0\n"
+                      "psprecomp_overlay_common:\n"
+                      "addiu $sp, $sp, -864\n"
+                      "sw $zero, 0($sp)\n"
+                      "sw $at, 4($sp)\n"
+                      "sw $v0, 8($sp)\n"
+                      "sw $v1, 12($sp)\n"
+                      "sw $a0, 16($sp)\n"
+                      "sw $a1, 20($sp)\n"
+                      "sw $a2, 24($sp)\n"
+                      "sw $a3, 28($sp)\n"
+                      "sw $t0, 32($sp)\n"
+                      "sw $t1, 36($sp)\n"
+                      "sw $t2, 40($sp)\n"
+                      "sw $t3, 44($sp)\n"
+                      "sw $t4, 48($sp)\n"
+                      "sw $t5, 52($sp)\n"
+                      "sw $t6, 56($sp)\n"
+                      "sw $t7, 60($sp)\n"
+                      "sw $s0, 64($sp)\n"
+                      "sw $s1, 68($sp)\n"
+                      "sw $s2, 72($sp)\n"
+                      "sw $s3, 76($sp)\n"
+                      "sw $s4, 80($sp)\n"
+                      "sw $s5, 84($sp)\n"
+                      "sw $s6, 88($sp)\n"
+                      "sw $s7, 92($sp)\n"
+                      "sw $t8, 96($sp)\n"
+                      "sw $t9, 100($sp)\n"
+                      "sw $k0, 104($sp)\n"
+                      "sw $k1, 108($sp)\n"
+                      "sw $k0, 268($sp)\n"
+                      "sw $gp, 112($sp)\n"
+                      "addiu $k0, $sp, 864\n"
+                      "sw $k0, 116($sp)\n"
+                      "sw $fp, 120($sp)\n"
+                      "sw $ra, 124($sp)\n"
+                      "mfhi $k0\nsw $k0, 128($sp)\n"
+                      "mflo $k0\nsw $k0, 132($sp)\n";
+            for (std::size_t i = 0; i < 32U; ++i) {
+                stream << "swc1 $f" << i << ", " << (136U + i * 4U)
+                       << "($sp)\n";
+            }
+            stream << "cfc1 $k1, $31\nsw $k1, 264($sp)\n"
+                      "lw $k0, 268($sp)\n"
+                      "beq $k0, $zero, psprecomp_overlay_vfpu_saved\n"
+                      "nop\n";
+            for (std::size_t matrix = 0; matrix < 8U; ++matrix) {
+                for (std::size_t column = 0; column < 4U; ++column) {
+                    const auto quad = matrix * 4U + column;
+                    stream << "sv.q C" << matrix << column << "0, "
+                           << (272U + quad * 16U) << "($sp)\n";
+                }
+            }
+            for (std::size_t i = 0; i < 16U; ++i) {
+                stream << "mfvc $k0, $" << (128U + i) << "\n"
+                       << "sw $k0, " << (784U + i * 4U) << "($sp)\n";
+            }
+            stream << "psprecomp_overlay_vfpu_saved:\n"
+                      "move $a1, $sp\n"
+                      "jal psprecomp_overlay_run\n"
+                      "lw $a0, 108($sp)\n"
+                      "lw $k0, 268($sp)\n"
+                      "beq $k0, $zero, psprecomp_overlay_vfpu_restored\n"
+                      "nop\n";
+            for (std::size_t matrix = 0; matrix < 8U; ++matrix) {
+                for (std::size_t column = 0; column < 4U; ++column) {
+                    const auto quad = matrix * 4U + column;
+                    stream << "lv.q C" << matrix << column << "0, "
+                           << (272U + quad * 16U) << "($sp)\n";
+                }
+            }
+            for (std::size_t i = 0; i < 16U; ++i) {
+                stream << "lw $k0, " << (784U + i * 4U) << "($sp)\n"
+                       << "mtvc $k0, $" << (128U + i) << "\n";
+            }
+            stream << "psprecomp_overlay_vfpu_restored:\n";
+            for (std::size_t i = 0; i < 32U; ++i) {
+                stream << "lwc1 $f" << i << ", " << (136U + i * 4U)
+                       << "($sp)\n";
+            }
+            stream << "lw $k0, 264($sp)\nctc1 $k0, $31\n"
+                      "lw $k0, 128($sp)\nmthi $k0\n"
+                      "lw $k0, 132($sp)\nmtlo $k0\n"
+                      "lw $k1, 848($sp)\n"
+                      "lw $at, 4($sp)\n"
+                      "lw $v0, 8($sp)\n"
+                      "lw $v1, 12($sp)\n"
+                      "lw $a0, 16($sp)\n"
+                      "lw $a1, 20($sp)\n"
+                      "lw $a2, 24($sp)\n"
+                      "lw $a3, 28($sp)\n"
+                      "lw $t0, 32($sp)\n"
+                      "lw $t1, 36($sp)\n"
+                      "lw $t2, 40($sp)\n"
+                      "lw $t3, 44($sp)\n"
+                      "lw $t4, 48($sp)\n"
+                      "lw $t5, 52($sp)\n"
+                      "lw $t6, 56($sp)\n"
+                      "lw $t7, 60($sp)\n"
+                      "lw $s0, 64($sp)\n"
+                      "lw $s1, 68($sp)\n"
+                      "lw $s2, 72($sp)\n"
+                      "lw $s3, 76($sp)\n"
+                      "lw $s4, 80($sp)\n"
+                      "lw $s5, 84($sp)\n"
+                      "lw $s6, 88($sp)\n"
+                      "lw $s7, 92($sp)\n"
+                      "lw $t8, 96($sp)\n"
+                      "lw $t9, 100($sp)\n"
+                      "lw $gp, 112($sp)\n"
+                      "lw $fp, 120($sp)\n"
+                      "lw $ra, 124($sp)\n"
+                      "lw $k0, 104($sp)\n"
+                      "lw $sp, 116($sp)\n"
+                      "jr $k1\nnop\n"
+                      ".end psprecomp_overlay_common\n"
+                      ".size psprecomp_overlay_common, "
+                      ".-psprecomp_overlay_common\n";
+        }
+    }
+    {
+        std::map<std::pair<std::string, std::uint32_t>,
+                 std::vector<const PlatformImport*>> import_libraries;
+        for (const auto& import : platform_imports) {
+            import_libraries[{import.source->library,
+                              import.source->library_flags}]
+                .push_back(&import);
+        }
+        std::ofstream stream(directory / "imports.S",
+                             std::ios::binary | std::ios::trunc);
+        if (!stream) {
+            throw std::runtime_error("cannot create generated PSP imports");
+        }
+        stream << "# Generated from the original PRX import metadata.\n"
+                  ".set noreorder\n";
+        std::size_t library_index = 0;
+        for (const auto& [key, imports] : import_libraries) {
+            if (imports.size() > std::numeric_limits<std::uint16_t>::max()) {
+                throw std::runtime_error("PSP import library has too many stubs");
+            }
+            const auto label = "psprecomp_library_" +
+                               std::to_string(library_index++);
+            stream << ".section .rodata.sceResident, \"a\"\n"
+                      ".word 0\n."
+                   << label << "_name:\n.asciz \""
+                   << cpp_string(key.first)
+                   << "\"\n.align 2\n"
+                      ".section .lib.stub, \"a\", @progbits\n.word ."
+                   << label << "_name\n.word " << hex_address(key.second)
+                   << "\n.word "
+                   << hex_address((static_cast<std::uint32_t>(imports.size())
+                                   << 16U) |
+                                  5U)
+                   << "\n.word ." << label << "_nids\n.word ." << label
+                   << "_stubs\n"
+                      ".section .rodata.sceNid, \"a\"\n."
+                   << label << "_nids:\n";
+            for (const auto* import : imports) {
+                stream << ".word " << hex_address(import->source->nid) << "\n";
+            }
+            stream << ".section .sceStub.text, \"ax\", @progbits\n."
+                   << label << "_stubs:\n";
+            for (const auto* import : imports) {
+                stream << ".globl " << import->psp_symbol << "\n.type "
+                       << import->psp_symbol << ", @function\n.ent "
+                       << import->psp_symbol << ", 0\n"
+                       << import->psp_symbol << ":\n"
+                          "jr $ra\nnop\n.end "
+                       << import->psp_symbol << "\n.size "
+                       << import->psp_symbol << ", .-" << import->psp_symbol
+                       << "\n";
+            }
+        }
     }
     {
         std::ofstream stream(directory / "relocations.bin",
@@ -2365,6 +3162,17 @@ void emit_project(const ElfImage& image, const std::filesystem::path& directory,
             };
             stream.write(reinterpret_cast<const char*>(record), sizeof(record));
         }
+    }
+    {
+        std::ofstream stream(directory / "native_relocations.bin",
+                             std::ios::binary | std::ios::trunc);
+        if (!stream) {
+            throw std::runtime_error(
+                "cannot create compact native relocation image");
+        }
+        stream.write(
+            reinterpret_cast<const char*>(native_relocation_bytes.data()),
+            static_cast<std::streamsize>(native_relocation_bytes.size()));
     }
     {
         std::ofstream stream(directory / "imports.tsv",
@@ -2423,16 +3231,31 @@ void emit_project(const ElfImage& image, const std::filesystem::path& directory,
                << make_value(psp_sources)
                << " "
                << make_value(refract_sources)
-               << "\n"
-                  "OBJS = main.o platform.o dispatch.o psp_sdk_stubs.o";
-        for (const auto& name : source_names) {
-            if (name.rfind("shard_", 0) == 0 ||
-                name.rfind("func_", 0) == 0) {
-                stream << " " << name.substr(0, name.size() - 4) << ".o";
+               << "\n";
+        if (image.preferred_base == 0U) {
+            stream << "OBJS = main.o imports.o psp_entry.o";
+            if (!psp_overlays.empty()) {
+                stream << " overlay.o psp_overlays.o";
+                for (const auto& overlay : psp_overlays) {
+                    std::ostringstream object;
+                    object << " func_" << std::hex << std::setfill('0')
+                           << std::setw(8) << overlay.start << ".o";
+                    stream << object.str();
+                }
             }
+            stream << " native_guest_image.o\n";
+        } else {
+            stream << "OBJS = main.o platform.o dispatch.o "
+                      "psp_sdk_stubs.o";
+            for (const auto& name : source_names) {
+                if (name.rfind("shard_", 0) == 0 ||
+                    name.rfind("func_", 0) == 0) {
+                    stream << " " << name.substr(0, name.size() - 4) << ".o";
+                }
+            }
+            stream << " guest_image.o guest_relocations.o\n";
         }
-        stream << " guest_image.o guest_relocations.o\n"
-                  "BUILD_PRX = 1\n"
+        stream << "BUILD_PRX = 1\n"
                   "EXTRA_TARGETS = EBOOT.PBP\n"
                   "PSP_EBOOT_TITLE = "
                << make_value(options.display_name)
@@ -2450,10 +3273,17 @@ void emit_project(const ElfImage& image, const std::filesystem::path& directory,
                   "-lpspsascore -lpspaudio -lpspctrl -lpspdisplay -lpspge "
                   "-lpsppower -lpspusb -lpspumd -lpspwlan "
                   "-lpspnet_adhocctl -lpspnet_adhocmatching -lpspnet_adhoc "
-                  "-lpspnet\n\n"
-                  "include $(PSPSDK)/lib/build.mak\n\n"
+                  "-lpspnet\n\n";
+        for (const auto& overlay : psp_overlays) {
+            stream << "func_" << std::hex << std::setfill('0')
+                   << std::setw(8) << overlay.start
+                   << ".o: CXXFLAGS += -DPSPRECOMP_PSP_OVERLAY\n";
+        }
+        stream << "\ninclude $(PSPSDK)/lib/build.mak\n\n"
                   "guest_image.o: guest_image.bin\n"
                   "\tbin2o -n -i -a 64 $< $@ guest_image\n\n"
+                  "native_guest_image.o: native_guest_image.bin\n"
+                  "\tbin2o -n -i -a 64 $< $@ native_guest_image\n\n"
                   "guest_relocations.o: relocations.bin\n"
                   "\tbin2o -n -i -a 4 $< $@ guest_relocations\n";
     }
