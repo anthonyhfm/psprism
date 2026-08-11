@@ -27,6 +27,7 @@ void sceKernelStartThread(Implementation& implementation, psprecomp::State& stat
   thread->state->gpr[5] = argument_pointer;
   thread->state->gpr[26] = thread->tls_address;
   thread->state->gpr[27] = thread->tls_address + 0x80U;
+  thread->state->gpr[28] = state.gpr[28];
   thread->state->gpr[29] = thread->stack_address + thread->stack_size - 64U;
   if (argument_size != 0) {
     const auto copied_size = (argument_size + 15U) & ~15U;

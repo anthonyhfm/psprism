@@ -859,10 +859,12 @@ bool dispatch_guest_callback(Implementation& implementation,
     return false;
   auto callback_state = state;
   callback_state.pc = entry;
+  const auto guest_gp = callback_state.gpr[28];
   std::fill_n(callback_state.gpr, 32U, 0U);
   callback_state.gpr[4] = first_argument;
   callback_state.gpr[5] = second_argument;
   callback_state.gpr[6] = third_argument;
+  callback_state.gpr[28] = guest_gp;
   callback_state.gpr[29] = stack + callback_stack_size - 64U;
   callback_state.gpr[31] = return_address;
   callback_state.branch_pending = false;
