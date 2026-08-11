@@ -1,5 +1,6 @@
 void sceDisplayWaitVblankStart(Implementation& implementation, psprecomp::State& state) {
 #if !defined(__PSP__)
+  wait_for_next_vblank(implementation);
   state.gpr[2] = 0;
   return;
 #else

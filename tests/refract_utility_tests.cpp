@@ -4,6 +4,7 @@
 #include "stubs/io/devctl_state.hpp"
 #include "stubs/io/io_state.hpp"
 #include "stubs/kernel/mailbox_state.hpp"
+#include "stubs/display/display_state.hpp"
 #include "stubs/kernel/memory_state.hpp"
 
 #include <cstdint>
@@ -17,6 +18,10 @@
   } while (false)
 
 int main() {
+  CHECK(display_state::microseconds_until_next_vblank(0U) == 16683U);
+  CHECK(display_state::microseconds_until_next_vblank(1U) == 16682U);
+  CHECK(display_state::microseconds_until_next_vblank(16682U) == 1U);
+  CHECK(display_state::microseconds_until_next_vblank(16683U) == 16683U);
   struct FreeBlock {
     std::uint32_t address;
     std::uint32_t size;

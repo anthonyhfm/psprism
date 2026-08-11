@@ -823,7 +823,8 @@ void execute_ge_list(Implementation& implementation, psprecomp::State& state,
     list.call_stack = std::move(call_stack);
     list.ended = ended;
     host::end_ge_frame();
-    host::present_ge_frame();
+    if (ended)
+      host::present_ge_frame();
   }
   for (const auto& callback : pending_callbacks) {
     dispatch_guest_callback(implementation, state, callback.entry,
