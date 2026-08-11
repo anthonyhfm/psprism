@@ -109,6 +109,10 @@ int main() {
   CHECK(!refract::host::texture_color_doubling_enabled(0x00000100U));
   CHECK(refract::host::texture_color_doubling_enabled(0x00010000U));
   CHECK(refract::host::texture_color_doubling_enabled(0x00010104U));
+  CHECK(refract::host::clear_color_write_mask(0x00000001U) == 0x00U);
+  CHECK(refract::host::clear_color_write_mask(0x00000101U) == 0x07U);
+  CHECK(refract::host::clear_color_write_mask(0x00000201U) == 0x08U);
+  CHECK(refract::host::clear_color_write_mask(0x00000301U) == 0x0fU);
 
   const auto sfo = refract::utility::make_savedata_sfo(
       "Example Game", "Slot 1", "Progress at the first checkpoint");

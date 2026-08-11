@@ -91,6 +91,7 @@ struct GeometryState {
   bool depth_write{};
   std::uint32_t depth_function{1};
   bool alpha_blend{};
+  std::uint8_t color_write_mask{0x0fU};
   std::uint32_t blend_source{};
   std::uint32_t blend_destination{};
   std::uint32_t blend_equation{};
@@ -112,6 +113,16 @@ struct GeometryState {
   bool texture_color_double{};
   std::uint32_t texture_environment_color{};
 };
+
+constexpr std::uint8_t clear_color_write_mask(std::uint32_t clear_mode) {
+  constexpr std::uint8_t red = 1U << 0U;
+  constexpr std::uint8_t green = 1U << 1U;
+  constexpr std::uint8_t blue = 1U << 2U;
+  constexpr std::uint8_t alpha = 1U << 3U;
+  return static_cast<std::uint8_t>(
+      ((clear_mode & 0x100U) != 0U ? red | green | blue : 0U) |
+      ((clear_mode & 0x200U) != 0U ? alpha : 0U));
+}
 
 constexpr bool texture_color_doubling_enabled(std::uint32_t texture_function) {
   return (texture_function & 0x00010000U) != 0U;

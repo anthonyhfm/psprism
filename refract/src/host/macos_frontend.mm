@@ -478,7 +478,9 @@ refract::desktop::DialogFrame current_dialog_frame();
                             ((state.blend_destination & 0xfU) << 5U) |
                             ((state.blend_equation & 7U) << 9U) |
                             (source_fixed_class << 12U) |
-                            (destination_fixed_class << 14U);
+                            (destination_fixed_class << 14U) |
+                            ((state.color_write_mask & 0xfU) << 16U) |
+                            (state.alpha_blend ? (1U << 20U) : 0U);
   if (id<MTLRenderPipelineState> cached = self.blendPipelines[@(key)])
     return cached;
   MTLRenderPipelineDescriptor* descriptor =
@@ -491,7 +493,16 @@ refract::desktop::DialogFrame current_dialog_frame();
   descriptor.colorAttachments[0].pixelFormat = view.colorPixelFormat;
   descriptor.depthAttachmentPixelFormat = view.depthStencilPixelFormat;
   auto* attachment = descriptor.colorAttachments[0];
-  attachment.blendingEnabled = YES;
+  attachment.writeMask =
+      ((state.color_write_mask & 0x1U) != 0U ? MTLColorWriteMaskRed
+                                             : MTLColorWriteMaskNone) |
+      ((state.color_write_mask & 0x2U) != 0U ? MTLColorWriteMaskGreen
+                                             : MTLColorWriteMaskNone) |
+      ((state.color_write_mask & 0x4U) != 0U ? MTLColorWriteMaskBlue
+                                             : MTLColorWriteMaskNone) |
+      ((state.color_write_mask & 0x8U) != 0U ? MTLColorWriteMaskAlpha
+                                             : MTLColorWriteMaskNone);
+  attachment.blendingEnabled = state.alpha_blend ? YES : NO;
   attachment.sourceRGBBlendFactor = psp_blend_factor(
       std::min(state.blend_source, 10U), state.blend_fix_a, true);
   attachment.destinationRGBBlendFactor = psp_blend_factor(
@@ -633,16 +644,18 @@ refract::desktop::DialogFrame current_dialog_frame();
           [uploaded_textures setObject:sampled_texture forKey:texture_key];
         }
       }
+      const auto needs_special_pipeline =
+          batch.state.alpha_blend || batch.state.color_write_mask != 0x0fU;
       if (sampled_texture == nil) {
         [encoder setRenderPipelineState:
-                     batch.state.alpha_blend
+                     needs_special_pipeline
                          ? [self blendPipelineForView:view
                                             textured:NO
                                                state:batch.state]
                          : self.geometryPipeline];
       } else {
         [encoder setRenderPipelineState:
-                     batch.state.alpha_blend
+                     needs_special_pipeline
                          ? [self blendPipelineForView:view
                                             textured:YES
                                                state:batch.state]

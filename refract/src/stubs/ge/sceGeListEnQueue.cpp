@@ -588,6 +588,10 @@ void execute_ge_list(Implementation& implementation, psprecomp::State& state,
               render_state.depth_function = graphics.commands[0xdeU] & 7U;
               render_state.alpha_blend =
                   !clear_mode && (graphics.commands[0x21U] & 1U) != 0;
+              if (clear_mode) {
+                render_state.color_write_mask =
+                    host::clear_color_write_mask(graphics.commands[0xd3U]);
+              }
               render_state.blend_source = graphics.commands[0xdfU] & 0xfU;
               render_state.blend_destination =
                   (graphics.commands[0xdfU] >> 4U) & 0xfU;
