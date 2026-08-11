@@ -3,8 +3,8 @@
 void sceAtracGetSecondBufferInfo(Implementation& implementation, psprecomp::State& state) {
 #if !defined(__PSP__)
   static_cast<void>(implementation);
-  atrac_state::Decoder decoder;
-  if (!atrac_state::get(static_cast<int>(state.gpr[4]), decoder)) {
+  const auto decoder = atrac_state::get(static_cast<int>(state.gpr[4]));
+  if (decoder == nullptr) {
     state.gpr[2] = atrac_state::invalid_id;
     return;
   }

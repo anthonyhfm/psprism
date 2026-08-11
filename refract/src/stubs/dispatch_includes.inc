@@ -241,6 +241,7 @@
 #include "stubs/net/sceNetAdhocctlTerm.cpp"
 #include "stubs/net/sceNetAdhocctlInit.cpp"
 #include "stubs/audio/sceAtracGetNextSample.cpp"
+#include "stubs/audio/sceAtracGetAtracID.cpp"
 #include "stubs/audio/sceAtracGetStreamDataInfo.cpp"
 #include "stubs/audio/sceAtracReleaseAtracID.cpp"
 #include "stubs/audio/sceAtracDecodeData.cpp"

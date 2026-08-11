@@ -129,13 +129,8 @@ inline std::uint32_t output(psprecomp::State& state, std::uint32_t channel,
     stereo[frame * 2U] = scale_sample(left, left_volume);
     stereo[frame * 2U + 1U] = scale_sample(right, right_volume);
   }
-  refract::host::submit_audio(stereo.data(), selected.sample_count);
-  if (blocking && selected.sample_count != 0U) {
-    constexpr std::uint64_t sample_rate = 44100U;
-    refract::host::sleep_microseconds(static_cast<std::uint32_t>(
-        std::max<std::uint64_t>(
-            1U, selected.sample_count * 1000000ULL / sample_rate)));
-  }
+  refract::host::submit_audio(stereo.data(), selected.sample_count, channel,
+                              blocking);
   return selected.sample_count;
 }
 

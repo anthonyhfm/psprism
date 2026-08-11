@@ -2,6 +2,7 @@
 #include <refract/psp_sdk_stubs.hpp>
 
 #include "host/host.hpp"
+#include "../third_party/at3_standalone/at3_decoders.h"
 #include "stubs/io/devctl_state.hpp"
 #include "stubs/io/io_state.hpp"
 #include "stubs/kernel/mailbox_state.hpp"

@@ -138,6 +138,7 @@
   {"sceAudioOutput2Release", &sceAudioOutput2Release},
   {"sceAudioOutput2GetRestSample", &sceAudioOutput2GetRestSample},
   {"__sceSasGetOutputmode", &__sceSasGetOutputmode},
+  {"sceAtracGetAtracID", &sceAtracGetAtracID},
   {"sceAtracSetData", &sceAtracSetData},
   {"sceAtracGetChannel", &sceAtracGetChannel},
   {"sceAtracResetPlayPosition", &sceAtracResetPlayPosition},

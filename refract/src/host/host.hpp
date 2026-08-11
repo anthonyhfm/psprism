@@ -14,6 +14,8 @@ std::uint64_t unix_seconds();
 void sleep_microseconds(std::uint32_t duration);
 bool submit_audio(const std::int16_t* interleaved_stereo,
                   std::uint32_t frame_count,
+                  std::uint32_t channel,
+                  bool blocking,
                   std::uint32_t sample_rate = 44100U);
 
 struct ControllerState {
