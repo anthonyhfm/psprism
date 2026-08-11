@@ -2,7 +2,9 @@
 #include <refract/psp_sdk_stubs.hpp>
 
 #include "host/host.hpp"
+#include "stubs/io/devctl_state.hpp"
 #include "stubs/io/io_state.hpp"
+#include "stubs/kernel/mailbox_state.hpp"
 #include "utility_data.hpp"
 
 #include <algorithm>
@@ -16,6 +18,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <deque>
 #include <fcntl.h>
 #include <filesystem>
 #include <fstream>
@@ -35,6 +38,9 @@ constexpr std::uint32_t unimplemented = 0x8002013aU;
 constexpr std::uint32_t io_error = 0x80010005U;
 constexpr std::uint32_t wait_timeout = 0x800201a8U;
 constexpr std::uint32_t semaphore_zero = 0x800201adU;
+constexpr std::uint32_t unknown_mailbox = 0x8002019bU;
+constexpr std::uint32_t mailbox_no_message = 0x800201b2U;
+constexpr std::uint32_t wait_deleted = 0x800201b5U;
 constexpr std::uint32_t out_of_memory = 0x80020190U;
 constexpr std::uint32_t utility_busy = 0x80110001U;
 constexpr std::uint32_t utility_cancelled = 0x80110302U;
@@ -525,6 +531,15 @@ struct Runtime::Implementation {
     std::uint32_t bits{};
   };
 
+  struct Mailbox {
+    std::mutex mutex;
+    std::condition_variable changed;
+    std::string name;
+    std::uint32_t attributes{};
+    std::deque<mailbox_state::Message> messages;
+    bool deleted{};
+  };
+
   struct MemoryBlock {
     std::uint32_t address{};
     std::uint32_t size{};
@@ -615,6 +630,7 @@ struct Runtime::Implementation {
   std::unordered_map<int, std::shared_ptr<Semaphore>> semaphores;
   std::unordered_map<int, std::shared_ptr<Mutex>> mutexes;
   std::unordered_map<int, std::shared_ptr<EventFlag>> event_flags;
+  std::unordered_map<int, std::shared_ptr<Mailbox>> mailboxes;
   std::unordered_map<int, MemoryBlock> memory_blocks;
   std::unordered_map<int, std::shared_ptr<FixedPool>> fixed_pools;
   std::unordered_map<int, std::shared_ptr<VariablePool>> variable_pools;
@@ -755,6 +771,10 @@ void request_guest_exit(Implementation& implementation) {
   for (const auto& [uid, event] : implementation.event_flags) {
     static_cast<void>(uid);
     event->changed.notify_all();
+  }
+  for (const auto& [uid, mailbox] : implementation.mailboxes) {
+    static_cast<void>(uid);
+    mailbox->changed.notify_all();
   }
   for (const auto& [uid, pool] : implementation.fixed_pools) {
     static_cast<void>(uid);

@@ -1,10 +1,13 @@
 #include "utility_data.hpp"
 #include "host/host.hpp"
 #include "stubs/ctrl/ctrl_state.hpp"
+#include "stubs/io/devctl_state.hpp"
 #include "stubs/io/io_state.hpp"
+#include "stubs/kernel/mailbox_state.hpp"
 #include "stubs/kernel/memory_state.hpp"
 
 #include <cstdint>
+#include <deque>
 #include <string>
 #include <vector>
 
@@ -45,6 +48,25 @@ int main() {
   CHECK(io_state::error_from_errno(ENOENT) == 0x80010002U);
   CHECK(io_state::error_from_errno(EIO) == 0x80010005U);
   CHECK(io_state::error_from_errno(0) == io_state::generic_io_error);
+  constexpr auto memory_stick = devctl_state::memory_stick_capacity();
+  CHECK(memory_stick.maximum_clusters != 0U);
+  CHECK(memory_stick.free_clusters == memory_stick.maximum_clusters);
+  CHECK(memory_stick.maximum_sectors == memory_stick.maximum_clusters);
+  CHECK(memory_stick.sector_size == 512U);
+  CHECK(memory_stick.sectors_per_cluster == 64U);
+  std::deque<mailbox_state::Message> fifo_mailbox;
+  CHECK(mailbox_state::enqueue(fifo_mailbox, 0U, 0x08801000U, 7U));
+  CHECK(mailbox_state::enqueue(fifo_mailbox, 0U, 0x08802000U, 1U));
+  CHECK(!mailbox_state::enqueue(fifo_mailbox, 0U, 0x08801000U, 4U));
+  CHECK(fifo_mailbox.front().address == 0x08801000U);
+  std::deque<mailbox_state::Message> priority_mailbox;
+  CHECK(mailbox_state::enqueue(priority_mailbox,
+                               mailbox_state::message_priority_attribute,
+                               0x08801000U, 7U));
+  CHECK(mailbox_state::enqueue(priority_mailbox,
+                               mailbox_state::message_priority_attribute,
+                               0x08802000U, 1U));
+  CHECK(priority_mailbox.front().address == 0x08802000U);
   CHECK(io_state::sector_byte_offset(7U).value_or(0U) == 14336U);
   CHECK(io_state::sector_byte_count(3U).value_or(0U) == 6144U);
   CHECK(io_state::complete_sector_count(6143U) == 2U);
