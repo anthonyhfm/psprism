@@ -187,6 +187,16 @@ inline bool interpret_allegrex(State& state, std::uint32_t current_pc) {
             state.gpr[rd] = as_s32(state.gpr[rs]) < as_s32(state.gpr[rt]);
             break;
         case 0x2b: state.gpr[rd] = state.gpr[rs] < state.gpr[rt]; break;
+        case 0x2c:
+            state.gpr[rd] = as_s32(state.gpr[rs]) > as_s32(state.gpr[rt])
+                                ? state.gpr[rs]
+                                : state.gpr[rt];
+            break;
+        case 0x2d:
+            state.gpr[rd] = as_s32(state.gpr[rs]) < as_s32(state.gpr[rt])
+                                ? state.gpr[rs]
+                                : state.gpr[rt];
+            break;
         default: fail(); break;
         }
         break;

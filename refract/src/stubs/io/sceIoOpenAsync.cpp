@@ -5,13 +5,15 @@ void sceIoOpenAsync(Implementation& implementation, psprecomp::State& state) {
         return;
       const std::string_view psp_path(path);
       const auto raw_disc = io_state::is_raw_disc_path(psp_path);
+      const auto whole_disc = io_state::is_whole_disc_path(psp_path);
       const auto raw_disc_view = io_state::parse_raw_disc_view(psp_path);
       if (raw_disc && !raw_disc_view) {
         state.gpr[2] = io_error;
         return;
       }
-      const auto resolved = raw_disc ? implementation.disc_image
-                                     : implementation.resolve_path(path);
+      const auto resolved = raw_disc || whole_disc
+                                ? implementation.disc_image
+                                : implementation.resolve_path(path);
       if ((state.gpr[5] & 0x0200U) != 0) {
         std::error_code ignored;
         std::filesystem::create_directories(resolved.parent_path(), ignored);
@@ -32,6 +34,8 @@ void sceIoOpenAsync(Implementation& implementation, psprecomp::State& state) {
         implementation.files.emplace(psp_descriptor, descriptor);
         if (raw_disc)
           implementation.file_views.emplace(psp_descriptor, *raw_disc_view);
+        if (whole_disc)
+          implementation.sector_files.emplace(psp_descriptor);
         implementation.async_results.emplace(psp_descriptor, psp_descriptor);
         state.gpr[2] = static_cast<std::uint32_t>(psp_descriptor);
       }

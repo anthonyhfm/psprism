@@ -35,7 +35,9 @@ void sceKernelWaitSema(Implementation& implementation, psprecomp::State& state) 
   if (semaphore->count < requested) {
     wait_status.emplace(current_thread_id, 3, static_cast<int>(state.gpr[4]));
   }
-  const auto available = [&] { return semaphore->count >= requested; };
+  const auto available = [&] {
+    return semaphore->count >= requested || implementation.exit_requested;
+  };
   {
     GuestExecutionPause pause(implementation);
     if (state.gpr[6] == 0) {
@@ -57,7 +59,8 @@ void sceKernelWaitSema(Implementation& implementation, psprecomp::State& state) 
         return;
       }
     }
-    semaphore->count -= requested;
+    if (!implementation.exit_requested)
+      semaphore->count -= requested;
     lock.unlock();
   }
   if (log_wait) {

@@ -755,6 +755,14 @@ std::string emit_instruction(std::uint32_t pc, std::uint32_t instruction,
         case 0x2b:
             out << reg(rd) << " = " << reg(rs) << " < " << reg(rt) << ";";
             break;
+        case 0x2c: // Allegrex max
+            out << reg(rd) << " = as_s32(" << reg(rs) << ") > as_s32("
+                << reg(rt) << ") ? " << reg(rs) << " : " << reg(rt) << ";";
+            break;
+        case 0x2d: // Allegrex min
+            out << reg(rd) << " = as_s32(" << reg(rs) << ") < as_s32("
+                << reg(rt) << ") ? " << reg(rs) << " : " << reg(rt) << ";";
+            break;
         case 0x2e: { // msub
             out << "{ const auto product = static_cast<std::int64_t>(as_s32("
                 << reg(rs) << ")) * static_cast<std::int64_t>(as_s32("

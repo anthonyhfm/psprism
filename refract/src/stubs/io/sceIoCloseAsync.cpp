@@ -7,6 +7,7 @@ void sceIoCloseAsync(Implementation& implementation, psprecomp::State& state) {
   const auto result = ::close(found->second) == 0 ? 0U : io_error;
   implementation.files.erase(found);
   implementation.file_views.erase(psp_descriptor);
+  implementation.sector_files.erase(psp_descriptor);
   implementation.async_results[psp_descriptor] =
       static_cast<std::int64_t>(static_cast<std::int32_t>(result));
   state.gpr[2] = 0U;

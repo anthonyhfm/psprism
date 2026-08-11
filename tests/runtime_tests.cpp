@@ -50,6 +50,25 @@ int main() {
     CHECK(psprecomp::interpret_allegrex(bit_count_state, 0x2004U));
     CHECK(bit_count_state.gpr[6] == 0U);
 
+    std::array<std::uint8_t, 8> allegrex_min_max_code{};
+    psprecomp::State min_max_state;
+    min_max_state.memory = allegrex_min_max_code.data();
+    min_max_state.memory_size = allegrex_min_max_code.size();
+    min_max_state.memory_base = 0x3000U;
+    min_max_state.pc = min_max_state.memory_base;
+    constexpr auto max_r5_r10_r11 =
+        (10U << 21U) | (11U << 16U) | (5U << 11U) | 0x2cU;
+    constexpr auto min_r6_r10_r11 =
+        (10U << 21U) | (11U << 16U) | (6U << 11U) | 0x2dU;
+    psprecomp::store32(min_max_state, 0x3000U, max_r5_r10_r11);
+    psprecomp::store32(min_max_state, 0x3004U, min_r6_r10_r11);
+    min_max_state.gpr[10] = static_cast<std::uint32_t>(-4);
+    min_max_state.gpr[11] = 7U;
+    CHECK(psprecomp::interpret_allegrex(min_max_state, 0x3000U));
+    CHECK(min_max_state.gpr[5] == 7U);
+    CHECK(psprecomp::interpret_allegrex(min_max_state, 0x3004U));
+    CHECK(min_max_state.gpr[6] == static_cast<std::uint32_t>(-4));
+
     (void)psprecomp::load16(state, 0x1001);
     CHECK(state.stop_reason == psprecomp::StopReason::memory_fault);
     CHECK(state.fault_address == 0x1001);

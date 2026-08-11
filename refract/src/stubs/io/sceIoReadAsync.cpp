@@ -7,6 +7,15 @@ void sceIoReadAsync(Implementation& implementation, psprecomp::State& state) {
     state.gpr[2] = io_error;
     return;
   }
+  const auto sector_file = implementation.sector_files.contains(psp_descriptor);
+  if (sector_file) {
+    const auto byte_count = io_state::sector_byte_count(state.gpr[6]);
+    if (!byte_count) {
+      state.gpr[2] = io_error;
+      return;
+    }
+    size = *byte_count;
+  }
   const auto view = implementation.file_views.find(psp_descriptor);
   if (view != implementation.file_views.end()) {
     const auto position = ::lseek(descriptor, 0, SEEK_CUR);
@@ -31,7 +40,11 @@ void sceIoReadAsync(Implementation& implementation, psprecomp::State& state) {
   implementation.async_results[psp_descriptor] =
       result < 0
           ? static_cast<std::int64_t>(static_cast<std::int32_t>(io_error))
-          : result;
+          : static_cast<std::int64_t>(
+                sector_file
+                    ? io_state::complete_sector_count(
+                          static_cast<std::uint64_t>(result))
+                    : static_cast<std::uint64_t>(result));
   state.gpr[2] = 0U;
   return;
 #else

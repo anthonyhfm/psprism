@@ -1,26 +1,54 @@
 void sceIoLseekAsync(Implementation& implementation, psprecomp::State& state) {
 #if !defined(__PSP__)
-      const auto descriptor =
-          implementation.descriptor(static_cast<int>(state.gpr[4]));
+      const auto psp_descriptor = static_cast<int>(state.gpr[4]);
+      const auto descriptor = implementation.descriptor(psp_descriptor);
       if (descriptor < 0) {
         state.gpr[2] = io_error;
         return;
       }
-      auto bits = static_cast<std::uint64_t>(state.gpr[5]) |
-                  static_cast<std::uint64_t>(state.gpr[6]) << 32U;
-      const auto offset = std::bit_cast<std::int64_t>(bits);
-      const auto view = implementation.file_views.find(
-          static_cast<int>(state.gpr[4]));
+      // Under the PSP EABI, the 64-bit offset is aligned to the even a2/a3
+      // register pair.  The following argument is consequently in t0.
+      const auto offset =
+          io_state::signed_from_words(state.gpr[6], state.gpr[7]);
+      const auto whence = state.gpr[8];
+      const auto view = implementation.file_views.find(psp_descriptor);
+      const auto sector_file =
+          implementation.sector_files.contains(psp_descriptor);
       off_t result{-1};
-      if (view == implementation.file_views.end()) {
-        result = ::lseek(descriptor, offset, static_cast<int>(state.gpr[7]));
+      if (sector_file) {
+        std::optional<std::uint64_t> origin;
+        if (whence == SEEK_SET) {
+          origin = 0U;
+        } else if (whence == SEEK_CUR) {
+          const auto current = ::lseek(descriptor, 0, SEEK_CUR);
+          if (current >= 0)
+            origin = io_state::complete_sector_count(
+                static_cast<std::uint64_t>(current));
+        } else if (whence == SEEK_END) {
+          const auto end = ::lseek(descriptor, 0, SEEK_END);
+          if (end >= 0)
+            origin = io_state::complete_sector_count(
+                static_cast<std::uint64_t>(end));
+        }
+        const auto logical = origin ? io_state::add_signed(*origin, offset)
+                                    : std::nullopt;
+        const auto byte_offset =
+            logical ? io_state::sector_byte_offset(*logical) : std::nullopt;
+        if (logical && byte_offset &&
+            *byte_offset <= static_cast<std::uint64_t>(
+                                std::numeric_limits<off_t>::max()) &&
+            ::lseek(descriptor, static_cast<off_t>(*byte_offset), SEEK_SET) >=
+                0)
+          result = static_cast<off_t>(*logical);
+      } else if (view == implementation.file_views.end()) {
+        result = ::lseek(descriptor, offset, static_cast<int>(whence));
       } else {
         std::optional<std::uint64_t> origin;
-        if (state.gpr[7] == SEEK_SET) {
+        if (whence == SEEK_SET) {
           origin = 0U;
-        } else if (state.gpr[7] == SEEK_END) {
+        } else if (whence == SEEK_END) {
           origin = view->second.size;
-        } else if (state.gpr[7] == SEEK_CUR) {
+        } else if (whence == SEEK_CUR) {
           const auto current = ::lseek(descriptor, 0, SEEK_CUR);
           if (current >= 0 &&
               static_cast<std::uint64_t>(current) >= view->second.base)
@@ -38,7 +66,7 @@ void sceIoLseekAsync(Implementation& implementation, psprecomp::State& state) {
                     SEEK_SET) >= 0)
           result = static_cast<off_t>(*logical);
       }
-      implementation.async_results[static_cast<int>(state.gpr[4])] =
+      implementation.async_results[psp_descriptor] =
           result < 0 ? static_cast<std::int64_t>(static_cast<std::int32_t>(io_error))
                      : result;
       state.gpr[2] = 0U;

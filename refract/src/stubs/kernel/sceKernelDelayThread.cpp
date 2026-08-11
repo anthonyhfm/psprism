@@ -10,7 +10,10 @@ void sceKernelDelayThread(Implementation& implementation, psprecomp::State& stat
   thread_status::ScopedWait delay_status(current_thread_id, 2, 0);
   {
     GuestExecutionPause pause(implementation);
-    host::sleep_microseconds(state.gpr[4]);
+    std::unique_lock lock(implementation.exit_mutex);
+    implementation.exit_changed.wait_for(
+        lock, std::chrono::microseconds(state.gpr[4]),
+        [&] { return implementation.exit_requested.load(); });
   }
   state.gpr[2] = 0;
   return;

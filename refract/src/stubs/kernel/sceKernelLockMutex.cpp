@@ -16,7 +16,9 @@ void sceKernelLockMutex(Implementation& implementation, psprecomp::State& state)
   }
   std::unique_lock lock(mutex->mutex);
   const auto available = [&] {
-    return mutex->lock_count == 0 || mutex->owner_thread_id == current_thread_id;
+    return mutex->lock_count == 0 ||
+           mutex->owner_thread_id == current_thread_id ||
+           implementation.exit_requested;
   };
   std::uint32_t timeout_microseconds = 0;
   if (state.gpr[6] != 0) {
@@ -37,13 +39,13 @@ void sceKernelLockMutex(Implementation& implementation, psprecomp::State& state)
       acquired = mutex->changed.wait_for(
           lock, std::chrono::microseconds(timeout_microseconds), available);
     }
-    if (acquired) {
+    if (acquired && !implementation.exit_requested) {
       mutex->owner_thread_id = current_thread_id;
       mutex->lock_count += static_cast<int>(state.gpr[5] ? state.gpr[5] : 1);
     }
     lock.unlock();
   }
-  state.gpr[2] = acquired ? 0U : wait_timeout;
+  state.gpr[2] = acquired && !implementation.exit_requested ? 0U : wait_timeout;
   return;
 #else
   (void)implementation;

@@ -2,6 +2,7 @@
 #include "host/host.hpp"
 #include "stubs/ctrl/ctrl_state.hpp"
 #include "stubs/io/io_state.hpp"
+#include "stubs/kernel/memory_state.hpp"
 
 #include <cstdint>
 #include <string>
@@ -13,6 +14,21 @@
   } while (false)
 
 int main() {
+  struct FreeBlock {
+    std::uint32_t address;
+    std::uint32_t size;
+  };
+  const std::vector<FreeBlock> free_blocks{{0x08810000U, 0x2000U},
+                                           {0x08900000U, 0x5000U}};
+  CHECK(memory_state::maximum_free_size(0x100000U, 0x140000U,
+                                        free_blocks) == 0x40000U);
+  CHECK(memory_state::total_free_size(0x100000U, 0x140000U,
+                                      free_blocks) == 0x47000U);
+  CHECK(memory_state::maximum_free_size(0x180000U, 0x140000U,
+                                        free_blocks) == 0x5000U);
+  CHECK(memory_state::total_free_size(0x180000U, 0x140000U,
+                                      free_blocks) == 0x7000U);
+
   const auto raw_view = io_state::parse_raw_disc_view(
       "disc0:/sce_lbn0x10_size0x40000");
   CHECK(raw_view.has_value());
@@ -22,6 +38,17 @@ int main() {
             "umd0:/sce_lbn0x20_size0x1234") ==
         std::optional<io_state::FileView>({0x10000U, 0x1234U}));
   CHECK(!io_state::parse_raw_disc_view("disc0:/PSP_GAME/SYSDIR/EBOOT.BIN"));
+  CHECK(io_state::is_whole_disc_path("umd0:"));
+  CHECK(io_state::is_whole_disc_path("umd0:/"));
+  CHECK(!io_state::is_whole_disc_path("umd0:/PSP_GAME/USRDIR/data.bin"));
+  CHECK(!io_state::is_whole_disc_path("disc0:"));
+  CHECK(io_state::sector_byte_offset(7U).value_or(0U) == 14336U);
+  CHECK(io_state::sector_byte_count(3U).value_or(0U) == 6144U);
+  CHECK(io_state::complete_sector_count(6143U) == 2U);
+  CHECK(io_state::signed_from_words(143536U, 0U) == 143536);
+  CHECK(io_state::signed_from_words(0xffffffffU, 0xffffffffU) == -1);
+  CHECK(!io_state::sector_byte_offset(
+      std::numeric_limits<std::uint64_t>::max()));
   CHECK(!io_state::parse_raw_disc_view("disc0:/sce_lbn0xz_size0x10"));
   CHECK(!io_state::parse_raw_disc_view("disc0:/sce_lbn0x10_size0xz"));
   CHECK(io_state::readable_size(*raw_view, 0x8000U, 0x1000U) == 0x1000U);

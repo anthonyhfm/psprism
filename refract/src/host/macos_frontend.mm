@@ -119,8 +119,10 @@ std::vector<GeometryBatch> presented_geometry_batches;
 std::atomic_uint32_t display_framebuffer_address{0x04000000U};
 std::atomic_uint32_t keyboard_buttons{};
 std::atomic_uint32_t keyboard_latched_buttons{};
+std::atomic_uint64_t keyboard_latched_until{};
 std::atomic_uint32_t keyboard_analog_directions{};
 std::atomic_bool verbose_logging{};
+std::atomic_bool frontend_exit_requested{};
 id keyboard_event_monitor;
 id mouse_event_monitor;
 
@@ -139,8 +141,12 @@ void update_keyboard_mask(std::atomic_uint32_t& state, std::uint32_t mask,
 
 void update_keyboard_button(std::uint32_t mask, bool pressed) {
   update_keyboard_mask(keyboard_buttons, mask, pressed);
-  if (pressed)
+  if (pressed) {
     keyboard_latched_buttons.fetch_or(mask, std::memory_order_relaxed);
+    keyboard_latched_until.store(
+        refract::host::monotonic_microseconds() + 100000U,
+        std::memory_order_relaxed);
+  }
 }
 
 bool update_keyboard_key(unsigned short key_code, bool pressed) {
@@ -748,18 +754,40 @@ refract::desktop::DialogFrame current_dialog_frame();
 }
 @end
 
+void stop_frontend_event_loop() {
+  frontend_exit_requested.store(true, std::memory_order_relaxed);
+  NSEvent* wake_event =
+      [NSEvent otherEventWithType:NSEventTypeApplicationDefined
+                         location:NSZeroPoint
+                    modifierFlags:0
+                        timestamp:0
+                     windowNumber:0
+                          context:nil
+                          subtype:0
+                            data1:0
+                            data2:0];
+  [NSApp postEvent:wake_event atStart:NO];
+}
+
 @interface PsprismApplicationDelegate : NSObject <NSApplicationDelegate, NSWindowDelegate>
 @end
 
 @implementation PsprismApplicationDelegate
 - (BOOL)applicationShouldTerminateAfterLastWindowClosed:(NSApplication*)sender {
   static_cast<void>(sender);
-  return YES;
+  return NO;
+}
+
+- (NSApplicationTerminateReply)applicationShouldTerminate:
+    (NSApplication*)sender {
+  static_cast<void>(sender);
+  stop_frontend_event_loop();
+  return NSTerminateCancel;
 }
 
 - (void)windowWillClose:(NSNotification*)notification {
   static_cast<void>(notification);
-  [NSApp terminate:nil];
+  stop_frontend_event_loop();
 }
 @end
 
@@ -1066,11 +1094,25 @@ void initialize_frontend() {
 
 void run_event_loop() {
   initialize_frontend();
-  [NSApp run];
+  [NSApp finishLaunching];
+  while (!frontend_exit_requested.load(std::memory_order_relaxed)) {
+    @autoreleasepool {
+      NSEvent* event =
+          [NSApp nextEventMatchingMask:NSEventMaskAny
+                             untilDate:[NSDate dateWithTimeIntervalSinceNow:0.05]
+                                inMode:NSDefaultRunLoopMode
+                               dequeue:YES];
+      if (event != nil) [NSApp sendEvent:event];
+      [NSApp updateWindows];
+    }
+  }
 }
 
 void request_frontend_exit() {
-  dispatch_async(dispatch_get_main_queue(), ^{ [NSApp terminate:nil]; });
+  dispatch_async(dispatch_get_main_queue(), ^{
+    [window close];
+    stop_frontend_event_loop();
+  });
 }
 
 void present_frame(const std::uint8_t* pixels, std::uint32_t stride,
@@ -1174,9 +1216,14 @@ ControllerState controller_state() {
 #if defined(REFRACT_HAS_DESKTOP_DIALOGS)
   if (desktop_dialogs != nullptr && desktop_dialogs->visible()) return result;
 #endif
+  auto latched_buttons = keyboard_latched_buttons.load(std::memory_order_relaxed);
+  if (refract::host::monotonic_microseconds() >=
+      keyboard_latched_until.load(std::memory_order_relaxed)) {
+    keyboard_latched_buttons.store(0U, std::memory_order_relaxed);
+    latched_buttons = 0U;
+  }
   result.buttons = keyboard_buttons.load(std::memory_order_relaxed) |
-                   keyboard_latched_buttons.exchange(0,
-                                                     std::memory_order_relaxed);
+                   latched_buttons;
   const auto directions =
       keyboard_analog_directions.load(std::memory_order_relaxed);
   const auto horizontal = ((directions & analog_right) != 0 ? 1 : 0) -
@@ -1203,6 +1250,7 @@ void present_dialog(DialogModel model) {
       desktop_dialogs = std::make_unique<refract::desktop::DialogFrontend>();
     keyboard_buttons.store(0, std::memory_order_relaxed);
     keyboard_latched_buttons.store(0, std::memory_order_relaxed);
+    keyboard_latched_until.store(0, std::memory_order_relaxed);
     keyboard_analog_directions.store(0, std::memory_order_relaxed);
     previous_dialog_buttons = 0;
     dialog_controller_armed = false;

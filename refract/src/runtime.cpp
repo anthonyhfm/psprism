@@ -533,6 +533,7 @@ struct Runtime::Implementation {
   struct FixedPool {
     std::mutex mutex;
     std::condition_variable changed;
+    std::vector<MemoryBlock> backing;
     std::vector<std::uint32_t> available;
   };
 
@@ -593,6 +594,7 @@ struct Runtime::Implementation {
   std::unordered_set<std::string> warned;
   std::unordered_map<int, int> files;
   std::unordered_map<int, io_state::FileView> file_views;
+  std::unordered_set<int> sector_files;
   std::unordered_map<int, std::int64_t> async_results;
   std::unordered_map<int, Directory> directories;
   std::filesystem::path current_directory;
@@ -607,6 +609,8 @@ struct Runtime::Implementation {
   std::condition_variable guest_execution_changed;
   std::uint64_t next_guest_ticket{};
   std::uint64_t serving_guest_ticket{};
+  std::mutex exit_mutex;
+  std::condition_variable exit_changed;
   std::unordered_map<int, std::shared_ptr<GuestThread>> threads;
   std::unordered_map<int, std::shared_ptr<Semaphore>> semaphores;
   std::unordered_map<int, std::shared_ptr<Mutex>> mutexes;
@@ -735,6 +739,32 @@ struct Runtime::Implementation {
 };
 
 using Implementation = Runtime::Implementation;
+
+void request_guest_exit(Implementation& implementation) {
+  implementation.exit_requested = true;
+  implementation.exit_changed.notify_all();
+  std::lock_guard lock(implementation.objects_mutex);
+  for (const auto& [uid, semaphore] : implementation.semaphores) {
+    static_cast<void>(uid);
+    semaphore->changed.notify_all();
+  }
+  for (const auto& [uid, mutex] : implementation.mutexes) {
+    static_cast<void>(uid);
+    mutex->changed.notify_all();
+  }
+  for (const auto& [uid, event] : implementation.event_flags) {
+    static_cast<void>(uid);
+    event->changed.notify_all();
+  }
+  for (const auto& [uid, pool] : implementation.fixed_pools) {
+    static_cast<void>(uid);
+    pool->changed.notify_all();
+  }
+  for (const auto& [uid, pool] : implementation.variable_pools) {
+    static_cast<void>(uid);
+    pool->changed.notify_all();
+  }
+}
 
 void acquire_guest_execution(Implementation& implementation) {
   std::unique_lock lock(implementation.guest_execution_mutex);
@@ -884,7 +914,11 @@ namespace pspsdk {
   void name(psprecomp::State& state) {                                     \
     auto& implementation = Runtime::instance().implementation();           \
     ::refract::name(implementation, state);                                \
-    yield_guest(implementation);                                           \
+    if (implementation.exit_requested) {                                   \
+      state.stop_reason = psprecomp::StopReason::returned;                  \
+    } else {                                                               \
+      yield_guest(implementation);                                         \
+    }                                                                      \
   }
 #include <refract/psp_sdk_stubs.inc>
 #undef PSPSDK_STUB
@@ -1006,7 +1040,7 @@ void Runtime::execute_guest(psprecomp::State& state) {
 
 void Runtime::run_host_loop() {
   host::run_event_loop();
-  implementation_->exit_requested = true;
+  request_guest_exit(*implementation_);
   wait_for_guest_threads();
 }
 

@@ -16,9 +16,12 @@ void sceKernelCreateFpl(Implementation& implementation, psprecomp::State& state)
   for (std::uint32_t index = 0; index < block_count; ++index) {
     const auto address = implementation.allocate_heap(block_size);
     if (address == 0) {
+      for (const auto& block : pool->backing)
+        implementation.free_heap(block.address, block.size);
       state.gpr[2] = out_of_memory;
       return;
     }
+    pool->backing.push_back({address, block_size});
     pool->available.push_back(address);
   }
   const auto uid = implementation.allocate_uid();
