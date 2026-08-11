@@ -1,6 +1,8 @@
-void sceGeListEnQueue(Implementation& implementation, psprecomp::State& state) {
 #if !defined(__PSP__)
-  static std::atomic<std::uint32_t> next_list{1};
+void execute_ge_list(Implementation& implementation, psprecomp::State& state,
+                     int list_id, std::uint32_t start_address,
+                     std::uint32_t stall_address,
+                     std::uint32_t callback_id) {
   const auto submission = implementation.submitted_ge_lists++;
   struct PendingCallback {
     std::uint32_t entry;
@@ -13,18 +15,15 @@ void sceGeListEnQueue(Implementation& implementation, psprecomp::State& state) {
     auto& graphics = implementation.graphics;
     host::begin_ge_frame();
     std::array<std::uint32_t, 256> commands{};
-    struct GeCallFrame {
-      std::uint32_t return_address;
-      std::uint32_t offset_address;
-    };
-    std::vector<GeCallFrame> call_stack;
+    auto& list = implementation.ge_lists.at(list_id);
+    auto call_stack = std::move(list.call_stack);
     call_stack.reserve(64U);
     std::unordered_map<TextureKey, DecodedTexture, TextureKeyHash>
         texture_cache;
     texture_cache.reserve(64U);
     std::vector<std::uint32_t> vertex_indices;
     vertex_indices.reserve(4096U);
-    auto program_counter = state.gpr[4];
+    auto program_counter = start_address;
     std::uint32_t words{};
     std::uint32_t primitives{};
     std::uint32_t submitted_primitives{};
@@ -37,6 +36,10 @@ void sceGeListEnQueue(Implementation& implementation, psprecomp::State& state) {
     // games can legitimately execute well beyond 64K words before END.
     constexpr std::uint32_t max_ge_command_words = 1U << 20U;
     for (; words < max_ge_command_words; ++words) {
+      if (stall_address != 0U &&
+          psprecomp::canonical_address(program_counter) ==
+              psprecomp::canonical_address(stall_address))
+        break;
       const auto* pointer =
           psprecomp::mapped_address(state, program_counter, 4U);
       if (pointer == nullptr)
@@ -736,9 +739,10 @@ void sceGeListEnQueue(Implementation& implementation, psprecomp::State& state) {
                        program_counter);
         continue;
       } else if (command == 0x0eU || command == 0x0fU) {
-        const auto callback_id = static_cast<int>(state.gpr[6]);
+        const auto active_callback_id = static_cast<int>(callback_id);
         std::lock_guard callback_lock(implementation.objects_mutex);
-        const auto callback = implementation.ge_callbacks.find(callback_id);
+        const auto callback =
+            implementation.ge_callbacks.find(active_callback_id);
         if (callback != implementation.ge_callbacks.end()) {
           const auto signal = command == 0x0eU;
           const auto entry = signal ? callback->second.signal_entry
@@ -801,7 +805,7 @@ void sceGeListEnQueue(Implementation& implementation, psprecomp::State& state) {
                    "[psprism:ge] list=%u address=%08x stall=%08x words=%u "
                    "prims=%u submitted=%u invalid=%u/%u/%u target=%08x "
                    "ended=%u commands=",
-                   submission, state.gpr[4], state.gpr[5], words, primitives,
+                   submission, start_address, stall_address, words, primitives,
                    submitted_primitives, invalid_layouts, invalid_indices,
                    invalid_vertices, last_render_target, ended ? 1U : 0U);
       bool first = true;
@@ -814,6 +818,10 @@ void sceGeListEnQueue(Implementation& implementation, psprecomp::State& state) {
       }
       std::fputc('\n', stderr);
     }
+    list.program_counter = program_counter;
+    list.stall_address = stall_address;
+    list.call_stack = std::move(call_stack);
+    list.ended = ended;
     host::end_ge_frame();
     host::present_ge_frame();
   }
@@ -822,8 +830,22 @@ void sceGeListEnQueue(Implementation& implementation, psprecomp::State& state) {
                             callback.command_argument,
                             callback.common_argument);
   }
-  state.gpr[2] = next_list++;
-  return;
+}
+#endif
+
+void sceGeListEnQueue(Implementation& implementation, psprecomp::State& state) {
+#if !defined(__PSP__)
+  static std::atomic<std::uint32_t> next_list{1};
+  const auto list_id = static_cast<int>(next_list++);
+  {
+    std::lock_guard graphics_lock(implementation.graphics.mutex);
+    implementation.ge_lists.emplace(
+        list_id, Implementation::GeList{state.gpr[4], state.gpr[5],
+                                        state.gpr[6], {}, false});
+  }
+  execute_ge_list(implementation, state, list_id, state.gpr[4], state.gpr[5],
+                  state.gpr[6]);
+  state.gpr[2] = static_cast<std::uint32_t>(list_id);
 #else
   (void)implementation;
   state.gpr[2] = unimplemented;

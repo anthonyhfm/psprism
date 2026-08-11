@@ -28,13 +28,48 @@ struct FileView {
   bool operator==(const FileView&) const = default;
 };
 
+constexpr char ascii_lower(char value) {
+  return value >= 'A' && value <= 'Z'
+             ? static_cast<char>(value + ('a' - 'A'))
+             : value;
+}
+
+constexpr bool starts_with_case_insensitive(std::string_view value,
+                                            std::string_view prefix) {
+  if (value.size() < prefix.size())
+    return false;
+  for (std::size_t index = 0; index < prefix.size(); ++index) {
+    if (ascii_lower(value[index]) != ascii_lower(prefix[index]))
+      return false;
+  }
+  return true;
+}
+
+constexpr bool equals_case_insensitive(std::string_view left,
+                                       std::string_view right) {
+  return left.size() == right.size() &&
+         starts_with_case_insensitive(left, right);
+}
+
+inline std::size_t find_case_insensitive(std::string_view value,
+                                         std::string_view needle,
+                                         std::size_t position = 0U) {
+  for (; position + needle.size() <= value.size(); ++position) {
+    if (starts_with_case_insensitive(value.substr(position), needle))
+      return position;
+  }
+  return std::string_view::npos;
+}
+
 inline bool is_raw_disc_path(std::string_view path) {
-  return (path.starts_with("disc0:") || path.starts_with("umd0:")) &&
-         path.find("/sce_lbn0x") != std::string_view::npos;
+  return (starts_with_case_insensitive(path, "disc0:") ||
+          starts_with_case_insensitive(path, "umd0:")) &&
+         find_case_insensitive(path, "/sce_lbn0x") != std::string_view::npos;
 }
 
 inline bool is_whole_disc_path(std::string_view path) {
-  return path == "umd0:" || path == "umd0:/";
+  return equals_case_insensitive(path, "umd0:") ||
+         equals_case_insensitive(path, "umd0:/");
 }
 
 inline std::optional<std::uint64_t> sector_byte_offset(std::uint64_t sector) {
@@ -65,8 +100,9 @@ inline std::optional<FileView> parse_raw_disc_view(std::string_view path) {
     return std::nullopt;
   constexpr std::string_view lbn_marker = "/sce_lbn0x";
   constexpr std::string_view size_marker = "_size0x";
-  const auto lbn_begin = path.find(lbn_marker) + lbn_marker.size();
-  const auto lbn_end = path.find(size_marker, lbn_begin);
+  const auto lbn_begin =
+      find_case_insensitive(path, lbn_marker) + lbn_marker.size();
+  const auto lbn_end = find_case_insensitive(path, size_marker, lbn_begin);
   if (lbn_end == std::string_view::npos || lbn_end == lbn_begin)
     return std::nullopt;
   const auto size_begin = lbn_end + size_marker.size();

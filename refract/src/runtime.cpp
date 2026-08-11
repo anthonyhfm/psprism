@@ -577,6 +577,19 @@ struct Runtime::Implementation {
     std::uint32_t finish_argument{};
   };
 
+  struct GeList {
+    struct CallFrame {
+      std::uint32_t return_address{};
+      std::uint32_t offset_address{};
+    };
+
+    std::uint32_t program_counter{};
+    std::uint32_t stall_address{};
+    std::uint32_t callback_id{};
+    std::vector<CallFrame> call_stack;
+    bool ended{};
+  };
+
   struct Module {
     std::filesystem::path path;
     bool started{};
@@ -636,6 +649,7 @@ struct Runtime::Implementation {
   std::unordered_map<int, std::shared_ptr<VariablePool>> variable_pools;
   std::unordered_map<int, Callback> callbacks;
   std::unordered_map<int, GeCallback> ge_callbacks;
+  std::unordered_map<int, GeList> ge_lists;
   std::unordered_map<int, Module> modules;
   int next_file{3};
   int next_uid{0x100};
@@ -732,11 +746,11 @@ struct Runtime::Implementation {
         value.remove_prefix(1);
       return value;
     };
-    if (psp_path.starts_with("disc0:") || psp_path.starts_with("umd0:")) {
-      const auto prefix = psp_path.starts_with("disc0:") ? "disc0:" : "umd0:";
-      return configuration.disc_root / suffix(psp_path, prefix);
+    if (io_state::starts_with_case_insensitive(psp_path, "disc0:") ||
+        io_state::starts_with_case_insensitive(psp_path, "umd0:")) {
+      return configuration.disc_root / suffix(psp_path, "disc0:");
     }
-    if (psp_path.starts_with("ms0:")) {
+    if (io_state::starts_with_case_insensitive(psp_path, "ms0:")) {
       return configuration.writable_root / suffix(psp_path, "ms0:");
     }
     if (!psp_path.empty() && psp_path.front() == '/')

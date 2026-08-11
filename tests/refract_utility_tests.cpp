@@ -43,8 +43,12 @@ int main() {
   CHECK(!io_state::parse_raw_disc_view("disc0:/PSP_GAME/SYSDIR/EBOOT.BIN"));
   CHECK(io_state::is_whole_disc_path("umd0:"));
   CHECK(io_state::is_whole_disc_path("umd0:/"));
+  CHECK(io_state::is_whole_disc_path("UMD0:/"));
   CHECK(!io_state::is_whole_disc_path("umd0:/PSP_GAME/USRDIR/data.bin"));
   CHECK(!io_state::is_whole_disc_path("disc0:"));
+  CHECK(io_state::is_raw_disc_path("DISC0:/SCE_LBN0x10_SIZE0x20"));
+  CHECK((io_state::parse_raw_disc_view("DISC0:/SCE_LBN0x10_SIZE0x20") ==
+         io_state::FileView{0x8000U, 0x20U}));
   CHECK(io_state::error_from_errno(ENOENT) == 0x80010002U);
   CHECK(io_state::error_from_errno(EIO) == 0x80010005U);
   CHECK(io_state::error_from_errno(0) == io_state::generic_io_error);
