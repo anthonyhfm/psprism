@@ -24,6 +24,20 @@ target_link_libraries(psprism PRIVATE ${CMAKE_DL_LIBS})
 
 include(CTest)
 if(BUILD_TESTING)
+    set(REFRACT_ATRAC_TEST_SOURCES
+        refract/third_party/at3_standalone/atrac.cpp
+        refract/third_party/at3_standalone/atrac3.cpp
+        refract/third_party/at3_standalone/atrac3plus.cpp
+        refract/third_party/at3_standalone/atrac3plusdec.cpp
+        refract/third_party/at3_standalone/atrac3plusdsp.cpp
+        refract/third_party/at3_standalone/get_bits.cpp
+        refract/third_party/at3_standalone/compat.cpp
+        refract/third_party/at3_standalone/fft.cpp
+        refract/third_party/at3_standalone/mem.cpp)
+    add_library(refract_atrac_test STATIC ${REFRACT_ATRAC_TEST_SOURCES})
+    target_include_directories(refract_atrac_test PUBLIC
+        refract/third_party/at3_standalone)
+
     add_executable(runtime_tests tests/runtime_tests.cpp)
     target_include_directories(runtime_tests PRIVATE include)
     target_compile_options(runtime_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
@@ -55,6 +69,48 @@ if(BUILD_TESTING)
     target_compile_options(refract_audio_tests PRIVATE
         -Wall -Wextra -Wpedantic -Werror)
     add_test(NAME refract_audio_tests COMMAND refract_audio_tests)
+
+    add_executable(refract_atrac_tests tests/refract_atrac_tests.cpp)
+    target_include_directories(refract_atrac_tests PRIVATE
+        include
+        refract/src)
+    target_compile_options(refract_atrac_tests PRIVATE
+        -Wall -Wextra -Wpedantic -Werror)
+    target_link_libraries(refract_atrac_tests PRIVATE refract_atrac_test)
+    add_test(NAME refract_atrac_tests COMMAND refract_atrac_tests)
+
+    add_executable(refract_ge_tests
+        tests/refract_ge_tests.cpp
+        refract/src/runtime.cpp
+        refract/src/utility_data.cpp)
+    target_include_directories(refract_ge_tests PRIVATE
+        include
+        refract/include
+        refract/include/pspsdk
+        refract/src)
+    target_compile_options(refract_ge_tests PRIVATE
+        -Wall -Wextra -Wpedantic)
+    target_link_libraries(refract_ge_tests PRIVATE refract_atrac_test)
+    add_test(NAME refract_ge_tests COMMAND refract_ge_tests)
+
+    if(APPLE)
+        enable_language(OBJCXX)
+        add_executable(refract_frontend_tests tests/refract_frontend_tests.mm)
+        target_include_directories(refract_frontend_tests PRIVATE
+            include
+            refract/include
+            refract/include/pspsdk
+            refract/src)
+        target_compile_features(refract_frontend_tests PRIVATE cxx_std_20)
+        target_compile_options(refract_frontend_tests PRIVATE
+            -Wall -Wextra -Wpedantic -fobjc-arc)
+        target_link_libraries(refract_frontend_tests PRIVATE
+            "-framework AppKit"
+            "-framework GameController"
+            "-framework Metal"
+            "-framework MetalKit")
+        add_test(NAME refract_frontend_tests COMMAND refract_frontend_tests)
+    endif()
 
     find_program(PSP_GCC psp-gcc HINTS "$ENV{PSPDEV}/bin")
     find_program(PSP_LD psp-ld HINTS "$ENV{PSPDEV}/bin")

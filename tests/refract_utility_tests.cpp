@@ -49,6 +49,11 @@ int main() {
   CHECK(io_state::is_whole_disc_path("umd0:"));
   CHECK(io_state::is_whole_disc_path("umd0:/"));
   CHECK(io_state::is_whole_disc_path("UMD0:/"));
+  CHECK(io_state::equals_case_insensitive("Disc0:/PSP_GAME",
+                                           "dISC0:/psp_game"));
+  CHECK(!io_state::equals_case_insensitive("disc0:", "disc0:/"));
+  CHECK(io_state::find_case_insensitive("DISC0:/SCE_LBN0X20_SIZE0X40",
+                                        "_size0x") == 18U);
   CHECK(!io_state::is_whole_disc_path("umd0:/PSP_GAME/USRDIR/data.bin"));
   CHECK(!io_state::is_whole_disc_path("disc0:"));
   CHECK(io_state::is_raw_disc_path("DISC0:/SCE_LBN0x10_SIZE0x20"));
@@ -76,6 +81,12 @@ int main() {
                                mailbox_state::message_priority_attribute,
                                0x08802000U, 1U));
   CHECK(priority_mailbox.front().address == 0x08802000U);
+  CHECK(mailbox_state::enqueue(priority_mailbox,
+                               mailbox_state::message_priority_attribute,
+                               0x08803000U, 1U));
+  CHECK(priority_mailbox[0].address == 0x08802000U);
+  CHECK(priority_mailbox[1].address == 0x08803000U);
+  CHECK(priority_mailbox[2].address == 0x08801000U);
   CHECK(io_state::sector_byte_offset(7U).value_or(0U) == 14336U);
   CHECK(io_state::sector_byte_count(3U).value_or(0U) == 6144U);
   CHECK(io_state::complete_sector_count(6143U) == 2U);
@@ -90,6 +101,10 @@ int main() {
   CHECK(io_state::readable_size(*raw_view, 0x48000U, 0x2000U) == 0U);
   CHECK(io_state::add_signed(10U, -4).value_or(0U) == 6U);
   CHECK(!io_state::add_signed(3U, -4));
+  CHECK(io_state::add_signed(std::numeric_limits<std::uint64_t>::max(), 0)
+            .value_or(0U) == std::numeric_limits<std::uint64_t>::max());
+  CHECK(!io_state::add_signed(std::numeric_limits<std::uint64_t>::max(), 1));
+  CHECK(!io_state::add_signed(0U, std::numeric_limits<std::int64_t>::min()));
 
   ctrl_state::reset_for_tests();
   CHECK(ctrl_state::set_sampling_cycle(0U) == 0U);
@@ -107,12 +122,27 @@ int main() {
         ctrl_state::invalid_value);
 
   CHECK(!refract::host::texture_color_doubling_enabled(0x00000100U));
+  CHECK(!refract::host::texture_color_doubling_enabled(0x00feffffU));
   CHECK(refract::host::texture_color_doubling_enabled(0x00010000U));
   CHECK(refract::host::texture_color_doubling_enabled(0x00010104U));
+  CHECK(refract::host::texture_color_doubling_enabled(0xffffffffU));
   CHECK(refract::host::clear_color_write_mask(0x00000001U) == 0x00U);
   CHECK(refract::host::clear_color_write_mask(0x00000101U) == 0x07U);
   CHECK(refract::host::clear_color_write_mask(0x00000201U) == 0x08U);
   CHECK(refract::host::clear_color_write_mask(0x00000301U) == 0x0fU);
+  for (std::uint32_t clear_bits = 0U; clear_bits < 8U; ++clear_bits) {
+    const auto clear_mode = 1U | (clear_bits << 8U) | 0x00f000U;
+    const auto expected = static_cast<std::uint8_t>(
+        ((clear_bits & 1U) != 0U ? 0x07U : 0U) |
+        ((clear_bits & 2U) != 0U ? 0x08U : 0U));
+    CHECK(refract::host::clear_color_write_mask(clear_mode) == expected);
+  }
+  CHECK(display_state::microseconds_until_next_vblank(
+            display_state::vblank_period_microseconds * 10U) ==
+        display_state::vblank_period_microseconds);
+  CHECK(display_state::microseconds_until_next_vblank(
+            display_state::vblank_period_microseconds * 10U + 1U) ==
+        display_state::vblank_period_microseconds - 1U);
 
   const auto sfo = refract::utility::make_savedata_sfo(
       "Example Game", "Slot 1", "Progress at the first checkpoint");
