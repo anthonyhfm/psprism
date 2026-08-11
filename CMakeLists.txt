@@ -48,6 +48,14 @@ if(BUILD_TESTING)
         -Wall -Wextra -Wpedantic -Werror)
     add_test(NAME refract_utility_tests COMMAND refract_utility_tests)
 
+    add_executable(refract_audio_tests tests/refract_audio_tests.cpp)
+    target_include_directories(refract_audio_tests PRIVATE
+        include
+        refract/src)
+    target_compile_options(refract_audio_tests PRIVATE
+        -Wall -Wextra -Wpedantic -Werror)
+    add_test(NAME refract_audio_tests COMMAND refract_audio_tests)
+
     find_program(PSP_GCC psp-gcc HINTS "$ENV{PSPDEV}/bin")
     find_program(PSP_LD psp-ld HINTS "$ENV{PSPDEV}/bin")
     find_program(PSP_GXX psp-g++ HINTS "$ENV{PSPDEV}/bin")

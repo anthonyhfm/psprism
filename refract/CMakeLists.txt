@@ -30,6 +30,7 @@ target_compile_options(refract PRIVATE -Wall -Wextra -Wpedantic)
 target_compile_options(refract PRIVATE $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>)
 target_link_libraries(refract PUBLIC
   "-framework AppKit"
+  "-framework AudioToolbox"
   "-framework GameController"
   "-framework Metal"
   "-framework MetalKit"
@@ -41,4 +42,3 @@ if(REFRACT_DESKTOP_DIALOGS)
     "REFRACT_QT_PLATFORM_PLUGIN_PATH=\"${REFRACT_QT_PREFIX}/share/qt/plugins/platforms\"")
   target_link_libraries(refract PRIVATE Qt6::Widgets)
 endif()
-

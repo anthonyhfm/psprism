@@ -9,6 +9,7 @@
 #include <limits>
 #include <mutex>
 #include <unordered_map>
+#include <vector>
 
 #include "../../host/host.hpp"
 
@@ -48,6 +49,11 @@ struct Voice {
   std::uint64_t remaining_samples{};
   std::uint32_t pitch{0x1000U};
   std::uint32_t envelope_height{};
+  std::int32_t left_volume{static_cast<std::int32_t>(max_volume)};
+  std::int32_t right_volume{static_cast<std::int32_t>(max_volume)};
+  std::uint64_t position{};
+  std::size_t loop_start{};
+  std::vector<std::int16_t> samples;
 };
 
 struct Core {
@@ -73,6 +79,47 @@ inline std::uint32_t key(std::uint32_t address) {
 inline Core* find_unlocked(std::uint32_t address) {
   const auto found = cores().find(key(address));
   return found == cores().end() ? nullptr : &found->second;
+}
+
+inline std::int16_t clamp_sample(std::int64_t sample) {
+  return static_cast<std::int16_t>(std::clamp<std::int64_t>(
+      sample, std::numeric_limits<std::int16_t>::min(),
+      std::numeric_limits<std::int16_t>::max()));
+}
+
+inline std::vector<std::int16_t> decode_vag(const std::uint8_t* source,
+                                             std::size_t size) {
+  std::vector<std::int16_t> decoded;
+  if (source == nullptr || size < 16U) return decoded;
+  std::size_t offset = 0U;
+  if (size >= 0x30U && source[0] == 'V' && source[1] == 'A' &&
+      source[2] == 'G' && source[3] == 'p')
+    offset = 0x30U;
+  decoded.reserve((size - offset) / 16U * 28U);
+  constexpr std::int32_t coefficients[5][2] = {
+      {0, 0}, {60, 0}, {115, -52}, {98, -55}, {122, -60}};
+  std::int32_t previous_1 = 0;
+  std::int32_t previous_2 = 0;
+  for (; offset + 16U <= size; offset += 16U) {
+    const auto predictor = std::min<std::uint32_t>(source[offset] >> 4U, 4U);
+    const auto shift = std::min<std::uint32_t>(source[offset] & 0xfU, 12U);
+    const auto flags = source[offset + 1U];
+    for (std::size_t index = 0; index < 28U; ++index) {
+      const auto packed = source[offset + 2U + index / 2U];
+      const auto nibble = static_cast<std::int8_t>(
+          index % 2U == 0U ? packed << 4U : packed & 0xf0U) >> 4U;
+      auto sample = (static_cast<std::int32_t>(nibble) * 4096) >> shift;
+      sample += (previous_1 * coefficients[predictor][0] +
+                 previous_2 * coefficients[predictor][1] + 32) >>
+                6U;
+      const auto clamped = clamp_sample(sample);
+      decoded.push_back(clamped);
+      previous_2 = previous_1;
+      previous_1 = clamped;
+    }
+    if ((flags & 1U) != 0U) break;
+  }
+  return decoded;
 }
 
 inline std::uint32_t initialize(psprecomp::State& state,
@@ -120,36 +167,56 @@ inline std::uint32_t update_voice(std::uint32_t core_address,
 
 inline std::uint32_t mix(psprecomp::State& state, std::uint32_t core_address,
                          std::uint32_t output_address, bool preserve) {
-  std::uint32_t grain_size = 0U;
-  {
-    std::lock_guard lock(mutex());
-    auto* core = find_unlocked(core_address);
-    if (core == nullptr) return not_initialized;
-    grain_size = core->grain;
-    const auto channels = core->output_mode == 0U ? 2U : 4U;
-    const auto bytes = static_cast<std::size_t>(grain_size) * channels *
-                       sizeof(std::int16_t);
-    auto* output = psprecomp::mapped_address(state, output_address, bytes);
-    if (output == nullptr) return invalid_parameter;
-    if (!preserve) std::memset(output, 0, bytes);
-
-    for (auto& voice : core->voices) {
-      if (!voice.playing || voice.paused || voice.loop || voice.indefinite)
-        continue;
-      const auto consumed =
-          (static_cast<std::uint64_t>(grain_size) * voice.pitch + 0xfffU) >>
-          12U;
-      if (voice.remaining_samples <= consumed) {
-        voice.remaining_samples = 0U;
-        voice.playing = false;
-        voice.envelope_height = 0U;
-      } else {
-        voice.remaining_samples -= consumed;
-      }
+  std::lock_guard lock(mutex());
+  auto* core = find_unlocked(core_address);
+  if (core == nullptr) return not_initialized;
+  const auto grain_size = core->grain;
+  const auto channels = core->output_mode == 0U ? 2U : 4U;
+  const auto sample_total = static_cast<std::size_t>(grain_size) * channels;
+  const auto bytes = sample_total * sizeof(std::int16_t);
+  auto* output = psprecomp::mapped_address(state, output_address, bytes);
+  if (output == nullptr) return invalid_parameter;
+  std::vector<std::int64_t> mixed(sample_total);
+  if (preserve) {
+    for (std::size_t index = 0; index < sample_total; ++index) {
+      std::int16_t sample{};
+      std::memcpy(&sample, output + index * sizeof(sample), sizeof(sample));
+      mixed[index] = sample;
     }
   }
-  refract::host::sleep_microseconds(static_cast<std::uint32_t>(
-      std::max<std::uint64_t>(1U, grain_size * 1000000ULL / 44100ULL)));
+
+  for (auto& voice : core->voices) {
+    if (!voice.playing || voice.paused || voice.samples.empty()) continue;
+    for (std::size_t frame = 0; frame < grain_size; ++frame) {
+      auto sample_index = static_cast<std::size_t>(voice.position >> 12U);
+      if (sample_index >= voice.samples.size()) {
+        if (!voice.loop) {
+          voice.playing = false;
+          voice.envelope_height = 0U;
+          voice.remaining_samples = 0U;
+          break;
+        }
+        sample_index = std::min(voice.loop_start, voice.samples.size() - 1U);
+        voice.position = static_cast<std::uint64_t>(sample_index) << 12U;
+      }
+      const auto sample = voice.samples[sample_index];
+      mixed[frame * channels] +=
+          static_cast<std::int32_t>(sample) * voice.left_volume /
+          static_cast<std::int32_t>(max_volume);
+      mixed[frame * channels + 1U] +=
+          static_cast<std::int32_t>(sample) * voice.right_volume /
+          static_cast<std::int32_t>(max_volume);
+      voice.position += voice.pitch;
+    }
+    const auto position = static_cast<std::size_t>(voice.position >> 12U);
+    voice.remaining_samples = position < voice.samples.size()
+                                  ? voice.samples.size() - position
+                                  : 0U;
+  }
+  for (std::size_t index = 0; index < sample_total; ++index) {
+    const auto sample = clamp_sample(mixed[index]);
+    std::memcpy(output + index * sizeof(sample), &sample, sizeof(sample));
+  }
   return 0U;
 }
 
@@ -191,19 +258,22 @@ inline std::uint32_t set_voice(std::uint32_t core_address,
                                std::int32_t source_size, std::int32_t loop) {
   if (voice_index < 0 || voice_index >= static_cast<std::int32_t>(max_voices))
     return invalid_voice;
-  if (source_size == 0 || (static_cast<std::uint32_t>(source_size) & 0xfU) != 0U)
+  if (source_size <= 0 ||
+      (static_cast<std::uint32_t>(source_size) & 0xfU) != 0U)
     return invalid_parameter;
   if (loop != 0 && loop != 1) return invalid_loop;
-  if (psprecomp::mapped_address(state, source_address, 1U) == nullptr)
+  const auto* source = psprecomp::mapped_address(
+      state, source_address, static_cast<std::size_t>(source_size));
+  if (source == nullptr)
     return invalid_parameter;
+  auto samples = decode_vag(source, static_cast<std::size_t>(source_size));
+  if (samples.empty()) return invalid_parameter;
   return update_voice(core_address, voice_index, [&](Voice& voice) {
     voice = {};
     voice.configured = true;
     voice.loop = loop != 0;
-    if (source_size > 0) {
-      voice.remaining_samples =
-          static_cast<std::uint64_t>(source_size / 16) * 28U;
-    }
+    voice.samples = std::move(samples);
+    voice.remaining_samples = voice.samples.size();
     return 0U;
   });
 }
@@ -218,13 +288,19 @@ inline std::uint32_t set_voice_pcm(std::uint32_t core_address,
     return invalid_voice;
   if (sample_count <= 0 || sample_count > 0x10000) return invalid_pcm_size;
   if (loop_start >= sample_count) return invalid_loop;
-  if (psprecomp::mapped_address(state, source_address, 1U) == nullptr)
+  const auto bytes = static_cast<std::size_t>(sample_count) *
+                     sizeof(std::int16_t);
+  const auto* source = psprecomp::mapped_address(state, source_address, bytes);
+  if (source == nullptr)
     return invalid_parameter;
   return update_voice(core_address, voice_index, [&](Voice& voice) {
     voice = {};
     voice.configured = true;
-    voice.playing = true;
     voice.loop = loop_start >= 0;
+    voice.loop_start = loop_start >= 0 ? static_cast<std::size_t>(loop_start)
+                                       : 0U;
+    voice.samples.resize(static_cast<std::size_t>(sample_count));
+    std::memcpy(voice.samples.data(), source, bytes);
     voice.remaining_samples = static_cast<std::uint32_t>(sample_count);
     return 0U;
   });
@@ -234,6 +310,8 @@ inline std::uint32_t key_on(std::uint32_t core_address,
                             std::int32_t voice_index) {
   return update_voice(core_address, voice_index, [](Voice& voice) {
     if (voice.paused || voice.playing) return voice_paused;
+    voice.position = 0U;
+    voice.remaining_samples = voice.samples.size();
     voice.playing = true;
     voice.envelope_height = 0x40000000U;
     return 0U;
@@ -274,8 +352,11 @@ inline std::uint32_t set_volume(std::uint32_t core_address,
   if (!volume_valid(left) || !volume_valid(right) ||
       !volume_valid(effect_left) || !volume_valid(effect_right))
     return invalid_volume;
-  return update_voice(core_address, voice_index,
-                      [](Voice&) { return 0U; });
+  return update_voice(core_address, voice_index, [&](Voice& voice) {
+    voice.left_volume = left;
+    voice.right_volume = right;
+    return 0U;
+  });
 }
 
 inline std::uint32_t set_noise(std::uint32_t core_address,
