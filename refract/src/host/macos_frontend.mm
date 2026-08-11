@@ -62,6 +62,7 @@ struct FragmentState {
   std::uint32_t alpha_mask{0xff};
   std::uint32_t texture_function{};
   std::uint32_t texture_alpha_used{1};
+  std::uint32_t texture_color_double{};
   std::uint32_t texture_environment_color{};
 };
 
@@ -251,6 +252,7 @@ refract::desktop::DialogFrame current_dialog_frame();
       uint alpha_mask;
       uint texture_function;
       uint texture_alpha_used;
+      uint texture_color_double;
       uint texture_environment_color;
     };
     bool psprism_compare(uint value, uint reference, uint function) {
@@ -323,6 +325,8 @@ refract::desktop::DialogFrame current_dialog_frame();
         constant FragmentState& state [[buffer(1)]]) {
       float4 color = psprism_texture_combine(
           image.sample(texture_sampler, in.texture), in.color, state);
+      if (state.texture_color_double != 0)
+        color.rgb *= 2.0;
       return psprism_fragment_tests(color, state);
     }
   )METAL";
@@ -593,6 +597,7 @@ refract::desktop::DialogFrame current_dialog_frame();
           batch.state.alpha_mask,
           batch.state.texture_function,
           batch.state.texture_alpha_used ? 1U : 0U,
+          batch.state.texture_color_double ? 1U : 0U,
           batch.state.texture_environment_color};
       [encoder setFragmentBytes:&fragment_state
                          length:sizeof(fragment_state)

@@ -1,4 +1,5 @@
 #include "utility_data.hpp"
+#include "host/host.hpp"
 
 #include <cstdint>
 #include <string>
@@ -10,6 +11,10 @@
   } while (false)
 
 int main() {
+  CHECK(!refract::host::texture_color_doubling_enabled(0x00000100U));
+  CHECK(refract::host::texture_color_doubling_enabled(0x00010000U));
+  CHECK(refract::host::texture_color_doubling_enabled(0x00010104U));
+
   const auto sfo = refract::utility::make_savedata_sfo(
       "Example Game", "Slot 1", "Progress at the first checkpoint");
   CHECK(refract::utility::sfo_string(sfo, "TITLE") == "Example Game");

@@ -606,6 +606,9 @@ void sceGeListEnQueue(Implementation& implementation, psprecomp::State& state) {
               render_state.texture_function = graphics.commands[0xc9U] & 7U;
               render_state.texture_alpha_used =
                   (graphics.commands[0xc9U] & 0x100U) != 0;
+              render_state.texture_color_double =
+                  host::texture_color_doubling_enabled(
+                      graphics.commands[0xc9U]);
               render_state.texture_environment_color =
                   graphics.commands[0xcaU] & 0x00ffffffU;
               auto submitted_type = primitive_type;

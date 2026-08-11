@@ -106,8 +106,13 @@ struct GeometryState {
   bool texture_linear_filter{};
   std::uint32_t texture_function{};
   bool texture_alpha_used{true};
+  bool texture_color_double{};
   std::uint32_t texture_environment_color{};
 };
+
+constexpr bool texture_color_doubling_enabled(std::uint32_t texture_function) {
+  return (texture_function & 0x00010000U) != 0U;
+}
 
 void initialize_frontend();
 void set_verbose_logging(bool enabled);
