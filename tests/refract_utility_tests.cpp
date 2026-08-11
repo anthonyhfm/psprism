@@ -42,6 +42,9 @@ int main() {
   CHECK(io_state::is_whole_disc_path("umd0:/"));
   CHECK(!io_state::is_whole_disc_path("umd0:/PSP_GAME/USRDIR/data.bin"));
   CHECK(!io_state::is_whole_disc_path("disc0:"));
+  CHECK(io_state::error_from_errno(ENOENT) == 0x80010002U);
+  CHECK(io_state::error_from_errno(EIO) == 0x80010005U);
+  CHECK(io_state::error_from_errno(0) == io_state::generic_io_error);
   CHECK(io_state::sector_byte_offset(7U).value_or(0U) == 14336U);
   CHECK(io_state::sector_byte_count(3U).value_or(0U) == 6144U);
   CHECK(io_state::complete_sector_count(6143U) == 2U);

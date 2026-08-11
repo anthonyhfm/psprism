@@ -28,7 +28,7 @@ void sceIoOpenAsync(Implementation& implementation, psprecomp::State& state) {
         descriptor = -1;
       }
       if (descriptor < 0) {
-        state.gpr[2] = io_error;
+        state.gpr[2] = io_state::error_from_errno(errno);
       } else {
         const auto psp_descriptor = implementation.next_file++;
         implementation.files.emplace(psp_descriptor, descriptor);

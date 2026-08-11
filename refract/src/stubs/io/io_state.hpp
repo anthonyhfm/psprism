@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <bit>
+#include <cerrno>
 #include <charconv>
 #include <cstddef>
 #include <cstdint>
@@ -12,6 +13,13 @@
 namespace io_state {
 
 constexpr std::uint64_t sector_size = 2048U;
+constexpr std::uint32_t generic_io_error = 0x80010005U;
+
+inline std::uint32_t error_from_errno(int error) {
+  if (error <= 0 || error > 0xffff)
+    return generic_io_error;
+  return 0x80010000U | static_cast<std::uint32_t>(error);
+}
 
 struct FileView {
   std::uint64_t base{};
