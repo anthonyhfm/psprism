@@ -9,6 +9,18 @@
 
 namespace refract::host {
 
+constexpr std::uint64_t audio_callback_timeout_microseconds(
+    std::uint32_t frame_count, std::uint32_t sample_rate) {
+  constexpr std::uint64_t minimum_timeout = 100000U;
+  constexpr std::uint64_t maximum_timeout = 500000U;
+  if (sample_rate == 0U) return minimum_timeout;
+  const auto scaled = static_cast<std::uint64_t>(frame_count) * 4000000ULL /
+                      sample_rate;
+  if (scaled < minimum_timeout) return minimum_timeout;
+  if (scaled > maximum_timeout) return maximum_timeout;
+  return scaled;
+}
+
 std::uint64_t monotonic_microseconds();
 std::uint64_t unix_seconds();
 void sleep_microseconds(std::uint32_t duration);

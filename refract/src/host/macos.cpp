@@ -120,10 +120,13 @@ bool submit_audio(const std::int16_t* interleaved_stereo,
     // mutex while making a blocking output call, so waiting forever here can
     // freeze the entire game rather than merely dropping audio.
     if (output.callback_stalled) return false;
-    const auto buffer_duration = std::chrono::microseconds(
-        static_cast<std::uint64_t>(frame_count) * 1000000ULL / sample_rate);
-    const auto callback_timeout = std::max(
-        std::chrono::microseconds(100000), buffer_duration * 4);
+    // Large, valid PSP buffers can represent close to a second of audio.  A
+    // cold AudioQueue has occasionally failed to consume those initial
+    // buffers, and scaling this timeout without a ceiling makes a game's
+    // producer thread advance only once every several seconds.  Bound that
+    // failure mode while retaining four buffer durations for normal chunks.
+    const auto callback_timeout = std::chrono::microseconds(
+        audio_callback_timeout_microseconds(frame_count, sample_rate));
     if (!output.available.wait_for(lock, callback_timeout, [&output] {
           return output.queued_buffers < maximum_queued_buffers;
         })) {

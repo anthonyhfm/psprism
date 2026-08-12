@@ -45,6 +45,14 @@ void sleep_microseconds(std::uint32_t) {}
 } // namespace refract::host
 
 int main() {
+  CHECK(refract::host::audio_callback_timeout_microseconds(512U, 44100U) ==
+        100000U);
+  CHECK(refract::host::audio_callback_timeout_microseconds(2048U, 44100U) ==
+        185759U);
+  CHECK(refract::host::audio_callback_timeout_microseconds(32768U, 44100U) ==
+        500000U);
+  CHECK(refract::host::audio_callback_timeout_microseconds(32768U, 0U) ==
+        100000U);
   CHECK(audio_state::scale_sample(16384, audio_state::maximum_volume) ==
         16384);
   CHECK(audio_state::scale_sample(16384, audio_state::maximum_volume / 2U) ==
