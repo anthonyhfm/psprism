@@ -43,6 +43,7 @@ struct AudioChannelOutput {
   AudioQueueRef queue{};
   std::uint32_t sample_rate{};
   std::size_t queued_buffers{};
+  bool callback_stalled{};
 };
 
 std::array<AudioChannelOutput, 8>& audio_outputs() {
@@ -57,6 +58,7 @@ void audio_buffer_finished(void* context, AudioQueueRef queue,
   {
     std::lock_guard lock(output.mutex);
     if (output.queued_buffers != 0U) --output.queued_buffers;
+    output.callback_stalled = false;
   }
   output.available.notify_one();
 }
@@ -112,9 +114,22 @@ bool submit_audio(const std::int16_t* interleaved_stereo,
   if (!configure_audio_queue(output, sample_rate)) return false;
   constexpr std::size_t maximum_queued_buffers = 2U;
   if (blocking) {
-    output.available.wait(lock, [&output] {
-      return output.queued_buffers < maximum_queued_buffers;
-    });
+    // AudioQueue normally calls audio_buffer_finished as soon as a queued
+    // buffer has played.  A suspended/reconfigured host device can, however,
+    // stop delivering callbacks.  PSP games frequently hold their own sound
+    // mutex while making a blocking output call, so waiting forever here can
+    // freeze the entire game rather than merely dropping audio.
+    if (output.callback_stalled) return false;
+    const auto buffer_duration = std::chrono::microseconds(
+        static_cast<std::uint64_t>(frame_count) * 1000000ULL / sample_rate);
+    const auto callback_timeout = std::max(
+        std::chrono::microseconds(100000), buffer_duration * 4);
+    if (!output.available.wait_for(lock, callback_timeout, [&output] {
+          return output.queued_buffers < maximum_queued_buffers;
+        })) {
+      output.callback_stalled = true;
+      return false;
+    }
   } else if (output.queued_buffers >= maximum_queued_buffers) {
     return false;
   }
