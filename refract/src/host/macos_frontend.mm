@@ -326,8 +326,14 @@ refract::desktop::DialogFrame current_dialog_frame();
     }
     vertex GeometryOut psprism_geometry_vertex(
         uint id [[vertex_id]], device const GeometryVertex* vertices [[buffer(0)]],
-        constant float2& texture_scale [[buffer(1)]]) {
-      return {vertices[id].position, vertices[id].color,
+        constant float2& texture_scale [[buffer(1)]],
+        constant float2& target_scale [[buffer(2)]]) {
+      float4 position = vertices[id].position;
+      position.x = position.x * target_scale.x +
+                   position.w * (target_scale.x - 1.0);
+      position.y = position.y * target_scale.y +
+                   position.w * (1.0 - target_scale.y);
+      return {position, vertices[id].color,
               vertices[id].texture * texture_scale};
     }
     fragment float4 psprism_geometry_fragment(
@@ -735,6 +741,14 @@ refract::desktop::DialogFrame current_dialog_frame();
       [encoder setVertexBytes:geometry_texture_scale
                        length:sizeof(geometry_texture_scale)
                       atIndex:1];
+      const float geometry_target_scale[2]{
+          render_target_texture_scale(batch.state.render_target_width,
+                                      target.width),
+          render_target_texture_scale(batch.state.render_target_height,
+                                      target.height)};
+      [encoder setVertexBytes:geometry_target_scale
+                       length:sizeof(geometry_target_scale)
+                      atIndex:2];
       [encoder drawPrimitives:batch.type
                   vertexStart:0
                   vertexCount:batch.vertices.size()];

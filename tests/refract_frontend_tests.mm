@@ -38,6 +38,8 @@ int main() {
   CHECK(std::abs(render_target_texture_scale(512U, 272U) -
                  (512.0F / 272.0F)) < 0.0001F);
   CHECK(render_target_texture_scale(0U, 272U) == 1.0F);
+  CHECK(std::abs(render_target_texture_scale(256U, 280U) -
+                 (256.0F / 280.0F)) < 0.0001F);
 
   {
     std::lock_guard lock(geometry_mutex);
