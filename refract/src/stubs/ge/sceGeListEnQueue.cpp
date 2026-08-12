@@ -145,14 +145,54 @@ void execute_ge_list(Implementation& implementation, psprecomp::State& state,
         const auto index_type = (vertex_type >> 11U) & 3U;
         const auto framebuffer_stride =
             graphics.commands[0x9dU] & 0x7fcU;
-        const auto scissor_width =
+        const auto scissor_left = graphics.commands[0xd4U] & 0x3ffU;
+        const auto scissor_top =
+            (graphics.commands[0xd4U] >> 10U) & 0x3ffU;
+        const auto scissor_right =
             (graphics.commands[0xd5U] & 0x3ffU) + 1U;
-        const auto scissor_height =
+        const auto scissor_bottom =
             ((graphics.commands[0xd5U] >> 10U) & 0x3ffU) + 1U;
+        const auto viewport_width = static_cast<std::uint32_t>(
+            std::abs(float24(graphics.commands[0x42U])) * 2.0F);
+        const auto viewport_height = static_cast<std::uint32_t>(
+            std::abs(float24(graphics.commands[0x43U])) * 2.0F);
+        const auto region_width =
+            (graphics.commands[0x16U] & 0x3ffU) + 1U;
+        const auto region_height =
+            ((graphics.commands[0x16U] >> 10U) & 0x3ffU) + 1U;
+        auto drawing_width = viewport_width;
+        auto drawing_height = viewport_height;
+        if (viewport_width <= 4U || viewport_width > framebuffer_stride ||
+            viewport_height == 0U) {
+          drawing_width = std::min(std::max(region_width, scissor_right),
+                                   std::max(framebuffer_stride, 1U));
+          drawing_height = std::max(region_height, scissor_bottom);
+        } else {
+          if (region_width <= framebuffer_stride &&
+              (region_width > drawing_width ||
+               (region_width == drawing_width &&
+                region_height > drawing_height))) {
+            drawing_width = region_width;
+            drawing_height = std::max(drawing_height, region_height);
+          }
+          // Scissor rectangles commonly select a small portion of an
+          // existing framebuffer.  They may enlarge an inferred target, but
+          // must never shrink it and thereby change vertex coordinates.
+          if (scissor_right <= framebuffer_stride &&
+              scissor_right > drawing_width) {
+            drawing_width = scissor_right;
+            drawing_height = std::max(drawing_height, scissor_bottom);
+          }
+        }
+        if (drawing_width == 481U && region_width == 480U &&
+            drawing_height == 273U && region_height == 272U) {
+          drawing_width = 480U;
+          drawing_height = 272U;
+        }
         const auto render_target_width = std::clamp(
-            std::max(framebuffer_stride, scissor_width), 1U, 1024U);
+            std::max(framebuffer_stride, drawing_width), 1U, 1024U);
         const auto render_target_height =
-            std::clamp(scissor_height, 1U, 1024U);
+            std::clamp(drawing_height, 1U, 512U);
         if (layout.stride != 0 && primitive_type <= 6U) {
           const auto index_size = component_size(index_type);
           const auto index_byte_count =
@@ -565,6 +605,10 @@ void execute_ge_list(Implementation& implementation, psprecomp::State& state,
               last_render_target = render_state.render_target_address;
               render_state.render_target_width = render_target_width;
               render_state.render_target_height = render_target_height;
+              render_state.scissor_left = scissor_left;
+              render_state.scissor_top = scissor_top;
+              render_state.scissor_right = scissor_right;
+              render_state.scissor_bottom = scissor_bottom;
               render_state.texture_address = texture.address;
               const auto clear_mode =
                   (graphics.commands[0xd3U] & 1U) != 0;

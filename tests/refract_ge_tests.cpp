@@ -6,6 +6,8 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <bit>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
@@ -25,6 +27,7 @@ namespace {
 struct CapturedPrimitive {
   std::uint32_t type{};
   std::size_t vertex_count{};
+  std::array<float, 4> first_position{};
   bool has_texture{};
   std::uint32_t texture_width{};
   std::uint32_t texture_height{};
@@ -80,6 +83,10 @@ DisplayList write_display_list(std::vector<std::uint8_t>& memory,
   append(0x01U, vertex_address & 0x00ffffffU);
   append(0x12U, 0x00800180U); // Float XYZ positions in through mode.
   append(0x9dU, 480U);
+  append(0x42U, std::bit_cast<std::uint32_t>(240.0F) >> 8U);
+  append(0x43U, std::bit_cast<std::uint32_t>(-136.0F) >> 8U);
+  append(0x16U, 479U | (271U << 10U));
+  append(0xd4U, 0U);
   append(0xd5U, 479U | (271U << 10U));
   append(0x1eU, 1U);
   append(0xa0U, texture_address & 0x00fffff0U);
@@ -156,7 +163,12 @@ void submit_ge_primitive(std::uint32_t type,
                          std::uint32_t texture_width,
                          std::uint32_t texture_height,
                          GeometryState state) {
-  building_primitives.push_back({type, vertices.size(), texture != nullptr,
+  std::array<float, 4> first_position{};
+  if (!vertices.empty())
+    std::copy(std::begin(vertices.front().position),
+              std::end(vertices.front().position), first_position.begin());
+  building_primitives.push_back({type, vertices.size(), first_position,
+                                 texture != nullptr,
                                  texture_width, texture_height,
                                  texture != nullptr ? *texture
                                                     : std::vector<std::uint8_t>{},
@@ -338,17 +350,39 @@ int main() {
   CHECK(normal_primitive.state.alpha_test);
   CHECK(normal_primitive.state.texture_color_double);
   CHECK(normal_primitive.state.color_write_mask == 0x0fU);
+  const auto normal_first_position = normal_primitive.first_position;
+
+  constexpr std::uint32_t clipped_list_address = list_address + 0x700U;
+  const auto clipped = write_display_list(
+      memory, memory_base, clipped_list_address, vertex_address,
+      texture_address, 0U, 1U);
+  // Narrow the scissor without changing the framebuffer viewport.  This is
+  // how Tetris clips placed pieces; it must not change their scale.
+  store_word(memory, memory_base, clipped_list_address + 8U * 4U,
+             command(0xd5U, 239U | (135U << 10U)));
+  reset_capture();
+  enqueue(state, clipped);
+  CHECK(presented_primitives.size() == 1U);
+  const auto& clipped_primitive = presented_primitives[0];
+  CHECK(clipped_primitive.state.render_target_width == 480U);
+  CHECK(clipped_primitive.state.render_target_height == 272U);
+  CHECK(clipped_primitive.state.scissor_right == 240U);
+  CHECK(clipped_primitive.state.scissor_bottom == 136U);
+  CHECK(std::abs(clipped_primitive.first_position[0] -
+                 normal_first_position[0]) < 0.0001F);
+  CHECK(std::abs(clipped_primitive.first_position[1] -
+                 normal_first_position[1]) < 0.0001F);
 
   constexpr std::uint32_t dxt_list_address = list_address + 0x800U;
   const auto dxt = write_display_list(
       memory, memory_base, dxt_list_address, vertex_address, texture_address,
       0U, 1U);
-  store_word(memory, memory_base, dxt_list_address + 7U * 4U,
+  store_word(memory, memory_base, dxt_list_address + 11U * 4U,
              command(0xa8U,
                      ((texture_address >> 8U) & 0x000f0000U) | 4U));
-  store_word(memory, memory_base, dxt_list_address + 8U * 4U,
+  store_word(memory, memory_base, dxt_list_address + 12U * 4U,
              command(0xb8U, 2U | (2U << 8U)));
-  store_word(memory, memory_base, dxt_list_address + 9U * 4U,
+  store_word(memory, memory_base, dxt_list_address + 13U * 4U,
              command(0xc3U, 8U));
   constexpr std::array<std::uint8_t, 8> red_dxt1_block{
       0U, 0U, 0U, 0U, 0x00U, 0xf8U, 0x00U, 0x00U};

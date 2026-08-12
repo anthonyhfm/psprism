@@ -98,6 +98,10 @@ struct GeometryState {
   std::uint32_t render_target_address{};
   std::uint32_t render_target_width{480};
   std::uint32_t render_target_height{272};
+  std::uint32_t scissor_left{};
+  std::uint32_t scissor_top{};
+  std::uint32_t scissor_right{480};
+  std::uint32_t scissor_bottom{272};
   std::uint32_t texture_address{};
   bool cull_face{};
   bool front_face_clockwise{true};

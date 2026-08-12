@@ -546,6 +546,7 @@ refract::desktop::DialogFrame current_dialog_frame();
     std::lock_guard lock(geometry_mutex);
     id<MTLRenderCommandEncoder> encoder = nil;
     std::uint32_t active_target = UINT32_MAX;
+    id<MTLTexture> active_target_texture = nil;
     for (const auto& batch : presented_geometry_batches) {
       if (batch.vertices.empty()) continue;
       const auto target_address =
@@ -582,7 +583,8 @@ refract::desktop::DialogFrame current_dialog_frame();
         [self.depthTargets setObject:depth forKey:target_key];
         created_target = true;
       }
-      if (encoder == nil || active_target != target_address) {
+      if (encoder == nil || active_target != target_address ||
+          active_target_texture != target) {
         if (encoder != nil) [encoder endEncoding];
         MTLRenderPassDescriptor* target_pass =
             [MTLRenderPassDescriptor renderPassDescriptor];
@@ -603,7 +605,22 @@ refract::desktop::DialogFrame current_dialog_frame();
             static_cast<double>(target.height), 0.0, 1.0};
         [encoder setViewport:target_viewport];
         active_target = target_address;
+        active_target_texture = target;
       }
+      const auto scissor_left = std::min<NSUInteger>(
+          batch.state.scissor_left, target.width);
+      const auto scissor_top = std::min<NSUInteger>(
+          batch.state.scissor_top, target.height);
+      const auto scissor_right = std::min<NSUInteger>(
+          batch.state.scissor_right, target.width);
+      const auto scissor_bottom = std::min<NSUInteger>(
+          batch.state.scissor_bottom, target.height);
+      if (scissor_right <= scissor_left || scissor_bottom <= scissor_top)
+        continue;
+      const MTLScissorRect scissor{
+          scissor_left, scissor_top, scissor_right - scissor_left,
+          scissor_bottom - scissor_top};
+      [encoder setScissorRect:scissor];
       [encoder setCullMode:batch.state.cull_face ? MTLCullModeBack
                                                  : MTLCullModeNone];
       [encoder setFrontFacingWinding:batch.state.front_face_clockwise
