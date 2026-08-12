@@ -6,8 +6,10 @@
 #include "stubs/kernel/mailbox_state.hpp"
 #include "stubs/display/display_state.hpp"
 #include "stubs/kernel/memory_state.hpp"
+#include "stubs/mpeg/mpeg_state.hpp"
 
 #include <cstdint>
+#include <cstring>
 #include <deque>
 #include <string>
 #include <vector>
@@ -18,6 +20,35 @@
   } while (false)
 
 int main() {
+  CHECK(mpeg_state::avc_es_size == 2048U);
+  CHECK(mpeg_state::atrac_es_size == 2112U);
+  CHECK(mpeg_state::atrac_es_output_size == 8192U);
+  CHECK(mpeg_state::required_memory_size == 0x10000U);
+  CHECK(mpeg_state::ringbuffer_memory_size(8U) == 17216U);
+  constexpr std::uint32_t mpeg_memory_base = 0x08800000U;
+  constexpr std::uint32_t mpeg_address = mpeg_memory_base + 0x100U;
+  constexpr std::uint32_t handle_address = mpeg_memory_base + 0x200U;
+  constexpr std::uint32_t ringbuffer_address = mpeg_memory_base + 0x300U;
+  std::vector<std::uint8_t> mpeg_memory(0x1000U);
+  psprecomp::State mpeg_guest{};
+  mpeg_guest.memory = mpeg_memory.data();
+  mpeg_guest.memory_size = mpeg_memory.size();
+  mpeg_guest.memory_base = mpeg_memory_base;
+  std::memcpy(mpeg_memory.data() + mpeg_address - mpeg_memory_base,
+              &handle_address, sizeof(handle_address));
+  std::memcpy(mpeg_memory.data() + handle_address - mpeg_memory_base + 16U,
+              &ringbuffer_address, sizeof(ringbuffer_address));
+  auto* mapped_ringbuffer =
+      mpeg_state::ringbuffer_from_mpeg(mpeg_guest, mpeg_address);
+  CHECK(mapped_ringbuffer != nullptr);
+  mapped_ringbuffer->packets = 8;
+  mapped_ringbuffer->packets_available = 3;
+  CHECK(mpeg_state::ringbuffer_from_mpeg(mpeg_guest, mpeg_address)->packets ==
+        8);
+  CHECK(mpeg_state::ringbuffer_from_mpeg(mpeg_guest, mpeg_address)
+            ->packets_available == 3);
+  CHECK(mpeg_state::ringbuffer_from_mpeg(mpeg_guest,
+                                         mpeg_memory_base + 0xfffU) == nullptr);
   CHECK(display_state::microseconds_until_next_vblank(0U) == 16683U);
   CHECK(display_state::microseconds_until_next_vblank(1U) == 16682U);
   CHECK(display_state::microseconds_until_next_vblank(16682U) == 1U);

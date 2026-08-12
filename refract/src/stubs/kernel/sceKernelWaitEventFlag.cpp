@@ -19,8 +19,10 @@ void sceKernelWaitEventFlag(Implementation& implementation, psprecomp::State& st
   std::uint32_t observed{};
   {
     GuestExecutionPause pause(implementation);
+    ++event->waiting_threads;
     event->changed.wait(
         lock, [&] { return matched() || implementation.exit_requested; });
+    --event->waiting_threads;
     observed = event->bits;
     if ((mode & 0x20U) != 0)
       event->bits = 0;

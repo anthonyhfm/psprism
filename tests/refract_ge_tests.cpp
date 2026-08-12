@@ -200,6 +200,68 @@ int main() {
   state.memory_base = memory_base;
   refract::Runtime::instance().prepare_state(state);
 
+  constexpr std::uint32_t event_name_address = memory_base + 0x5000U;
+  constexpr std::uint32_t event_status_address = memory_base + 0x5100U;
+  constexpr std::uint32_t event_output_address = memory_base + 0x5200U;
+  constexpr char event_name[] = "mpeg-ready";
+  std::memcpy(memory.data() + event_name_address - memory_base, event_name,
+              sizeof(event_name));
+  state.gpr[4] = event_name_address;
+  state.gpr[5] = 0x200U;
+  state.gpr[6] = 1U;
+  state.gpr[7] = 0U;
+  refract::pspsdk::sceKernelCreateEventFlag(state);
+  const auto event_id = state.gpr[2];
+  CHECK(event_id != 0U);
+
+  store_word(memory, memory_base, event_status_address, 52U);
+  state.gpr[4] = event_id;
+  state.gpr[5] = event_status_address;
+  refract::pspsdk::sceKernelReferEventFlagStatus(state);
+  CHECK(state.gpr[2] == 0U);
+  const auto* event_status =
+      memory.data() + event_status_address - memory_base;
+  std::uint32_t status_size{};
+  std::uint32_t status_attributes{};
+  std::uint32_t status_initial_bits{};
+  std::uint32_t status_current_bits{};
+  std::memcpy(&status_size, event_status, sizeof(status_size));
+  std::memcpy(&status_attributes, event_status + 36U,
+              sizeof(status_attributes));
+  std::memcpy(&status_initial_bits, event_status + 40U,
+              sizeof(status_initial_bits));
+  std::memcpy(&status_current_bits, event_status + 44U,
+              sizeof(status_current_bits));
+  CHECK(status_size == 52U);
+  CHECK(std::strcmp(reinterpret_cast<const char*>(event_status + 4U),
+                    event_name) == 0);
+  CHECK(status_attributes == 0x200U);
+  CHECK(status_initial_bits == 1U);
+  CHECK(status_current_bits == 1U);
+
+  state.gpr[4] = event_id;
+  state.gpr[5] = 2U;
+  refract::pspsdk::sceKernelSetEventFlag(state);
+  CHECK(state.gpr[2] == 0U);
+  state.gpr[4] = event_id;
+  state.gpr[5] = 3U;
+  state.gpr[6] = 0x20U;
+  state.gpr[7] = event_output_address;
+  refract::pspsdk::sceKernelPollEventFlag(state);
+  CHECK(state.gpr[2] == 0U);
+  std::uint32_t observed_event_bits{};
+  std::memcpy(&observed_event_bits,
+              memory.data() + event_output_address - memory_base,
+              sizeof(observed_event_bits));
+  CHECK(observed_event_bits == 3U);
+  store_word(memory, memory_base, event_status_address, 52U);
+  state.gpr[4] = event_id;
+  state.gpr[5] = event_status_address;
+  refract::pspsdk::sceKernelReferEventFlagStatus(state);
+  std::memcpy(&status_current_bits, event_status + 44U,
+              sizeof(status_current_bits));
+  CHECK(status_current_bits == 0U);
+
   reset_capture();
   const auto streamed = write_display_list(
       memory, memory_base, list_address, vertex_address, texture_address,

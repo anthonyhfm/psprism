@@ -57,7 +57,9 @@ if(BUILD_TESTING)
     add_executable(refract_utility_tests
         tests/refract_utility_tests.cpp
         refract/src/utility_data.cpp)
-    target_include_directories(refract_utility_tests PRIVATE refract/src)
+    target_include_directories(refract_utility_tests PRIVATE
+        include
+        refract/src)
     target_compile_options(refract_utility_tests PRIVATE
         -Wall -Wextra -Wpedantic -Werror)
     add_test(NAME refract_utility_tests COMMAND refract_utility_tests)

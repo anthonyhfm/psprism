@@ -6,6 +6,7 @@
 #include "stubs/io/devctl_state.hpp"
 #include "stubs/io/io_state.hpp"
 #include "stubs/kernel/mailbox_state.hpp"
+#include "stubs/mpeg/mpeg_state.hpp"
 #include "utility_data.hpp"
 
 #include <algorithm>
@@ -39,6 +40,7 @@ constexpr std::uint32_t unimplemented = 0x8002013aU;
 constexpr std::uint32_t io_error = 0x80010005U;
 constexpr std::uint32_t wait_timeout = 0x800201a8U;
 constexpr std::uint32_t semaphore_zero = 0x800201adU;
+constexpr std::uint32_t event_flag_condition = 0x800201afU;
 constexpr std::uint32_t unknown_mailbox = 0x8002019bU;
 constexpr std::uint32_t mailbox_no_message = 0x800201b2U;
 constexpr std::uint32_t wait_deleted = 0x800201b5U;
@@ -529,7 +531,11 @@ struct Runtime::Implementation {
   struct EventFlag {
     std::mutex mutex;
     std::condition_variable changed;
+    std::string name;
+    std::uint32_t attributes{};
+    std::uint32_t initial_bits{};
     std::uint32_t bits{};
+    std::uint32_t waiting_threads{};
   };
 
   struct Mailbox {
@@ -881,7 +887,8 @@ bool dispatch_guest_callback(Implementation& implementation,
                              std::uint32_t entry,
                              std::uint32_t first_argument,
                              std::uint32_t second_argument,
-                             std::uint32_t third_argument = 0U) {
+                             std::uint32_t third_argument = 0U,
+                             std::uint32_t* result = nullptr) {
   if (entry == 0U || !implementation.configuration.guest_executor)
     return false;
   constexpr std::uint32_t callback_stack_size = 0x4000U;
@@ -908,6 +915,7 @@ bool dispatch_guest_callback(Implementation& implementation,
   callback_state.fault_instruction = 0U;
   callback_state.fault_pc = 0U;
   implementation.configuration.guest_executor(callback_state);
+  if (result != nullptr) *result = callback_state.gpr[2];
   {
     std::lock_guard lock(implementation.objects_mutex);
     implementation.free_heap(stack, callback_stack_size);
