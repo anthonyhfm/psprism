@@ -271,6 +271,81 @@ std::uint32_t decode_16bit_color(std::uint16_t packed,
          (expand_4((packed >> 12U) & 15U) << 24U);
 }
 
+std::uint32_t decode_dxt_color(const std::uint8_t* block, std::uint32_t x,
+                               std::uint32_t y, bool dxt1_alpha) {
+  std::uint16_t first{};
+  std::uint16_t second{};
+  std::memcpy(&first, block + 4U, sizeof(first));
+  std::memcpy(&second, block + 6U, sizeof(second));
+  const auto expand = [](std::uint16_t color) {
+    return std::array<std::uint32_t, 3>{
+        (color >> 8U) & 0xf8U, (color >> 3U) & 0xfcU,
+        (color << 3U) & 0xf8U};
+  };
+  const auto first_rgb = expand(first);
+  const auto second_rgb = expand(second);
+  const auto index = (block[y] >> (x * 2U)) & 3U;
+  std::array<std::uint32_t, 3> rgb{};
+  std::uint32_t alpha = 0xffU;
+  if (index == 0U) {
+    rgb = first_rgb;
+  } else if (index == 1U) {
+    rgb = second_rgb;
+  } else if (first > second) {
+    const auto first_weight = index == 2U ? 2U : 1U;
+    const auto second_weight = 3U - first_weight;
+    for (std::size_t component = 0; component < rgb.size(); ++component)
+      rgb[component] =
+          (first_rgb[component] * first_weight +
+           second_rgb[component] * second_weight) /
+          3U;
+  } else if (index == 2U) {
+    for (std::size_t component = 0; component < rgb.size(); ++component)
+      rgb[component] = (first_rgb[component] + second_rgb[component]) / 2U;
+  } else {
+    alpha = dxt1_alpha ? 0U : 0xffU;
+  }
+  return rgb[0] | (rgb[1] << 8U) | (rgb[2] << 16U) | (alpha << 24U);
+}
+
+std::uint32_t decode_dxt_texel(const std::uint8_t* block,
+                               std::uint32_t format, std::uint32_t x,
+                               std::uint32_t y) {
+  auto color = decode_dxt_color(block, x, y, format == 8U);
+  if (format == 8U) return color;
+  color &= 0x00ffffffU;
+  if (format == 9U) {
+    std::uint16_t alpha_line{};
+    std::memcpy(&alpha_line, block + 8U + y * 2U, sizeof(alpha_line));
+    const auto alpha = (alpha_line >> (x * 4U)) & 0xfU;
+    return color | (alpha * 17U << 24U);
+  }
+  std::uint64_t alpha_indices{};
+  for (std::size_t byte = 0; byte < 6U; ++byte)
+    alpha_indices |= static_cast<std::uint64_t>(block[8U + byte]) << (byte * 8U);
+  const std::uint32_t first_alpha = block[14U];
+  const std::uint32_t second_alpha = block[15U];
+  const auto index =
+      static_cast<std::uint32_t>((alpha_indices >> ((y * 4U + x) * 3U)) & 7U);
+  std::uint32_t alpha{};
+  if (index == 0U) {
+    alpha = first_alpha;
+  } else if (index == 1U) {
+    alpha = second_alpha;
+  } else if (first_alpha > second_alpha) {
+    alpha = ((8U - index) * first_alpha +
+             (index - 1U) * second_alpha) /
+            7U;
+  } else if (index < 6U) {
+    alpha = ((6U - index) * first_alpha +
+             (index - 1U) * second_alpha) /
+            5U;
+  } else {
+    alpha = index == 6U ? 0U : 0xffU;
+  }
+  return color | (alpha << 24U);
+}
+
 DecodedTexture decode_texture(
     psprecomp::State& state,
     const std::array<std::uint32_t, 256>& commands,
@@ -279,7 +354,8 @@ DecodedTexture decode_texture(
   const auto format = commands[0xc3U] & 0xfU;
   result.address = (commands[0xa0U] & 0x00fffff0U) |
                    ((commands[0xa8U] << 8U) & 0x0f000000U);
-  if ((commands[0x1eU] & 1U) == 0 || format > 5U)
+  if ((commands[0x1eU] & 1U) == 0 ||
+      (format > 5U && (format < 8U || format > 10U)))
     return result;
   result.width = 1U << (commands[0xb8U] & 0xfU);
   result.height = 1U << ((commands[0xb8U] >> 8U) & 0xfU);
@@ -287,13 +363,20 @@ DecodedTexture decode_texture(
   if (result.width == 0 || result.height == 0 || buffer_width == 0 ||
       result.width > 1024U || result.height > 1024U)
     return {};
-  const auto row_bytes =
-      format == 4U ? (buffer_width + 1U) / 2U
-                   : buffer_width * (format == 3U ? 4U : format < 4U ? 2U : 1U);
+  const auto compressed = format >= 8U;
+  const auto block_bytes = format == 8U ? 8U : 16U;
+  const auto row_bytes = compressed
+                             ? ((buffer_width + 3U) / 4U) * block_bytes
+                         : format == 4U ? (buffer_width + 1U) / 2U
+                         : buffer_width *
+                               (format == 3U ? 4U : format < 4U ? 2U : 1U);
   const auto blocks_per_row = (row_bytes + 15U) / 16U;
   const auto block_rows = (result.height + 7U) / 8U;
   const auto swizzled = (commands[0xc2U] & 1U) != 0;
-  const auto source_size = swizzled
+  const auto source_size = compressed
+                               ? static_cast<std::size_t>(row_bytes) *
+                                     ((result.height + 3U) / 4U)
+                           : swizzled
                                ? static_cast<std::size_t>(blocks_per_row) *
                                      block_rows * 128U
                                : static_cast<std::size_t>(row_bytes) *
@@ -304,7 +387,7 @@ DecodedTexture decode_texture(
     return {};
   const std::uint8_t* palette{};
   auto palette_format = commands[0xc5U] & 3U;
-  if (format >= 4U) {
+  if (format >= 4U && format <= 5U) {
     palette = clut.data();
   }
   const auto shift = (commands[0xc5U] >> 2U) & 0x1fU;
@@ -323,7 +406,13 @@ DecodedTexture decode_texture(
           swizzled ? ((y / 8U) * blocks_per_row + byte_x / 16U) * 128U +
                          (y & 7U) * 16U + (byte_x & 15U)
                    : static_cast<std::size_t>(y) * row_bytes + byte_x;
-      if (format == 3U) {
+      if (compressed) {
+        const auto block_offset =
+            static_cast<std::size_t>(y / 4U) * row_bytes +
+            static_cast<std::size_t>(x / 4U) * block_bytes;
+        color = decode_dxt_texel(source + block_offset, format, x & 3U,
+                                 y & 3U);
+      } else if (format == 3U) {
         std::memcpy(&color, source + source_offset, sizeof(color));
       } else if (format < 3U) {
         std::uint16_t packed{};

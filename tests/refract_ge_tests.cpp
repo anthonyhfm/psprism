@@ -28,6 +28,7 @@ struct CapturedPrimitive {
   bool has_texture{};
   std::uint32_t texture_width{};
   std::uint32_t texture_height{};
+  std::vector<std::uint8_t> texture_pixels;
   refract::host::GeometryState state;
 };
 
@@ -156,7 +157,10 @@ void submit_ge_primitive(std::uint32_t type,
                          std::uint32_t texture_height,
                          GeometryState state) {
   building_primitives.push_back({type, vertices.size(), texture != nullptr,
-                                 texture_width, texture_height, state});
+                                 texture_width, texture_height,
+                                 texture != nullptr ? *texture
+                                                    : std::vector<std::uint8_t>{},
+                                 state});
 }
 
 ControllerState controller_state() { return {}; }
@@ -334,6 +338,32 @@ int main() {
   CHECK(normal_primitive.state.alpha_test);
   CHECK(normal_primitive.state.texture_color_double);
   CHECK(normal_primitive.state.color_write_mask == 0x0fU);
+
+  constexpr std::uint32_t dxt_list_address = list_address + 0x800U;
+  const auto dxt = write_display_list(
+      memory, memory_base, dxt_list_address, vertex_address, texture_address,
+      0U, 1U);
+  store_word(memory, memory_base, dxt_list_address + 7U * 4U,
+             command(0xa8U,
+                     ((texture_address >> 8U) & 0x000f0000U) | 4U));
+  store_word(memory, memory_base, dxt_list_address + 8U * 4U,
+             command(0xb8U, 2U | (2U << 8U)));
+  store_word(memory, memory_base, dxt_list_address + 9U * 4U,
+             command(0xc3U, 8U));
+  constexpr std::array<std::uint8_t, 8> red_dxt1_block{
+      0U, 0U, 0U, 0U, 0x00U, 0xf8U, 0x00U, 0x00U};
+  std::memcpy(memory.data() + texture_address - memory_base,
+              red_dxt1_block.data(), red_dxt1_block.size());
+  reset_capture();
+  enqueue(state, dxt);
+  CHECK(presented_primitives.size() == 1U);
+  CHECK(presented_primitives[0].texture_width == 4U);
+  CHECK(presented_primitives[0].texture_height == 4U);
+  CHECK(presented_primitives[0].texture_pixels.size() == 4U * 4U * 4U);
+  CHECK(presented_primitives[0].texture_pixels[0] == 0xf8U);
+  CHECK(presented_primitives[0].texture_pixels[1] == 0U);
+  CHECK(presented_primitives[0].texture_pixels[2] == 0U);
+  CHECK(presented_primitives[0].texture_pixels[3] == 0xffU);
 
   constexpr std::uint32_t thread_name_address = memory_base + 0x700U;
   constexpr char thread_name[] = "gp-regression";
