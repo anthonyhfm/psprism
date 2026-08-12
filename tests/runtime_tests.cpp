@@ -69,6 +69,20 @@ int main() {
     CHECK(psprecomp::interpret_allegrex(min_max_state, 0x3004U));
     CHECK(min_max_state.gpr[6] == static_cast<std::uint32_t>(-4));
 
+    std::array<std::uint8_t, 8> allegrex_break_code{};
+    psprecomp::State break_state;
+    break_state.memory = allegrex_break_code.data();
+    break_state.memory_size = allegrex_break_code.size();
+    break_state.memory_base = 0x4000U;
+    break_state.pc = break_state.memory_base;
+    psprecomp::store32(break_state, 0x4000U, 0x0000000dU);
+    psprecomp::store32(break_state, 0x4004U, 0x2402002aU);
+    CHECK(psprecomp::interpret_allegrex(break_state, 0x4000U));
+    CHECK(break_state.stop_reason == psprecomp::StopReason::running);
+    CHECK(break_state.pc == 0x4004U);
+    CHECK(psprecomp::interpret_allegrex(break_state, 0x4004U));
+    CHECK(break_state.gpr[2] == 42U);
+
     (void)psprecomp::load16(state, 0x1001);
     CHECK(state.stop_reason == psprecomp::StopReason::memory_fault);
     CHECK(state.fault_address == 0x1001);

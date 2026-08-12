@@ -646,7 +646,12 @@ std::string emit_instruction(std::uint32_t pc, std::uint32_t instruction,
             out << "state.stop_reason = StopReason::syscall;";
             break;
         case 0x0d:
-            out << "state.stop_reason = StopReason::breakpoint;";
+            // PPSSPP's default PSP compatibility behavior logs BREAK
+            // exceptions and resumes at the following instruction.  Retail
+            // games use this in fallback paths which still return an error to
+            // their caller, so treating it as a terminal debugger stop can
+            // kill an otherwise recoverable game thread.
+            out << "/* break: ignored like PPSSPP's default exception policy */";
             break;
         case 0x0f:
             out << "/* sync: generated C++ executes in order */";

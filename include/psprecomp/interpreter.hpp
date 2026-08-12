@@ -85,7 +85,10 @@ inline bool interpret_allegrex(State& state, std::uint32_t current_pc) {
             if (state.gpr[rt] != 0U) state.gpr[rd] = state.gpr[rs];
             break;
         case 0x0c: state.stop_reason = StopReason::syscall; break;
-        case 0x0d: state.stop_reason = StopReason::breakpoint; break;
+        // PPSSPP ignores BREAK exceptions by default and advances the PC.
+        // Some retail code deliberately executes BREAK before returning an
+        // ordinary failure value, so it must not terminate the guest thread.
+        case 0x0d: break;
         case 0x0f: break;
         case 0x10: state.gpr[rd] = state.hi; break;
         case 0x11: state.hi = state.gpr[rs]; break;
