@@ -265,15 +265,12 @@ void execute_ge_list(Implementation& implementation, psprecomp::State& state,
                 } else if (layout.position_type == 2U) {
                   for (std::size_t component = 0; component < 3U;
                        ++component) {
+                    std::int16_t value{};
+                    std::memcpy(&value, position + component * 2U,
+                                sizeof(value));
                     if (through) {
-                      std::uint16_t value{};
-                      std::memcpy(&value, position + component * 2U,
-                                  sizeof(value));
                       decoded[component] = static_cast<float>(value);
                     } else {
-                      std::int16_t value{};
-                      std::memcpy(&value, position + component * 2U,
-                                  sizeof(value));
                       decoded[component] =
                           static_cast<float>(value) / 32767.0F;
                     }

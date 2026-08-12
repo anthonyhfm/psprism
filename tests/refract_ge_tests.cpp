@@ -399,6 +399,24 @@ int main() {
   CHECK(presented_primitives[0].texture_pixels[2] == 0U);
   CHECK(presented_primitives[0].texture_pixels[3] == 0xffU);
 
+  constexpr std::uint32_t signed_vertex_address = vertex_address + 0x100U;
+  constexpr std::uint32_t signed_list_address = list_address + 0xa00U;
+  constexpr std::array<std::int16_t, 3> signed_vertex{-8, 16, 0};
+  std::memcpy(memory.data() + signed_vertex_address - memory_base,
+              signed_vertex.data(), sizeof(signed_vertex));
+  const auto signed_through = write_display_list(
+      memory, memory_base, signed_list_address, signed_vertex_address,
+      texture_address, 0U, 1U);
+  store_word(memory, memory_base, signed_list_address + 2U * 4U,
+             command(0x12U, 0x00800100U)); // Signed 16-bit XYZ through mode.
+  reset_capture();
+  enqueue(state, signed_through);
+  CHECK(presented_primitives.size() == 1U);
+  CHECK(std::abs(presented_primitives[0].first_position[0] -
+                 (-8.0F / 240.0F - 1.0F)) < 0.0001F);
+  CHECK(std::abs(presented_primitives[0].first_position[1] -
+                 (1.0F - 16.0F / 136.0F)) < 0.0001F);
+
   constexpr std::uint32_t thread_name_address = memory_base + 0x700U;
   constexpr char thread_name[] = "gp-regression";
   std::memcpy(memory.data() + thread_name_address - memory_base, thread_name,
