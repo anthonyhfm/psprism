@@ -42,6 +42,13 @@ std::uint32_t normalized_vram_address(std::uint32_t address) {
   return address;
 }
 
+float render_target_texture_scale(std::uint32_t declared_size,
+                                  std::size_t target_size) {
+  if (declared_size == 0U || target_size == 0U) return 1.0F;
+  return static_cast<float>(declared_size) /
+         static_cast<float>(target_size);
+}
+
 struct GeometryBatch {
   MTLPrimitiveType type;
   std::vector<refract::host::GeometryVertex> vertices;
@@ -318,8 +325,10 @@ refract::desktop::DialogFrame current_dialog_frame();
       }
     }
     vertex GeometryOut psprism_geometry_vertex(
-        uint id [[vertex_id]], device const GeometryVertex* vertices [[buffer(0)]]) {
-      return {vertices[id].position, vertices[id].color, vertices[id].texture};
+        uint id [[vertex_id]], device const GeometryVertex* vertices [[buffer(0)]],
+        constant float2& texture_scale [[buffer(1)]]) {
+      return {vertices[id].position, vertices[id].color,
+              vertices[id].texture * texture_scale};
     }
     fragment float4 psprism_geometry_fragment(
         GeometryOut in [[stage_in]], constant FragmentState& state [[buffer(1)]]) {
@@ -531,6 +540,8 @@ refract::desktop::DialogFrame current_dialog_frame();
   id<MTLCommandBuffer> commands = [self.queue commandBuffer];
   NSMutableDictionary<NSValue*, id<MTLTexture>>* uploaded_textures =
       [NSMutableDictionary dictionary];
+  NSMutableArray<id<MTLBuffer>>* uploaded_vertex_buffers =
+      [NSMutableArray array];
   if (self.geometryPipeline != nil) {
     std::lock_guard lock(geometry_mutex);
     id<MTLRenderCommandEncoder> encoder = nil;
@@ -620,10 +631,18 @@ refract::desktop::DialogFrame current_dialog_frame();
                          length:sizeof(fragment_state)
                         atIndex:1];
       id<MTLTexture> sampled_texture = nil;
+      float geometry_texture_scale[2]{1.0F, 1.0F};
       const auto texture_address =
           normalized_vram_address(batch.state.texture_address);
-      if (batch.state.texture_address != 0U)
+      if (batch.state.texture_address != 0U) {
         sampled_texture = [self.renderTargets objectForKey:@(texture_address)];
+        if (sampled_texture != nil) {
+          geometry_texture_scale[0] = render_target_texture_scale(
+              batch.texture_width, sampled_texture.width);
+          geometry_texture_scale[1] = render_target_texture_scale(
+              batch.texture_height, sampled_texture.height);
+        }
+      }
       if (sampled_texture == nil && batch.texture != nullptr &&
           !batch.texture->empty()) {
         NSValue* texture_key = [NSValue valueWithPointer:batch.texture.get()];
@@ -679,9 +698,26 @@ refract::desktop::DialogFrame current_dialog_frame();
                              blue:static_cast<double>((fixed >> 16U) & 0xffU) / 255.0
                             alpha:1.0];
       }
-      [encoder setVertexBytes:batch.vertices.data()
-                       length:batch.vertices.size() * sizeof(refract::host::GeometryVertex)
-                      atIndex:0];
+      const auto vertex_bytes =
+          batch.vertices.size() * sizeof(refract::host::GeometryVertex);
+      id<MTLBuffer> vertex_buffer =
+          [self.device newBufferWithBytes:batch.vertices.data()
+                                  length:vertex_bytes
+                                 options:MTLResourceStorageModeShared];
+      if (vertex_buffer == nil) {
+        NSLog(@"psprism: failed to allocate %zu-byte GE vertex buffer",
+              vertex_bytes);
+        continue;
+      }
+      // Explicitly retain transient buffers through GPU completion.  Large
+      // PSP batches cannot use setVertexBytes, and releasing their backing
+      // buffers after encoding lets later allocations overwrite vertices
+      // before Metal consumes them.
+      [uploaded_vertex_buffers addObject:vertex_buffer];
+      [encoder setVertexBuffer:vertex_buffer offset:0 atIndex:0];
+      [encoder setVertexBytes:geometry_texture_scale
+                       length:sizeof(geometry_texture_scale)
+                      atIndex:1];
       [encoder drawPrimitives:batch.type
                   vertexStart:0
                   vertexCount:batch.vertices.size()];
@@ -755,6 +791,8 @@ refract::desktop::DialogFrame current_dialog_frame();
   [display_encoder endEncoding];
   [commands presentDrawable:drawable];
   [commands addCompletedHandler:^(id<MTLCommandBuffer> buffer) {
+    static_cast<void>(uploaded_textures.count);
+    static_cast<void>(uploaded_vertex_buffers.count);
     if (buffer.error != nil)
       NSLog(@"psprism: Metal command buffer error: %@", buffer.error);
   }];

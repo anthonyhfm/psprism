@@ -34,6 +34,11 @@ void submit_test_primitive(std::uint32_t target, float x) {
 } // namespace
 
 int main() {
+  CHECK(render_target_texture_scale(512U, 512U) == 1.0F);
+  CHECK(std::abs(render_target_texture_scale(512U, 272U) -
+                 (512.0F / 272.0F)) < 0.0001F);
+  CHECK(render_target_texture_scale(0U, 272U) == 1.0F);
+
   {
     std::lock_guard lock(geometry_mutex);
     building_geometry_batches.clear();
