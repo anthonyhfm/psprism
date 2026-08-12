@@ -103,6 +103,7 @@ struct GeometryState {
   std::uint32_t scissor_right{480};
   std::uint32_t scissor_bottom{272};
   std::uint32_t texture_address{};
+  bool through_coordinates{};
   bool cull_face{};
   bool front_face_clockwise{true};
   bool depth_test{};

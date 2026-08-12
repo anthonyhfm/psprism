@@ -49,6 +49,14 @@ float render_target_texture_scale(std::uint32_t declared_size,
          static_cast<float>(target_size);
 }
 
+float render_target_geometry_scale(bool through_coordinates,
+                                   std::uint32_t declared_size,
+                                   std::size_t target_size) {
+  return through_coordinates
+             ? render_target_texture_scale(declared_size, target_size)
+             : 1.0F;
+}
+
 struct GeometryBatch {
   MTLPrimitiveType type;
   std::vector<refract::host::GeometryVertex> vertices;
@@ -742,10 +750,12 @@ refract::desktop::DialogFrame current_dialog_frame();
                        length:sizeof(geometry_texture_scale)
                       atIndex:1];
       const float geometry_target_scale[2]{
-          render_target_texture_scale(batch.state.render_target_width,
-                                      target.width),
-          render_target_texture_scale(batch.state.render_target_height,
-                                      target.height)};
+          render_target_geometry_scale(batch.state.through_coordinates,
+                                       batch.state.render_target_width,
+                                       target.width),
+          render_target_geometry_scale(batch.state.through_coordinates,
+                                       batch.state.render_target_height,
+                                       target.height)};
       [encoder setVertexBytes:geometry_target_scale
                        length:sizeof(geometry_target_scale)
                       atIndex:2];

@@ -350,6 +350,7 @@ int main() {
   CHECK(normal_primitive.state.alpha_test);
   CHECK(normal_primitive.state.texture_color_double);
   CHECK(normal_primitive.state.color_write_mask == 0x0fU);
+  CHECK(normal_primitive.state.through_coordinates);
   const auto normal_first_position = normal_primitive.first_position;
 
   constexpr std::uint32_t clipped_list_address = list_address + 0x700U;
@@ -401,7 +402,8 @@ int main() {
 
   constexpr std::uint32_t signed_vertex_address = vertex_address + 0x100U;
   constexpr std::uint32_t signed_list_address = list_address + 0xa00U;
-  constexpr std::array<std::int16_t, 3> signed_vertex{-8, 16, 0};
+  constexpr std::array<std::uint16_t, 3> signed_vertex{0xfff8U, 16U,
+                                                       0xffffU};
   std::memcpy(memory.data() + signed_vertex_address - memory_base,
               signed_vertex.data(), sizeof(signed_vertex));
   const auto signed_through = write_display_list(
@@ -416,6 +418,8 @@ int main() {
                  (-8.0F / 240.0F - 1.0F)) < 0.0001F);
   CHECK(std::abs(presented_primitives[0].first_position[1] -
                  (1.0F - 16.0F / 136.0F)) < 0.0001F);
+  CHECK(std::abs(presented_primitives[0].first_position[2] - 1.0F) <
+        0.0001F);
 
   constexpr std::uint32_t thread_name_address = memory_base + 0x700U;
   constexpr char thread_name[] = "gp-regression";

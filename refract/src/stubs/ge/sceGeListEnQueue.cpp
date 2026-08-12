@@ -152,47 +152,19 @@ void execute_ge_list(Implementation& implementation, psprecomp::State& state,
             (graphics.commands[0xd5U] & 0x3ffU) + 1U;
         const auto scissor_bottom =
             ((graphics.commands[0xd5U] >> 10U) & 0x3ffU) + 1U;
-        const auto viewport_width = static_cast<std::uint32_t>(
-            std::abs(float24(graphics.commands[0x42U])) * 2.0F);
-        const auto viewport_height = static_cast<std::uint32_t>(
-            std::abs(float24(graphics.commands[0x43U])) * 2.0F);
-        const auto region_width =
-            (graphics.commands[0x16U] & 0x3ffU) + 1U;
-        const auto region_height =
-            ((graphics.commands[0x16U] >> 10U) & 0x3ffU) + 1U;
-        auto drawing_width = viewport_width;
-        auto drawing_height = viewport_height;
-        if (viewport_width <= 4U || viewport_width > framebuffer_stride ||
-            viewport_height == 0U) {
-          drawing_width = std::min(std::max(region_width, scissor_right),
-                                   std::max(framebuffer_stride, 1U));
-          drawing_height = std::max(region_height, scissor_bottom);
-        } else {
-          if (region_width <= framebuffer_stride &&
-              (region_width > drawing_width ||
-               (region_width == drawing_width &&
-                region_height > drawing_height))) {
-            drawing_width = region_width;
-            drawing_height = std::max(drawing_height, region_height);
-          }
-          // Scissor rectangles commonly select a small portion of an
-          // existing framebuffer.  They may enlarge an inferred target, but
-          // must never shrink it and thereby change vertex coordinates.
-          if (scissor_right <= framebuffer_stride &&
-              scissor_right > drawing_width) {
-            drawing_width = scissor_right;
-            drawing_height = std::max(drawing_height, scissor_bottom);
-          }
-        }
-        if (drawing_width == 481U && region_width == 480U &&
-            drawing_height == 273U && region_height == 272U) {
-          drawing_width = 480U;
-          drawing_height = 272U;
-        }
         const auto render_target_width = std::clamp(
-            std::max(framebuffer_stride, drawing_width), 1U, 1024U);
+            std::max(framebuffer_stride, scissor_right), 1U, 1024U);
+        // A narrow scissor clips draws inside a display framebuffer; it does
+        // not redefine that framebuffer's coordinate system.  Keep standard
+        // PSP display targets at least 272 pixels tall while still allowing
+        // genuinely smaller off-screen targets.
+        constexpr std::uint32_t display_width = 480U;
+        constexpr std::uint32_t display_height = 272U;
+        const auto minimum_target_height =
+            framebuffer_stride >= display_width ? display_height : 1U;
         const auto render_target_height =
-            std::clamp(drawing_height, 1U, 512U);
+            std::clamp(std::max(scissor_bottom, minimum_target_height), 1U,
+                       1024U);
         if (layout.stride != 0 && primitive_type <= 6U) {
           const auto index_size = component_size(index_type);
           const auto index_byte_count =
@@ -248,12 +220,12 @@ void execute_ge_list(Implementation& implementation, psprecomp::State& state,
               const auto material_color =
                   (graphics.commands[0x55U] & 0x00ffffffU) |
                   ((graphics.commands[0x58U] & 0xffU) << 24U);
+              const auto through = (vertex_type & (1U << 23U)) != 0;
               for (std::uint32_t index = 0; index < vertex_count; ++index) {
                 const auto* input =
                     source + vertex_indices[index] * layout.stride;
                 const auto* position = input + layout.position_offset;
                 float decoded[3]{};
-                const auto through = (vertex_type & (1U << 23U)) != 0;
                 if (layout.position_type == 1U) {
                   for (std::size_t component = 0; component < 3U; ++component)
                     decoded[component] =
@@ -265,12 +237,22 @@ void execute_ge_list(Implementation& implementation, psprecomp::State& state,
                 } else if (layout.position_type == 2U) {
                   for (std::size_t component = 0; component < 3U;
                        ++component) {
-                    std::int16_t value{};
-                    std::memcpy(&value, position + component * 2U,
-                                sizeof(value));
                     if (through) {
-                      decoded[component] = static_cast<float>(value);
+                      if (component < 2U) {
+                        std::int16_t value{};
+                        std::memcpy(&value, position + component * 2U,
+                                    sizeof(value));
+                        decoded[component] = static_cast<float>(value);
+                      } else {
+                        std::uint16_t value{};
+                        std::memcpy(&value, position + component * 2U,
+                                    sizeof(value));
+                        decoded[component] = static_cast<float>(value);
+                      }
                     } else {
+                      std::int16_t value{};
+                      std::memcpy(&value, position + component * 2U,
+                                  sizeof(value));
                       decoded[component] =
                           static_cast<float>(value) / 32767.0F;
                     }
@@ -607,6 +589,7 @@ void execute_ge_list(Implementation& implementation, psprecomp::State& state,
               render_state.scissor_right = scissor_right;
               render_state.scissor_bottom = scissor_bottom;
               render_state.texture_address = texture.address;
+              render_state.through_coordinates = through;
               const auto clear_mode =
                   (graphics.commands[0xd3U] & 1U) != 0;
               if (clear_mode) {
