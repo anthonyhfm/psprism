@@ -16,13 +16,14 @@ struct Channel {
   bool reserved{};
   std::uint32_t sample_count{};
   std::uint32_t format{};
-  std::uint32_t left_volume{0x8000U};
-  std::uint32_t right_volume{0x8000U};
+  std::uint32_t left_volume{};
+  std::uint32_t right_volume{};
 };
 
 constexpr std::uint32_t stereo_format = 0U;
 constexpr std::uint32_t mono_format = 0x10U;
 constexpr std::uint32_t maximum_volume = 0x8000U;
+constexpr std::uint32_t maximum_api_volume = 0xffffU;
 constexpr std::uint32_t output2_maximum_volume = 0xfffffU;
 constexpr std::uint32_t output2_channel = 8U;
 constexpr std::uint32_t channel_busy = 0x80260002U;
@@ -95,16 +96,23 @@ inline bool update(std::uint32_t channel, std::uint32_t sample_count,
   return true;
 }
 
+inline bool valid_volume_argument(std::int32_t volume,
+                                  bool allow_sentinel = true) {
+  return (allow_sentinel && volume < 0) ||
+         static_cast<std::uint32_t>(volume) <= maximum_api_volume;
+}
+
 inline std::uint32_t change_volume(std::uint32_t channel,
-                                   std::uint32_t left_volume,
-                                   std::uint32_t right_volume) {
-  if (left_volume > maximum_volume || right_volume > maximum_volume)
+                                   std::int32_t left_volume,
+                                   std::int32_t right_volume) {
+  if (!valid_volume_argument(left_volume, false) ||
+      !valid_volume_argument(right_volume, false))
     return invalid_volume;
   std::lock_guard lock(mutex());
   if (channel >= channels().size()) return invalid_channel;
   if (!channels()[channel].reserved) return not_reserved;
-  channels()[channel].left_volume = left_volume;
-  channels()[channel].right_volume = right_volume;
+  channels()[channel].left_volume = static_cast<std::uint32_t>(left_volume);
+  channels()[channel].right_volume = static_cast<std::uint32_t>(right_volume);
   return 0U;
 }
 
@@ -129,10 +137,12 @@ inline std::int16_t scale_sample(std::int16_t sample, std::uint32_t volume) {
 }
 
 inline std::uint32_t output(psprecomp::State& state, std::uint32_t channel,
-                            std::uint32_t left_volume,
-                            std::uint32_t right_volume,
-                            std::uint32_t buffer_address, bool blocking) {
-  if (left_volume > maximum_volume || right_volume > maximum_volume)
+                            std::int32_t left_volume,
+                            std::int32_t right_volume,
+                            std::uint32_t buffer_address, bool blocking,
+                            bool reject_negative_volume = false) {
+  if (!valid_volume_argument(left_volume, !reject_negative_volume) ||
+      !valid_volume_argument(right_volume, !reject_negative_volume))
     return invalid_volume;
   Channel selected;
   {
@@ -140,8 +150,12 @@ inline std::uint32_t output(psprecomp::State& state, std::uint32_t channel,
     if (channel >= channels().size()) return invalid_channel;
     if (!channels()[channel].reserved) return not_reserved;
     auto& selected_channel = channels()[channel];
-    selected_channel.left_volume = left_volume;
-    selected_channel.right_volume = right_volume;
+    if (left_volume >= 0)
+      selected_channel.left_volume =
+          static_cast<std::uint32_t>(left_volume);
+    if (right_volume >= 0)
+      selected_channel.right_volume =
+          static_cast<std::uint32_t>(right_volume);
     selected = selected_channel;
   }
   const auto source_channels = selected.format == mono_format ? 1U : 2U;
@@ -161,8 +175,8 @@ inline std::uint32_t output(psprecomp::State& state, std::uint32_t channel,
                            ? left
                            : read_sample(input + frame * source_channels * 2U +
                                          sizeof(std::int16_t));
-    stereo[frame * 2U] = scale_sample(left, left_volume);
-    stereo[frame * 2U + 1U] = scale_sample(right, right_volume);
+    stereo[frame * 2U] = scale_sample(left, selected.left_volume);
+    stereo[frame * 2U + 1U] = scale_sample(right, selected.right_volume);
   }
   if (!refract::host::submit_audio(stereo.data(), selected.sample_count,
                                    channel, blocking))

@@ -9,6 +9,10 @@ void sceAtracSetLoopNum(Implementation& implementation, psprecomp::State& state)
     return;
   }
   std::lock_guard lock(decoder->decoder_mutex);
+  if (decoder->track.loop_start == atrac_state::all_data_on_memory) {
+    state.gpr[2] = atrac_state::no_loop_information;
+    return;
+  }
   decoder->loop_count = static_cast<int>(state.gpr[5]);
   state.gpr[2] = 0U;
   return;

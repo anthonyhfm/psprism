@@ -3,6 +3,7 @@
 #include "ge_command.hpp"
 
 #include <cstddef>
+#include <array>
 #include <cstdint>
 #include <cstring>
 #include <span>
@@ -33,6 +34,20 @@ public:
   }
 
   std::span<const TraceRecord> records() const { return records_; }
+
+  std::array<std::uint32_t, 256> command_coverage() const {
+    std::array<std::uint32_t, 256> result{};
+    for (const auto& record : records_) ++result[opcode(record.instruction)];
+    return result;
+  }
+
+  std::array<std::uint32_t, 256> replayed_command_state() const {
+    std::array<std::uint32_t, 256> result{};
+    replay([&](const TraceRecord& record) {
+      result[opcode(record.instruction)] = record.instruction;
+    });
+    return result;
+  }
 
   std::vector<std::uint8_t> serialize() const {
     constexpr std::size_t header_size = 12U;

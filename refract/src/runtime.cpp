@@ -163,9 +163,12 @@ struct DecodedTexture {
   std::uint32_t width{};
   std::uint32_t height{};
   std::uint32_t address{};
+  std::uint32_t buffer_width{};
+  std::uint32_t format{};
+  std::uint32_t mipmap_level{};
 };
 
-using TextureKey = std::array<std::uint32_t, 7>;
+using TextureKey = std::array<std::uint32_t, 12>;
 
 struct TextureKeyHash {
   std::size_t operator()(const TextureKey& key) const noexcept {
@@ -284,25 +287,41 @@ DecodedTexture decode_texture(
     const std::array<std::uint32_t, 256>& commands,
     const std::array<std::uint8_t, 1024>& clut) {
   DecodedTexture result;
-  const auto format = commands[0xc3U] & 0xfU;
-  result.address = (commands[0xa0U] & 0x00fffff0U) |
-                   ((commands[0xa8U] << 8U) & 0x0f000000U);
+  result.format = commands[0xc3U] & 0xfU;
+  const auto maximum_level = (commands[0xc2U] >> 16U) & 7U;
+  const auto level_mode = commands[0xc8U] & 3U;
+  const auto signed_bias = static_cast<std::int8_t>(commands[0xc8U] >> 16U);
+  result.mipmap_level =
+      level_mode == 1U || level_mode == 3U
+          ? std::min<std::uint32_t>(
+                maximum_level,
+                static_cast<std::uint32_t>(std::max<int>(signed_bias, 0) /
+                                           16))
+          : 0U;
+  const auto address_command = 0xa0U + result.mipmap_level;
+  const auto width_command = 0xa8U + result.mipmap_level;
+  const auto size_command = 0xb8U + result.mipmap_level;
+  result.address = (commands[address_command] & 0x00fffff0U) |
+                   ((commands[width_command] << 8U) & 0x0f000000U);
   if ((commands[0x1eU] & 1U) == 0 ||
-      (format > 5U && (format < 8U || format > 10U)))
+      (result.format > 10U))
     return result;
-  result.width = 1U << (commands[0xb8U] & 0xfU);
-  result.height = 1U << ((commands[0xb8U] >> 8U) & 0xfU);
-  const auto buffer_width = commands[0xa8U] & 0x3ffU;
-  if (result.width == 0 || result.height == 0 || buffer_width == 0 ||
+  result.width = 1U << (commands[size_command] & 0xfU);
+  result.height = 1U << ((commands[size_command] >> 8U) & 0xfU);
+  result.buffer_width = commands[width_command] & 0x3ffU;
+  if (result.width == 0 || result.height == 0 || result.buffer_width == 0 ||
       result.width > 1024U || result.height > 1024U)
     return {};
-  const auto compressed = format >= 8U;
-  const auto block_bytes = format == 8U ? 8U : 16U;
+  const auto compressed = result.format >= 8U;
+  const auto block_bytes = result.format == 8U ? 8U : 16U;
+  const auto texel_bytes = result.format == 3U || result.format == 7U ? 4U
+                           : result.format < 3U || result.format == 6U ? 2U
+                                                                      : 1U;
   const auto row_bytes = compressed
-                             ? ((buffer_width + 3U) / 4U) * block_bytes
-                         : format == 4U ? (buffer_width + 1U) / 2U
-                         : buffer_width *
-                               (format == 3U ? 4U : format < 4U ? 2U : 1U);
+                             ? ((result.buffer_width + 3U) / 4U) * block_bytes
+                         : result.format == 4U
+                             ? (result.buffer_width + 1U) / 2U
+                             : result.buffer_width * texel_bytes;
   const auto blocks_per_row = (row_bytes + 15U) / 16U;
   const auto block_rows = (result.height + 7U) / 8U;
   const auto swizzled = (commands[0xc2U] & 1U) != 0;
@@ -320,7 +339,7 @@ DecodedTexture decode_texture(
     return {};
   const std::uint8_t* palette{};
   auto palette_format = commands[0xc5U] & 3U;
-  if (format >= 4U && format <= 5U) {
+  if (result.format >= 4U && result.format <= 7U) {
     palette = clut.data();
   }
   const auto shift = (commands[0xc5U] >> 2U) & 0x1fU;
@@ -331,10 +350,7 @@ DecodedTexture decode_texture(
   for (std::uint32_t y = 0; y < result.height; ++y) {
     for (std::uint32_t x = 0; x < result.width; ++x) {
       std::uint32_t color{};
-      const auto byte_x = format == 4U ? x / 2U
-                          : format == 3U ? x * 4U
-                          : format < 4U  ? x * 2U
-                                       : x;
+      const auto byte_x = result.format == 4U ? x / 2U : x * texel_bytes;
       const auto source_offset =
           swizzled ? ((y / 8U) * blocks_per_row + byte_x / 16U) * 128U +
                          (y & 7U) * 16U + (byte_x & 15U)
@@ -343,21 +359,32 @@ DecodedTexture decode_texture(
         const auto block_offset =
             static_cast<std::size_t>(y / 4U) * row_bytes +
             static_cast<std::size_t>(x / 4U) * block_bytes;
-        color = decode_dxt_texel(source + block_offset, format, x & 3U,
+        color = decode_dxt_texel(source + block_offset, result.format, x & 3U,
                                  y & 3U);
-      } else if (format == 3U) {
+      } else if (result.format == 3U) {
         std::memcpy(&color, source + source_offset, sizeof(color));
-      } else if (format < 3U) {
+      } else if (result.format < 3U) {
         std::uint16_t packed{};
         std::memcpy(&packed, source + source_offset, sizeof(packed));
-        color = decode_16bit_color(packed, format);
+        color = decode_16bit_color(packed, result.format);
       } else {
-        auto palette_source = source[source_offset];
-        if (format == 4U)
+        std::uint32_t palette_source{};
+        if (result.format == 4U || result.format == 5U) {
+          palette_source = source[source_offset];
+        } else if (result.format == 6U) {
+          std::uint16_t value{};
+          std::memcpy(&value, source + source_offset, sizeof(value));
+          palette_source = value;
+        } else {
+          std::memcpy(&palette_source, source + source_offset,
+                      sizeof(palette_source));
+        }
+        if (result.format == 4U)
           palette_source =
               x % 2U == 0 ? palette_source & 15U : palette_source >> 4U;
+        const auto palette_limit = palette_format == 3U ? 0xffU : 0x1ffU;
         const auto palette_index =
-            ((palette_source >> shift) & mask) | (start & 0xffU);
+            (((palette_source >> shift) & mask) | start) & palette_limit;
         if (palette_format == 3U) {
           std::memcpy(&color, palette + palette_index * 4U, sizeof(color));
         } else {

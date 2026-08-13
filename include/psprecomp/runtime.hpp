@@ -8,6 +8,12 @@
 
 namespace psprecomp {
 
+#if defined(PSPRECOMP_PROFILE_CPU) || defined(PSPRECOMP_PROFILE_DISPATCH)
+inline constexpr bool cpu_profiling_compiled = true;
+#else
+inline constexpr bool cpu_profiling_compiled = false;
+#endif
+
 enum class StopReason : std::uint8_t {
     running,
     returned,
@@ -17,6 +23,16 @@ enum class StopReason : std::uint8_t {
     memory_fault,
     syscall,
     breakpoint,
+};
+
+struct CpuProfileCounters {
+    std::uint64_t dispatches{};
+    std::uint64_t translated_blocks{};
+    std::uint64_t interpreter_fallbacks{};
+    std::uint64_t direct_cfg_edges{};
+    std::uint64_t memory_reads{};
+    std::uint64_t memory_writes{};
+    std::uint64_t memory_faults{};
 };
 
 struct State {
@@ -49,7 +65,45 @@ struct State {
     std::uint32_t fault_address{};
     std::uint32_t fault_instruction{};
     std::uint32_t fault_pc{};
+    // Profiling is owned by the guest State, so independent guest threads do
+    // not contend on process-global counters.  The disabled branch is the
+    // only cost in normal builds.
+    bool cpu_profile_enabled{};
+    std::uint32_t dispatch_route_hint{0xffffffffU};
+    CpuProfileCounters cpu_profile{};
 };
+
+inline void note_cpu_dispatch(State& state) {
+    if constexpr (cpu_profiling_compiled) {
+        if (state.cpu_profile_enabled) {
+            ++state.cpu_profile.dispatches;
+        }
+    }
+}
+
+inline void note_cpu_translated_block(State& state) {
+    if constexpr (cpu_profiling_compiled) {
+        if (state.cpu_profile_enabled) {
+            ++state.cpu_profile.translated_blocks;
+        }
+    }
+}
+
+inline void note_cpu_interpreter_fallback(State& state) {
+    if constexpr (cpu_profiling_compiled) {
+        if (state.cpu_profile_enabled) {
+            ++state.cpu_profile.interpreter_fallbacks;
+        }
+    }
+}
+
+inline void note_cpu_direct_cfg_edge(State& state) {
+    if constexpr (cpu_profiling_compiled) {
+        if (state.cpu_profile_enabled) {
+            ++state.cpu_profile.direct_cfg_edges;
+        }
+    }
+}
 
 inline std::uint32_t canonical_address(std::uint32_t address) {
     // Allegrex exposes RAM through cached, uncached and kernel aliases.  Games
@@ -58,33 +112,73 @@ inline std::uint32_t canonical_address(std::uint32_t address) {
     return address & 0x1fffffffU;
 }
 
+inline std::uint8_t* region_address(std::uint8_t* host,
+                                    std::size_t region_size,
+                                    std::uint32_t region_base,
+                                    std::uint32_t address,
+                                    std::size_t width) {
+    if (host == nullptr || address < region_base) {
+        return nullptr;
+    }
+    const auto offset = static_cast<std::size_t>(address - region_base);
+    return offset <= region_size && width <= region_size - offset
+               ? host + offset
+               : nullptr;
+}
+
 inline std::uint8_t* mapped_address(const State& state, std::uint32_t address,
                                     std::size_t width) {
     address = canonical_address(address);
-    const auto within = [width](std::uint32_t address, std::uint32_t base,
-                                std::size_t size) {
-        if (address < base)
-            return false;
-        const auto offset = static_cast<std::size_t>(address - base);
-        return offset <= size && width <= size - offset;
-    };
-    if (state.memory != nullptr &&
-        within(address, state.memory_base, state.memory_size)) {
-        return state.memory + address - state.memory_base;
+    // Main RAM contains almost every translated-code access.  Keep it as one
+    // predictable region check before using the high-byte page to select a
+    // specialized PSP region.
+    if (state.memory != nullptr && address >= state.memory_base) {
+        const auto offset =
+            static_cast<std::size_t>(address - state.memory_base);
+        if (offset <= state.memory_size &&
+            width <= state.memory_size - offset) {
+            return state.memory + offset;
+        }
     }
-    if (state.scratchpad != nullptr &&
-        within(address, 0x00010000U, state.scratchpad_size)) {
-        return state.scratchpad + address - 0x00010000U;
+
+    switch (address >> 24U) {
+    case 0x00U:
+        if (auto* pointer = region_address(state.scratchpad,
+                                           state.scratchpad_size, 0x00010000U,
+                                           address, width)) {
+            return pointer;
+        }
+        break;
+    case 0x04U:
+        if (auto* pointer = region_address(state.video_memory,
+                                           state.video_memory_size,
+                                           0x04000000U, address, width)) {
+            return pointer;
+        }
+        break;
+    case 0x08U:
+        if (auto* pointer = region_address(state.volatile_memory,
+                                           state.volatile_memory_size,
+                                           0x08400000U, address, width)) {
+            return pointer;
+        }
+        break;
+    default: break;
     }
-    if (state.video_memory != nullptr &&
-        within(address, 0x04000000U, state.video_memory_size)) {
-        return state.video_memory + address - 0x04000000U;
+
+    // Preserve support for deliberately oversized/custom test mappings that
+    // cross the normal PSP 16 MiB region pages.
+    if (auto* pointer = region_address(state.scratchpad, state.scratchpad_size,
+                                       0x00010000U, address, width)) {
+        return pointer;
     }
-    if (state.volatile_memory != nullptr &&
-        within(address, 0x08400000U, state.volatile_memory_size)) {
-        return state.volatile_memory + address - 0x08400000U;
+    if (auto* pointer = region_address(state.video_memory,
+                                       state.video_memory_size, 0x04000000U,
+                                       address, width)) {
+        return pointer;
     }
-    return nullptr;
+    return region_address(state.volatile_memory, state.volatile_memory_size,
+                          0x08400000U, address, width);
 }
 
 inline bool address_ok(const State& state, std::uint32_t address,
@@ -105,12 +199,35 @@ inline bool direct_address_ok(State& state, std::uint32_t address,
         state.fault_address = address;
         if (state.fault_pc == 0)
             state.fault_pc = state.pc;
+        if constexpr (cpu_profiling_compiled) {
+            if (state.cpu_profile_enabled) {
+                ++state.cpu_profile.memory_faults;
+            }
+        }
         return false;
     }
     return true;
 }
 
+inline void note_memory_fault(State& state, std::uint32_t address) {
+    state.stop_reason = StopReason::memory_fault;
+    state.fault_address = address;
+    if (state.fault_pc == 0) {
+        state.fault_pc = state.pc;
+    }
+    if constexpr (cpu_profiling_compiled) {
+        if (state.cpu_profile_enabled) {
+            ++state.cpu_profile.memory_faults;
+        }
+    }
+}
+
 inline std::uint8_t load8(State& state, std::uint32_t address) {
+    if constexpr (cpu_profiling_compiled) {
+        if (state.cpu_profile_enabled) {
+            ++state.cpu_profile.memory_reads;
+        }
+    }
     if (auto* pointer = mapped_address(state, address, 1)) {
         return *pointer;
     }
@@ -121,22 +238,18 @@ inline std::uint8_t load8(State& state, std::uint32_t address) {
         return *reinterpret_cast<volatile std::uint8_t*>(
             static_cast<std::uintptr_t>(address));
     }
-    if (!address_ok(state, address, 1)) {
-        state.stop_reason = StopReason::memory_fault;
-        state.fault_address = address;
-        if (state.fault_pc == 0)
-            state.fault_pc = state.pc;
-        return 0;
-    }
-    return *mapped_address(state, address, 1);
+    note_memory_fault(state, address);
+    return 0;
 }
 
 inline std::uint16_t load16(State& state, std::uint32_t address) {
+    if constexpr (cpu_profiling_compiled) {
+        if (state.cpu_profile_enabled) {
+            ++state.cpu_profile.memory_reads;
+        }
+    }
     if ((address & 1U) != 0U) {
-        state.stop_reason = StopReason::memory_fault;
-        state.fault_address = address;
-        if (state.fault_pc == 0)
-            state.fault_pc = state.pc;
+        note_memory_fault(state, address);
         return 0;
     }
     if (auto* pointer = mapped_address(state, address, 2)) {
@@ -157,24 +270,18 @@ inline std::uint16_t load16(State& state, std::uint32_t address) {
                static_cast<std::uint16_t>(pointer[1]) << 8U;
 #endif
     }
-    if (!address_ok(state, address, 2)) {
-        state.stop_reason = StopReason::memory_fault;
-        state.fault_address = address;
-        if (state.fault_pc == 0)
-            state.fault_pc = state.pc;
-        return 0;
-    }
-    const auto* pointer = mapped_address(state, address, 2);
-    return static_cast<std::uint16_t>(pointer[0]) |
-           static_cast<std::uint16_t>(pointer[1]) << 8U;
+    note_memory_fault(state, address);
+    return 0;
 }
 
 inline std::uint32_t load32(State& state, std::uint32_t address) {
+    if constexpr (cpu_profiling_compiled) {
+        if (state.cpu_profile_enabled) {
+            ++state.cpu_profile.memory_reads;
+        }
+    }
     if ((address & 3U) != 0U) {
-        state.stop_reason = StopReason::memory_fault;
-        state.fault_address = address;
-        if (state.fault_pc == 0)
-            state.fault_pc = state.pc;
+        note_memory_fault(state, address);
         return 0;
     }
     if (auto* pointer = mapped_address(state, address, 4)) {
@@ -199,18 +306,8 @@ inline std::uint32_t load32(State& state, std::uint32_t address) {
                static_cast<std::uint32_t>(pointer[3]) << 24U;
 #endif
     }
-    if (!address_ok(state, address, 4)) {
-        state.stop_reason = StopReason::memory_fault;
-        state.fault_address = address;
-        if (state.fault_pc == 0)
-            state.fault_pc = state.pc;
-        return 0;
-    }
-    const auto* pointer = mapped_address(state, address, 4);
-    return static_cast<std::uint32_t>(pointer[0]) |
-           static_cast<std::uint32_t>(pointer[1]) << 8U |
-           static_cast<std::uint32_t>(pointer[2]) << 16U |
-           static_cast<std::uint32_t>(pointer[3]) << 24U;
+    note_memory_fault(state, address);
+    return 0;
 }
 
 // Instruction immediates are read from the relocated guest image.  PSP PRX
@@ -220,10 +317,13 @@ inline std::uint32_t load32(State& state, std::uint32_t address) {
 inline std::uint32_t instruction_word(const State& state,
                                       std::uint32_t current_pc,
                                       std::uint32_t fallback) {
-    if ((current_pc & 3U) != 0U || !address_ok(state, current_pc, 4)) {
+    if ((current_pc & 3U) != 0U) {
         return fallback;
     }
     const auto* pointer = mapped_address(state, current_pc, 4);
+    if (pointer == nullptr) {
+        return fallback;
+    }
     return static_cast<std::uint32_t>(pointer[0]) |
            static_cast<std::uint32_t>(pointer[1]) << 8U |
            static_cast<std::uint32_t>(pointer[2]) << 16U |
@@ -267,6 +367,11 @@ inline std::uint32_t instruction_jump_target(const State& state,
 }
 
 inline void store8(State& state, std::uint32_t address, std::uint8_t value) {
+    if constexpr (cpu_profiling_compiled) {
+        if (state.cpu_profile_enabled) {
+            ++state.cpu_profile.memory_writes;
+        }
+    }
     if (auto* pointer = mapped_address(state, address, 1)) {
         *pointer = value;
         return;
@@ -279,22 +384,17 @@ inline void store8(State& state, std::uint32_t address, std::uint8_t value) {
             static_cast<std::uintptr_t>(address)) = value;
         return;
     }
-    if (!address_ok(state, address, 1)) {
-        state.stop_reason = StopReason::memory_fault;
-        state.fault_address = address;
-        if (state.fault_pc == 0)
-            state.fault_pc = state.pc;
-        return;
-    }
-    *mapped_address(state, address, 1) = value;
+    note_memory_fault(state, address);
 }
 
 inline void store16(State& state, std::uint32_t address, std::uint16_t value) {
+    if constexpr (cpu_profiling_compiled) {
+        if (state.cpu_profile_enabled) {
+            ++state.cpu_profile.memory_writes;
+        }
+    }
     if ((address & 1U) != 0U) {
-        state.stop_reason = StopReason::memory_fault;
-        state.fault_address = address;
-        if (state.fault_pc == 0)
-            state.fault_pc = state.pc;
+        note_memory_fault(state, address);
         return;
     }
     if (auto* pointer = mapped_address(state, address, 2)) {
@@ -317,24 +417,17 @@ inline void store16(State& state, std::uint32_t address, std::uint16_t value) {
 #endif
         return;
     }
-    if (!address_ok(state, address, 2)) {
-        state.stop_reason = StopReason::memory_fault;
-        state.fault_address = address;
-        if (state.fault_pc == 0)
-            state.fault_pc = state.pc;
-        return;
-    }
-    auto* pointer = mapped_address(state, address, 2);
-    pointer[0] = static_cast<std::uint8_t>(value);
-    pointer[1] = static_cast<std::uint8_t>(value >> 8U);
+    note_memory_fault(state, address);
 }
 
 inline void store32(State& state, std::uint32_t address, std::uint32_t value) {
+    if constexpr (cpu_profiling_compiled) {
+        if (state.cpu_profile_enabled) {
+            ++state.cpu_profile.memory_writes;
+        }
+    }
     if ((address & 3U) != 0U) {
-        state.stop_reason = StopReason::memory_fault;
-        state.fault_address = address;
-        if (state.fault_pc == 0)
-            state.fault_pc = state.pc;
+        note_memory_fault(state, address);
         return;
     }
     if (auto* pointer = mapped_address(state, address, 4)) {
@@ -361,18 +454,7 @@ inline void store32(State& state, std::uint32_t address, std::uint32_t value) {
 #endif
         return;
     }
-    if (!address_ok(state, address, 4)) {
-        state.stop_reason = StopReason::memory_fault;
-        state.fault_address = address;
-        if (state.fault_pc == 0)
-            state.fault_pc = state.pc;
-        return;
-    }
-    auto* pointer = mapped_address(state, address, 4);
-    pointer[0] = static_cast<std::uint8_t>(value);
-    pointer[1] = static_cast<std::uint8_t>(value >> 8U);
-    pointer[2] = static_cast<std::uint8_t>(value >> 16U);
-    pointer[3] = static_cast<std::uint8_t>(value >> 24U);
+    note_memory_fault(state, address);
 }
 
 #if defined(__PSP__)

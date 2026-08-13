@@ -9,7 +9,10 @@ void __sceSasCoreWithMix(Implementation& implementation,
     state.gpr[2] = sas_state::invalid_volume;
   } else {
     GuestExecutionPause pause(implementation);
-    state.gpr[2] = sas_state::mix(state, state.gpr[4], state.gpr[5], true);
+    state.gpr[2] = sas_state::mix(
+        state, state.gpr[4], state.gpr[5], true,
+        static_cast<std::int32_t>(state.gpr[6]),
+        static_cast<std::int32_t>(state.gpr[7]));
   }
 #else
   (void)implementation;

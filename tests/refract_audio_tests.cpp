@@ -120,6 +120,23 @@ int main() {
   std::copy(vag_block.begin(), vag_block.end(), headered_vag.begin() + 0x30U);
   CHECK(sas_state::decode_vag(headered_vag.data(), headered_vag.size()) ==
         decoded);
+  std::array<std::uint8_t, 48> looping_vag{};
+  looping_vag[1U] = 6U;
+  looping_vag[16U + 1U] = 0U;
+  looping_vag[32U + 1U] = 3U;
+  std::fill(looping_vag.begin() + 2U, looping_vag.begin() + 16U, 0x11U);
+  std::fill(looping_vag.begin() + 18U, looping_vag.begin() + 32U, 0x22U);
+  std::fill(looping_vag.begin() + 34U, looping_vag.end(), 0x33U);
+  const auto decoded_looping_vag =
+      sas_state::decode_vag_details(looping_vag.data(), looping_vag.size());
+  CHECK(decoded_looping_vag.samples.size() == 84U);
+  CHECK(decoded_looping_vag.has_loop_start);
+  CHECK(decoded_looping_vag.loop_start == 0U);
+  CHECK(decoded_looping_vag.has_loop_end);
+  CHECK(decoded_looping_vag.samples[28U] != decoded_looping_vag.samples[0U]);
+  CHECK(sas_state::walk_envelope_curve(
+            sas_state::max_envelope_height / 2U,
+            sas_state::EnvelopeCurve::direct, 12345U) == 12345U);
 
   constexpr std::uint32_t memory_base = 0x08800000U;
   constexpr std::uint32_t core_address = memory_base + 0x100U;
@@ -158,12 +175,27 @@ int main() {
   CHECK(audio_state::output(state, 8U, audio_state::maximum_volume,
                             audio_state::maximum_volume, pcm_address, false) ==
         audio_state::invalid_channel);
-  CHECK(audio_state::output(state, 0U, audio_state::maximum_volume + 1U,
+  CHECK(audio_state::output(state, 0U, audio_state::maximum_api_volume + 1U,
                             audio_state::maximum_volume, pcm_address, false) ==
         audio_state::invalid_volume);
   CHECK(audio_state::output(state, 0U, audio_state::maximum_volume,
                             audio_state::maximum_volume,
                             memory_base + memory.size(), false) == 0xffffffffU);
+  CHECK(audio_state::release(0U));
+  CHECK(fake_queued_frames[0U] == 0U);
+
+  CHECK(audio_state::reserve(-1, 1U, audio_state::stereo_format) == 0);
+  CHECK(audio_state::output(state, 0U, audio_state::maximum_api_volume,
+                            audio_state::maximum_volume, pcm_address, false) ==
+        1U);
+  CHECK(submitted_audio[0] == 32767);
+  fake_queued_frames[0U] = 0U;
+  CHECK(audio_state::output(state, 0U, -1, -1, pcm_address, false) == 1U);
+  CHECK(submitted_audio[0] == 32767);
+  fake_queued_frames[0U] = 0U;
+  CHECK(audio_state::output(state, 0U, -1, audio_state::maximum_volume,
+                            pcm_address, true, true) ==
+        audio_state::invalid_volume);
   CHECK(audio_state::release(0U));
 
   const std::array<std::int16_t, 2> mono_samples{1000, -2000};
@@ -251,6 +283,37 @@ int main() {
   CHECK(sas_state::mix(state, core_address, output_address, true) == 0U);
   CHECK(read_sample(memory, output_offset) == 600);
   CHECK(read_sample(memory, output_offset + 2U) == 600);
+
+  preserved_output.fill(100);
+  std::memcpy(memory.data() + output_address - memory_base,
+              preserved_output.data(), sizeof(preserved_output));
+  sas_state::reset_for_tests();
+  CHECK(sas_state::initialize(state, core_address, 64U, 32U, 0U, 44100U) ==
+        0U);
+  CHECK(sas_state::mix(state, core_address, output_address, true,
+                       sas_state::max_volume / 2U,
+                       sas_state::max_volume / 4U) == 0U);
+  CHECK(read_sample(memory, output_offset) == 50);
+  CHECK(read_sample(memory, output_offset + 2U) == 25);
+
+  std::fill(memory.begin() + output_offset,
+            memory.begin() + output_offset + 64U * 4U * 2U, 0U);
+  sas_state::reset_for_tests();
+  CHECK(sas_state::initialize(state, core_address, 64U, 32U, 1U, 44100U) ==
+        0U);
+  CHECK(sas_state::set_voice_pcm(core_address, 6, state, pcm_voice_address,
+                                 static_cast<std::int32_t>(constant_pcm.size()),
+                                 -1) == 0U);
+  CHECK(sas_state::set_volume(core_address, 6, sas_state::max_volume,
+                              sas_state::max_volume / 2U,
+                              sas_state::max_volume / 4U,
+                              sas_state::max_volume / 8U) == 0U);
+  CHECK(sas_state::key_on(core_address, 6) == 0U);
+  CHECK(sas_state::mix(state, core_address, output_address, false) == 0U);
+  CHECK(read_sample(memory, output_offset) == 500);
+  CHECK(read_sample(memory, output_offset + 64U * 2U) == 250);
+  CHECK(read_sample(memory, output_offset + 128U * 2U) == 125);
+  CHECK(read_sample(memory, output_offset + 192U * 2U) == 62);
 
   const std::array<std::int16_t, 2> looping_pcm{1000, 2000};
   std::memcpy(memory.data() + pcm_voice_address - memory_base,

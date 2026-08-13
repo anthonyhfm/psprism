@@ -65,6 +65,7 @@ if(BUILD_TESTING)
 
     add_executable(runtime_tests tests/runtime_tests.cpp)
     target_include_directories(runtime_tests PRIVATE include)
+    target_compile_definitions(runtime_tests PRIVATE PSPRECOMP_PROFILE_CPU)
     target_compile_options(runtime_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
     add_test(NAME runtime_tests COMMAND runtime_tests)
 
@@ -148,6 +149,7 @@ if(BUILD_TESTING)
         refract/src)
     target_compile_options(refract_mpeg_tests PRIVATE
         -Wall -Wextra -Wpedantic -Werror)
+    target_link_libraries(refract_mpeg_tests PRIVATE refract_atrac_test)
     if(REFRACT_USE_FFMPEG)
         target_include_directories(refract_mpeg_tests PRIVATE
             ${REFRACT_FFMPEG_INCLUDE_DIR})

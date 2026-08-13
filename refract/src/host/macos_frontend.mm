@@ -457,25 +457,29 @@ refract::desktop::DialogFrame current_dialog_frame();
   }
   self.depthStates = depth_states;
   NSMutableArray<id<MTLSamplerState>>* sampler_states =
-      [NSMutableArray arrayWithCapacity:8];
-  for (NSUInteger linear = 0; linear < 2; ++linear) {
-    for (NSUInteger clamp_t = 0; clamp_t < 2; ++clamp_t) {
-      for (NSUInteger clamp_s = 0; clamp_s < 2; ++clamp_s) {
-        MTLSamplerDescriptor* sampler_descriptor =
-            [[MTLSamplerDescriptor alloc] init];
-        sampler_descriptor.minFilter =
-            linear != 0 ? MTLSamplerMinMagFilterLinear
-                        : MTLSamplerMinMagFilterNearest;
-        sampler_descriptor.magFilter = sampler_descriptor.minFilter;
-        sampler_descriptor.sAddressMode =
-            clamp_s != 0 ? MTLSamplerAddressModeClampToEdge
-                         : MTLSamplerAddressModeRepeat;
-        sampler_descriptor.tAddressMode =
-            clamp_t != 0 ? MTLSamplerAddressModeClampToEdge
-                         : MTLSamplerAddressModeRepeat;
-        [sampler_states
-            addObject:[self.device newSamplerStateWithDescriptor:
-                                       sampler_descriptor]];
+      [NSMutableArray arrayWithCapacity:16];
+  for (NSUInteger min_linear = 0; min_linear < 2; ++min_linear) {
+    for (NSUInteger mag_linear = 0; mag_linear < 2; ++mag_linear) {
+      for (NSUInteger clamp_t = 0; clamp_t < 2; ++clamp_t) {
+        for (NSUInteger clamp_s = 0; clamp_s < 2; ++clamp_s) {
+          MTLSamplerDescriptor* sampler_descriptor =
+              [[MTLSamplerDescriptor alloc] init];
+          sampler_descriptor.minFilter =
+              min_linear != 0 ? MTLSamplerMinMagFilterLinear
+                              : MTLSamplerMinMagFilterNearest;
+          sampler_descriptor.magFilter =
+              mag_linear != 0 ? MTLSamplerMinMagFilterLinear
+                              : MTLSamplerMinMagFilterNearest;
+          sampler_descriptor.sAddressMode =
+              clamp_s != 0 ? MTLSamplerAddressModeClampToEdge
+                           : MTLSamplerAddressModeRepeat;
+          sampler_descriptor.tAddressMode =
+              clamp_t != 0 ? MTLSamplerAddressModeClampToEdge
+                           : MTLSamplerAddressModeRepeat;
+          [sampler_states
+              addObject:[self.device newSamplerStateWithDescriptor:
+                                         sampler_descriptor]];
+        }
       }
     }
   }
@@ -561,6 +565,7 @@ refract::desktop::DialogFrame current_dialog_frame();
     id<MTLRenderCommandEncoder> encoder = nil;
     std::uint32_t active_target = UINT32_MAX;
     id<MTLTexture> active_target_texture = nil;
+    id<MTLTexture> active_depth_texture = nil;
     for (const auto& batch : presented_geometry_batches) {
       if (batch.vertices.empty()) continue;
       const auto target_address =
@@ -568,7 +573,10 @@ refract::desktop::DialogFrame current_dialog_frame();
       NSNumber* target_key = @(target_address);
       id<MTLTexture> target =
           [self.renderTargets objectForKey:target_key];
-      id<MTLTexture> depth = [self.depthTargets objectForKey:target_key];
+      const auto depth_address =
+          normalized_vram_address(batch.state.depth_target_address);
+      NSNumber* depth_key = @(depth_address);
+      id<MTLTexture> depth = [self.depthTargets objectForKey:depth_key];
       bool created_target = false;
       if (target == nil || target.width < batch.state.render_target_width ||
           target.height < batch.state.render_target_height) {
@@ -587,18 +595,27 @@ refract::desktop::DialogFrame current_dialog_frame();
             MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
         target = [self.device newTextureWithDescriptor:target_descriptor];
         [self.renderTargets setObject:target forKey:target_key];
+        created_target = true;
+      }
+      bool created_depth = false;
+      if (depth == nil || depth.width < batch.state.render_target_width ||
+          depth.height < batch.state.render_target_height) {
+        const auto depth_width = std::max<NSUInteger>(
+            depth.width, batch.state.render_target_width);
+        const auto depth_height = std::max<NSUInteger>(
+            depth.height, batch.state.render_target_height);
         MTLTextureDescriptor* depth_descriptor = [MTLTextureDescriptor
             texture2DDescriptorWithPixelFormat:view.depthStencilPixelFormat
-                                         width:target_width
-                                        height:target_height
+                                         width:depth_width
+                                        height:depth_height
                                      mipmapped:NO];
         depth_descriptor.usage = MTLTextureUsageRenderTarget;
         depth = [self.device newTextureWithDescriptor:depth_descriptor];
-        [self.depthTargets setObject:depth forKey:target_key];
-        created_target = true;
+        [self.depthTargets setObject:depth forKey:depth_key];
+        created_depth = true;
       }
       if (encoder == nil || active_target != target_address ||
-          active_target_texture != target) {
+          active_target_texture != target || active_depth_texture != depth) {
         if (encoder != nil) [encoder endEncoding];
         MTLRenderPassDescriptor* target_pass =
             [MTLRenderPassDescriptor renderPassDescriptor];
@@ -610,7 +627,7 @@ refract::desktop::DialogFrame current_dialog_frame();
             MTLClearColorMake(0.0, 0.0, 0.0, 0.0);
         target_pass.depthAttachment.texture = depth;
         target_pass.depthAttachment.loadAction =
-            created_target ? MTLLoadActionClear : MTLLoadActionLoad;
+            created_depth ? MTLLoadActionClear : MTLLoadActionLoad;
         target_pass.depthAttachment.storeAction = MTLStoreActionStore;
         target_pass.depthAttachment.clearDepth = 1.0;
         encoder = [commands renderCommandEncoderWithDescriptor:target_pass];
@@ -620,6 +637,7 @@ refract::desktop::DialogFrame current_dialog_frame();
         [encoder setViewport:target_viewport];
         active_target = target_address;
         active_target_texture = target;
+        active_depth_texture = depth;
       }
       const auto scissor_left = std::min<NSUInteger>(
           batch.state.scissor_left, target.width);
@@ -711,7 +729,8 @@ refract::desktop::DialogFrame current_dialog_frame();
                                                state:batch.state]
                          : self.texturedGeometryPipeline];
         const auto sampler_state =
-            (batch.state.texture_linear_filter ? 4U : 0U) +
+            (batch.state.texture_min_linear ? 8U : 0U) +
+            (batch.state.texture_mag_linear ? 4U : 0U) +
             (batch.state.texture_clamp_t ? 2U : 0U) +
             (batch.state.texture_clamp_s ? 1U : 0U);
         [encoder setFragmentSamplerState:self.samplerStates[sampler_state]

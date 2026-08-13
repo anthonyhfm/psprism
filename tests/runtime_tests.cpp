@@ -20,6 +20,7 @@ int main() {
     state.memory = memory.data();
     state.memory_size = memory.size();
     state.memory_base = 0x1000;
+    state.cpu_profile_enabled = true;
 
     psprecomp::store32(state, 0x1004, 0x89abcdefU);
     CHECK(state.stop_reason == psprecomp::StopReason::running);
@@ -28,6 +29,8 @@ int main() {
     psprecomp::store32(state, 0x80001008U, 0x12345678U);
     CHECK(psprecomp::load32(state, 0xa0001008U) == 0x12345678U);
     CHECK(memory[4] == 0xef && memory[7] == 0x89);
+    CHECK(state.cpu_profile.memory_writes == 2U);
+    CHECK(state.cpu_profile.memory_reads == 3U);
 
     std::array<std::uint8_t, 16> volatile_memory{};
     state.volatile_memory = volatile_memory.data();
@@ -116,6 +119,7 @@ int main() {
     (void)psprecomp::load16(state, 0x1001);
     CHECK(state.stop_reason == psprecomp::StopReason::memory_fault);
     CHECK(state.fault_address == 0x1001);
+    CHECK(state.cpu_profile.memory_faults == 1U);
     CHECK(psprecomp::arithmetic_shift_right(0x80000000U, 1) == 0xc0000000U);
     CHECK(psprecomp::arithmetic_shift_right(0x7fffffffU, 4) == 0x07ffffffU);
     CHECK(psprecomp::rotate_right(0x12345678U, 8) == 0x78123456U);

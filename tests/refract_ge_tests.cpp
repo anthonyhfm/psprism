@@ -3,6 +3,7 @@
 
 #include "host/host.hpp"
 #include "ge/ge_command.hpp"
+#include "ge/ge_draw_packet.hpp"
 #include "ge/ge_scheduler.hpp"
 #include "ge/ge_state.hpp"
 #include "ge/ge_vertex_decoder.hpp"
@@ -120,10 +121,30 @@ void enqueue(psprecomp::State& state, const DisplayList& list,
   refract::pspsdk::sceGeListEnQueue(state);
 }
 
+void execute_command_list(
+    psprecomp::State& state, std::vector<std::uint8_t>& memory,
+    std::uint32_t memory_base, std::uint32_t address,
+    std::initializer_list<std::pair<std::uint32_t, std::uint32_t>> commands) {
+  auto cursor = address;
+  for (const auto [opcode, argument] : commands) {
+    store_word(memory, memory_base, cursor, command(opcode, argument));
+    cursor += 4U;
+  }
+  store_word(memory, memory_base, cursor, command(0x0cU, 0U));
+  state.gpr[4] = address;
+  state.gpr[5] = 0U;
+  state.gpr[6] = 0U;
+  refract::pspsdk::sceGeListEnQueue(state);
+}
+
 int ge_component_tests() {
   CHECK(refract::ge::command_metadata(0x04U).flow ==
         refract::ge::CommandFlow::draw);
   CHECK(refract::ge::command_metadata(0x0aU).name == "CALL");
+  CHECK(refract::ge::command_metadata(0xa5U).name == "TEXADDR");
+  CHECK(refract::ge::command_metadata(0xc5U).name == "CLUTFORMAT");
+  CHECK(refract::ge::command_metadata(0xeaU).flow ==
+        refract::ge::CommandFlow::transfer);
   const auto float_xyz = refract::ge::VertexDecoder::layout(0x180U);
   CHECK(float_xyz.position_offset == 0U);
   CHECK(float_xyz.stride == 12U);
@@ -156,6 +177,12 @@ int ge_component_tests() {
   CHECK(refract::ge::Trace::deserialize(bytes, decoded));
   CHECK(decoded.records().size() == 2U);
   CHECK(decoded.records()[0] == trace.records()[0]);
+  const auto coverage = decoded.command_coverage();
+  CHECK(coverage[0x04U] == 1U);
+  CHECK(coverage[0x0cU] == 1U);
+  const auto replayed_state = decoded.replayed_command_state();
+  CHECK(replayed_state[0x04U] == command(0x04U, 3U));
+  CHECK(replayed_state[0x0cU] == command(0x0cU, 0U));
   auto corrupt = bytes;
   corrupt[0] ^= 1U;
   CHECK(!refract::ge::Trace::deserialize(corrupt, decoded));
@@ -176,6 +203,16 @@ int ge_component_tests() {
   source.commands[0x3bU] = command(0x3bU, 0x654321U);
   CHECK(source.read_command(0x3bU) == command(0x3bU, 0U));
   CHECK(source.read_command(256U) == 0U);
+
+  refract::ge::DrawPacket packet;
+  packet.primitive_type = 3U;
+  packet.vertices.resize(1U);
+  packet.vertices[0].position[0] = 1.0F;
+  packet.state.render_target_address = 0x04000000U;
+  const auto first_hash = refract::ge::draw_packet_hash(packet);
+  CHECK(first_hash == refract::ge::draw_packet_hash(packet));
+  packet.state.depth_target_address = 0x04010000U;
+  CHECK(first_hash != refract::ge::draw_packet_hash(packet));
   return 0;
 }
 
@@ -440,6 +477,11 @@ int main() {
   CHECK(normal_primitive.texture_width == 1U);
   CHECK(normal_primitive.texture_height == 1U);
   CHECK(normal_primitive.state.texture_address == texture_address);
+  CHECK(normal_primitive.state.texture_format == 3U);
+  CHECK(normal_primitive.state.texture_buffer_width == 1U);
+  CHECK(normal_primitive.state.render_target_stride == 480U);
+  CHECK(normal_primitive.state.render_target_format == 0U);
+  CHECK(normal_primitive.state.depth_target_address == 0x04000000U);
   CHECK(normal_primitive.state.cull_face);
   CHECK(normal_primitive.state.depth_test);
   CHECK(!normal_primitive.state.depth_write);
@@ -518,6 +560,103 @@ int main() {
                  (1.0F - 16.0F / 136.0F)) < 0.0001F);
   CHECK(std::abs(presented_primitives[0].first_position[2] - 1.0F) <
         0.0001F);
+
+  constexpr std::uint32_t signed_byte_vertex_address =
+      vertex_address + 0x180U;
+  constexpr std::uint32_t signed_byte_list_address = list_address + 0xc00U;
+  constexpr std::array<std::uint8_t, 3> signed_byte_vertex{0xf8U, 16U,
+                                                           0xffU};
+  std::memcpy(memory.data() + signed_byte_vertex_address - memory_base,
+              signed_byte_vertex.data(), signed_byte_vertex.size());
+  const auto signed_byte_through = write_display_list(
+      memory, memory_base, signed_byte_list_address,
+      signed_byte_vertex_address, texture_address, 0U, 1U);
+  store_word(memory, memory_base, signed_byte_list_address + 2U * 4U,
+             command(0x12U, 0x00800080U));
+  reset_capture();
+  enqueue(state, signed_byte_through);
+  CHECK(presented_primitives.size() == 1U);
+  CHECK(std::abs(presented_primitives[0].first_position[0] -
+                 (-8.0F / 240.0F - 1.0F)) < 0.0001F);
+  CHECK(std::abs(presented_primitives[0].first_position[1] -
+                 (1.0F - 16.0F / 136.0F)) < 0.0001F);
+  CHECK(std::abs(presented_primitives[0].first_position[2] -
+                 (255.0F / 65535.0F)) < 0.0001F);
+
+  constexpr std::uint32_t clut_address = memory_base + 0x9000U;
+  constexpr std::uint32_t clut_setup_address = memory_base + 0x9400U;
+  std::array<std::uint8_t, 32> clut{};
+  constexpr std::array<std::uint8_t, 4> clut_color_1{0x11U, 0x22U, 0x33U,
+                                                    0x44U};
+  constexpr std::array<std::uint8_t, 4> clut_color_2{0x55U, 0x66U, 0x77U,
+                                                    0x88U};
+  std::copy(clut_color_1.begin(), clut_color_1.end(), clut.begin() + 4U);
+  std::copy(clut_color_2.begin(), clut_color_2.end(), clut.begin() + 8U);
+  std::memcpy(memory.data() + clut_address - memory_base, clut.data(),
+              clut.size());
+  execute_command_list(
+      state, memory, memory_base, clut_setup_address,
+      {{0xb0U, clut_address & 0x00fffff0U},
+       {0xb1U, (clut_address >> 8U) & 0x000f0000U},
+       {0xc5U, 3U | (0xffU << 8U)}, {0xc4U, 1U}});
+
+  constexpr std::uint32_t clut16_list_address = memory_base + 0x9600U;
+  const auto clut16 = write_display_list(
+      memory, memory_base, clut16_list_address, vertex_address,
+      texture_address, 0U, 1U);
+  store_word(memory, memory_base, clut16_list_address + 13U * 4U,
+             command(0xc3U, 6U));
+  constexpr std::uint16_t clut16_index = 1U;
+  std::memcpy(memory.data() + texture_address - memory_base, &clut16_index,
+              sizeof(clut16_index));
+  reset_capture();
+  enqueue(state, clut16);
+  CHECK(presented_primitives.size() == 1U);
+  CHECK(std::equal(clut_color_1.begin(), clut_color_1.end(),
+                   presented_primitives[0].texture_pixels.begin()));
+
+  constexpr std::uint32_t clut32_list_address = memory_base + 0x9800U;
+  const auto clut32 = write_display_list(
+      memory, memory_base, clut32_list_address, vertex_address,
+      texture_address, 0U, 1U);
+  store_word(memory, memory_base, clut32_list_address + 13U * 4U,
+             command(0xc3U, 7U));
+  constexpr std::uint32_t clut32_index = 2U;
+  std::memcpy(memory.data() + texture_address - memory_base, &clut32_index,
+              sizeof(clut32_index));
+  reset_capture();
+  enqueue(state, clut32);
+  CHECK(presented_primitives.size() == 1U);
+  CHECK(std::equal(clut_color_2.begin(), clut_color_2.end(),
+                   presented_primitives[0].texture_pixels.begin()));
+
+  constexpr std::uint32_t mip_texture_address = memory_base + 0x9a00U;
+  constexpr std::uint32_t mip_setup_address = memory_base + 0x9b00U;
+  constexpr std::array<std::uint8_t, 4> mip_color{0xdeU, 0xadU, 0xbeU, 0xefU};
+  std::memcpy(memory.data() + mip_texture_address - memory_base,
+              mip_color.data(), mip_color.size());
+  execute_command_list(
+      state, memory, memory_base, mip_setup_address,
+      {{0xa1U, mip_texture_address & 0x00fffff0U},
+       {0xa9U, ((mip_texture_address >> 8U) & 0x000f0000U) | 1U},
+       {0xb9U, 0U}, {0xc2U, 1U << 16U},
+       {0xc6U, 0x107U}, {0xc8U, 1U | (16U << 16U)}});
+  constexpr std::uint32_t mip_list_address = memory_base + 0x9c00U;
+  const auto mip = write_display_list(memory, memory_base, mip_list_address,
+                                      vertex_address, texture_address, 0U, 1U);
+  reset_capture();
+  enqueue(state, mip);
+  CHECK(presented_primitives.size() == 1U);
+  CHECK(presented_primitives[0].state.texture_address == mip_texture_address);
+  CHECK(presented_primitives[0].state.texture_mipmap_level == 1U);
+  CHECK(presented_primitives[0].state.texture_max_mipmap_level == 1U);
+  CHECK(presented_primitives[0].state.texture_lod_bias == 16);
+  CHECK(presented_primitives[0].state.texture_min_linear);
+  CHECK(presented_primitives[0].state.texture_mag_linear);
+  CHECK(presented_primitives[0].state.texture_mipmap_enabled);
+  CHECK(presented_primitives[0].state.texture_mipmap_linear);
+  CHECK(std::equal(mip_color.begin(), mip_color.end(),
+                   presented_primitives[0].texture_pixels.begin()));
 
   constexpr std::uint32_t thread_name_address = memory_base + 0x700U;
   constexpr char thread_name[] = "gp-regression";

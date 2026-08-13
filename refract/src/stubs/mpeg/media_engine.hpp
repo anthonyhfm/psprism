@@ -26,6 +26,7 @@ struct MediaAccessUnit {
   std::int64_t dts{-1};
   std::uint32_t source_bytes{};
   std::uint8_t channel{};
+  std::uint8_t channels{2U};
 };
 
 struct VideoFrameInfo {
@@ -61,6 +62,8 @@ class MediaEngine {
                             std::uint32_t frame_stride,
                             std::uint32_t pixel_format, VideoFrameInfo& info);
   std::optional<MediaAccessUnit> take_pending_audio();
+  bool decode_pending_audio(std::span<std::int16_t> output,
+                            std::uint32_t& sample_count);
   bool drain_video(std::span<std::uint8_t> output,
                    std::uint32_t frame_stride, std::uint32_t pixel_format,
                    VideoFrameInfo& info);

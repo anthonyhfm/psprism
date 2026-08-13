@@ -1,7 +1,10 @@
 #include "media_engine.hpp"
 
+#include "../../../third_party/at3_standalone/at3_decoders.h"
+
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstring>
 #include <deque>
 #include <limits>
@@ -135,6 +138,7 @@ struct MediaEngine::Implementation {
       : capacity(std::max<std::size_t>(requested_capacity, 2048U)) {}
 
   ~Implementation() {
+    if (audio_decoder != nullptr) atrac3p_free(audio_decoder);
 #if defined(REFRACT_HAS_FFMPEG)
     if (parser != nullptr) av_parser_close(parser);
     av_frame_free(&frame);
@@ -153,16 +157,59 @@ struct MediaEngine::Implementation {
         begin, end - begin);
     const auto header = parse_pes_header(packet, audio);
     if (!header || header->payload_offset >= packet.size()) return;
+    const auto payload = packet.subspan(header->payload_offset);
+    if (audio) {
+      if (audio_bytes.empty() && header->pts >= 0) audio_next_pts = header->pts;
+      audio_bytes.insert(audio_bytes.end(), payload.begin(), payload.end());
+      extract_audio_frames(header->channel);
+      return;
+    }
     MediaAccessUnit unit;
-    unit.bytes.assign(packet.begin() +
-                          static_cast<std::ptrdiff_t>(header->payload_offset),
-                      packet.end());
+    unit.bytes.assign(payload.begin(), payload.end());
     unit.pts = header->pts;
     unit.dts = header->dts;
     unit.source_bytes = static_cast<std::uint32_t>(packet.size());
-    unit.channel = header->channel;
-    units.push_back({video ? StreamKind::video : StreamKind::audio,
-                     std::move(unit)});
+    units.push_back({StreamKind::video, std::move(unit)});
+  }
+
+  void extract_audio_frames(std::uint8_t channel) {
+    constexpr std::array<std::uint8_t, 2> audio_header{0x0fU, 0xd0U};
+    for (;;) {
+      const auto header = std::search(audio_bytes.begin(), audio_bytes.end(),
+                                      audio_header.begin(), audio_header.end());
+      if (header == audio_bytes.end()) {
+        if (audio_bytes.size() > 1U) {
+          const auto last = audio_bytes.back();
+          audio_bytes.clear();
+          if (last == 0x0fU) audio_bytes.push_back(last);
+        }
+        return;
+      }
+      if (header != audio_bytes.begin()) audio_bytes.erase(audio_bytes.begin(), header);
+      if (audio_bytes.size() < 4U) return;
+      const auto code1 = audio_bytes[2];
+      const auto code2 = audio_bytes[3];
+      const auto frame_size =
+          static_cast<std::size_t>(((code1 & 3U) << 8U) | (code2 * 8U)) + 16U;
+      if (frame_size < 8U || frame_size > 8192U) {
+        audio_bytes.erase(audio_bytes.begin());
+        continue;
+      }
+      if (audio_bytes.size() < frame_size) return;
+      MediaAccessUnit unit;
+      unit.bytes.assign(audio_bytes.begin() + 8, audio_bytes.begin() +
+                                                      static_cast<std::ptrdiff_t>(frame_size));
+      unit.pts = audio_next_pts;
+      unit.dts = audio_next_pts;
+      unit.source_bytes = static_cast<std::uint32_t>(frame_size);
+      unit.channel = channel;
+      unit.channels = code1 == 0x24U ? 1U : 2U;
+      units.push_back({StreamKind::audio, std::move(unit)});
+      if (audio_next_pts >= 0) audio_next_pts += 4180;
+      audio_bytes.erase(audio_bytes.begin(),
+                        audio_bytes.begin() + static_cast<std::ptrdiff_t>(frame_size));
+      if (units.size() >= maximum_access_units) return;
+    }
   }
 
   void demux() {
@@ -233,6 +280,7 @@ struct MediaEngine::Implementation {
   mutable std::mutex mutex;
   std::size_t capacity{};
   std::vector<std::uint8_t> encoded;
+  std::vector<std::uint8_t> audio_bytes;
   std::deque<std::pair<StreamKind, MediaAccessUnit>> units;
   std::unordered_map<std::uint32_t, Stream> streams;
   std::uint32_t next_stream{1U};
@@ -242,6 +290,10 @@ struct MediaEngine::Implementation {
   VideoFrameInfo last_frame{};
   std::optional<MediaAccessUnit> pending_video;
   std::optional<MediaAccessUnit> pending_audio;
+  std::int64_t audio_next_pts{-1};
+  ATRAC3PContext* audio_decoder{};
+  std::size_t audio_block_align{};
+  std::uint8_t audio_channels{};
 #if defined(REFRACT_HAS_FFMPEG)
   AVCodecContext* codec{};
   AVCodecParserContext* parser{};
@@ -262,8 +314,9 @@ bool MediaEngine::append_packets(std::span<const std::uint8_t> bytes) {
   if (bytes.empty()) return true;
   std::size_t queued{};
   for (const auto& item : impl.units) queued += item.second.source_bytes;
-  if (bytes.size() > impl.capacity || impl.encoded.size() + queued >
-                                         impl.capacity - bytes.size()) {
+  if (bytes.size() > impl.capacity ||
+      impl.encoded.size() + impl.audio_bytes.size() + queued >
+          impl.capacity - bytes.size()) {
     return false;
   }
   impl.encoded.insert(impl.encoded.end(), bytes.begin(), bytes.end());
@@ -477,6 +530,51 @@ std::optional<MediaAccessUnit> MediaEngine::take_pending_audio() {
   return result;
 }
 
+bool MediaEngine::decode_pending_audio(std::span<std::int16_t> output,
+                                       std::uint32_t& sample_count) {
+  auto& impl = *implementation_;
+  std::lock_guard lock(impl.mutex);
+  sample_count = 0U;
+  if (!impl.pending_audio || output.size() < 4096U ||
+      impl.pending_audio->bytes.empty()) {
+    return false;
+  }
+  const auto& unit = *impl.pending_audio;
+  if (impl.audio_decoder == nullptr ||
+      impl.audio_block_align != unit.bytes.size() ||
+      impl.audio_channels != unit.channels) {
+    if (impl.audio_decoder != nullptr) atrac3p_free(impl.audio_decoder);
+    auto block_align = static_cast<int>(unit.bytes.size());
+    impl.audio_decoder = atrac3p_alloc(unit.channels, &block_align);
+    impl.audio_block_align = unit.bytes.size();
+    impl.audio_channels = unit.channels;
+  }
+  if (impl.audio_decoder == nullptr) return false;
+  std::array<float, 4096> left{};
+  std::array<float, 4096> right{};
+  float* planes[]{left.data(), right.data()};
+  int decoded{};
+  const auto result = atrac3p_decode_frame(
+      impl.audio_decoder, planes, &decoded, unit.bytes.data(),
+      static_cast<int>(unit.bytes.size()));
+  if (result < 0 || decoded < 0 || decoded > 2048) return false;
+  const auto to_sample = [](float value) {
+    if (!std::isfinite(value)) return static_cast<std::int16_t>(0);
+    value = std::clamp(value, -1.0F, 1.0F);
+    return static_cast<std::int16_t>(value * 32767.0F);
+  };
+  for (int index = 0; index < decoded; ++index) {
+    output[static_cast<std::size_t>(index) * 2U] =
+        to_sample(left[static_cast<std::size_t>(index)]);
+    output[static_cast<std::size_t>(index) * 2U + 1U] =
+        to_sample(unit.channels == 1U ? left[static_cast<std::size_t>(index)]
+                                     : right[static_cast<std::size_t>(index)]);
+  }
+  sample_count = static_cast<std::uint32_t>(decoded);
+  impl.pending_audio.reset();
+  return true;
+}
+
 bool MediaEngine::drain_video(std::span<std::uint8_t> output,
                               std::uint32_t frame_stride,
                               std::uint32_t pixel_format,
@@ -500,9 +598,12 @@ void MediaEngine::flush() {
   auto& impl = *implementation_;
   std::lock_guard lock(impl.mutex);
   impl.encoded.clear();
+  impl.audio_bytes.clear();
   impl.units.clear();
   impl.pending_video.reset();
   impl.pending_audio.reset();
+  impl.audio_next_pts = -1;
+  if (impl.audio_decoder != nullptr) atrac3p_flush_buffers(impl.audio_decoder);
   impl.frame_number = 0U;
   impl.last_frame = {};
 #if defined(REFRACT_HAS_FFMPEG)
@@ -513,7 +614,7 @@ void MediaEngine::flush() {
 std::size_t MediaEngine::buffered_bytes() const {
   const auto& impl = *implementation_;
   std::lock_guard lock(impl.mutex);
-  std::size_t result = impl.encoded.size();
+  std::size_t result = impl.encoded.size() + impl.audio_bytes.size();
   for (const auto& item : impl.units) result += item.second.source_bytes;
   return result;
 }

@@ -30,6 +30,7 @@ struct State {
   std::uint32_t projection_matrix_index{};
   std::uint32_t bone_matrix_index{};
   std::uint32_t address_translation_width{};
+  std::uint64_t texture_generation{};
   Trace trace;
 
   void reset() {
@@ -47,6 +48,7 @@ struct State {
     projection_matrix_index = 0U;
     bone_matrix_index = 0U;
     address_translation_width = 0U;
+    texture_generation = 0U;
     trace.clear();
   }
 
@@ -106,6 +108,7 @@ struct State {
     projection_matrix_index = *cursor++;
     bone_matrix_index = *cursor++;
     address_translation_width = *cursor;
+    ++texture_generation;
   }
 };
 

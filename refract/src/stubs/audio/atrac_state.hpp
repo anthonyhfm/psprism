@@ -26,6 +26,7 @@ constexpr std::uint32_t unset_data = 0x80630010U;
 constexpr std::uint32_t no_data = 0x80630023U;
 constexpr std::uint32_t all_data_decoded = 0x80630024U;
 constexpr std::uint32_t second_buffer_not_needed = 0x80630022U;
+constexpr std::uint32_t no_loop_information = 0x80630021U;
 constexpr std::uint32_t codec_atrac3plus = 0x1000U;
 constexpr std::uint32_t codec_atrac3 = 0x1001U;
 constexpr std::uint32_t all_data_on_memory = 0xffffffffU;
@@ -43,10 +44,19 @@ struct Track {
   std::uint32_t first_sample_offset{};
   std::uint32_t loop_start{all_data_on_memory};
   std::uint32_t loop_end{all_data_on_memory};
+  std::uint32_t loop_play_count{};
   std::uint16_t joint_stereo{};
 
   [[nodiscard]] std::uint32_t samples_per_frame() const {
     return codec_type == codec_atrac3plus ? 2048U : 1024U;
+  }
+
+  [[nodiscard]] std::uint32_t decoder_delay() const {
+    return codec_type == codec_atrac3plus ? 0x170U : 0x45U;
+  }
+
+  [[nodiscard]] std::uint32_t initial_skip_samples() const {
+    return first_sample_offset + decoder_delay();
   }
 };
 
@@ -75,6 +85,9 @@ inline bool parse_riff(const std::uint8_t* data, std::size_t size,
   constexpr std::uint16_t wave_atrac3 = 0x0270U;
   constexpr std::uint16_t wave_extensible = 0xfffeU;
 
+  track = {};
+  track.loop_start = all_data_on_memory;
+  track.loop_end = all_data_on_memory;
   std::uint32_t magic{};
   std::uint32_t riff_size{};
   std::uint32_t wave_magic{};
@@ -123,12 +136,14 @@ inline bool parse_riff(const std::uint8_t* data, std::size_t size,
       read_u32(data, size, payload, track.end_sample);
       if (chunk_size >= 8U)
         read_u32(data, size, payload + 4U, track.first_sample_offset);
-    } else if (chunk_id == smpl && chunk_size >= 56U) {
+    } else if (chunk_id == smpl && chunk_size >= 60U) {
       std::uint32_t loop_count{};
       read_u32(data, size, payload + 28U, loop_count);
       if (loop_count != 0U) {
-        read_u32(data, size, payload + 44U, track.loop_start);
-        read_u32(data, size, payload + 48U, track.loop_end);
+        if (!read_u32(data, size, payload + 44U, track.loop_start) ||
+            !read_u32(data, size, payload + 48U, track.loop_end) ||
+            !read_u32(data, size, payload + 56U, track.loop_play_count))
+          return false;
       }
     } else if (chunk_id == data_chunk) {
       track.data_offset = static_cast<std::uint32_t>(payload);
@@ -147,7 +162,30 @@ inline bool parse_riff(const std::uint8_t* data, std::size_t size,
   if (!found_format || !found_data) return false;
   if (track.end_sample == 0U && track.block_align != 0U) {
     const auto frames = track.data_size / track.block_align;
-    track.end_sample = frames * track.samples_per_frame();
+    const auto total_samples = static_cast<std::uint64_t>(frames) *
+                               track.samples_per_frame();
+    const auto playable_samples = total_samples > track.first_sample_offset
+                                      ? total_samples -
+                                            track.first_sample_offset
+                                      : 0U;
+    track.end_sample = playable_samples == 0U
+                           ? 0U
+                           : static_cast<std::uint32_t>(playable_samples - 1U);
+  } else if (track.end_sample != 0U) {
+    // The RIFF fact value is a sample count, while the PSP APIs expose the
+    // inclusive index of the final playable sample.
+    --track.end_sample;
+  }
+  if (track.loop_start != all_data_on_memory &&
+      (track.loop_start > track.loop_end ||
+       track.loop_end > track.end_sample))
+    return false;
+  if (track.loop_start != all_data_on_memory) {
+    if (track.loop_start < track.first_sample_offset ||
+        track.loop_end < track.first_sample_offset)
+      return false;
+    track.loop_start -= track.first_sample_offset;
+    track.loop_end -= track.first_sample_offset;
   }
   return true;
 }
@@ -184,7 +222,7 @@ struct Decoder {
     encoded.assign(source, source + size);
     data_cursor = track.data_offset;
     decoded_samples = 0U;
-    skip_samples = track.first_sample_offset;
+    skip_samples = track.initial_skip_samples();
     finished = false;
     internal_error = 0U;
 
@@ -209,22 +247,55 @@ struct Decoder {
   void rewind() {
     data_cursor = track.data_offset;
     decoded_samples = 0U;
-    skip_samples = track.first_sample_offset;
+    skip_samples = track.initial_skip_samples();
     finished = false;
     if (atrac3plus != nullptr) atrac3p_flush_buffers(atrac3plus);
     if (atrac3 != nullptr) atrac3_flush_buffers(atrac3);
   }
 
+  bool decode_preroll_packet(std::uint32_t offset) {
+    if (static_cast<std::uint64_t>(offset) + track.block_align >
+        encoded.size())
+      return false;
+    std::array<float, 4096> left{};
+    std::array<float, 4096> right{};
+    float* planes[2]{left.data(), right.data()};
+    int decoded_count{};
+    const auto* packet = encoded.data() + offset;
+    const auto result = atrac3plus != nullptr
+                            ? atrac3p_decode_frame(
+                                  atrac3plus, planes, &decoded_count, packet,
+                                  static_cast<int>(track.block_align))
+                            : atrac3 != nullptr
+                                  ? atrac3_decode_frame(
+                                        atrac3, planes, &decoded_count, packet,
+                                        static_cast<int>(track.block_align))
+                                  : -1;
+    return result >= 0;
+  }
+
   bool seek(std::uint32_t sample) {
     if (track.block_align == 0U || sample > track.end_sample) return false;
     const auto absolute_sample =
-        static_cast<std::uint64_t>(track.first_sample_offset) + sample;
+        static_cast<std::uint64_t>(track.initial_skip_samples()) + sample;
     const auto frame = absolute_sample / track.samples_per_frame();
     const auto offset = static_cast<std::uint64_t>(track.data_offset) +
                         frame * track.block_align;
     if (offset >= encoded.size()) return false;
     if (atrac3plus != nullptr) atrac3p_flush_buffers(atrac3plus);
     if (atrac3 != nullptr) atrac3_flush_buffers(atrac3);
+    // ATRAC frames overlap.  Re-prime decoder history with up to two packets
+    // immediately preceding the target packet before exposing target PCM.
+    const auto first_preroll_frame = frame > 2U ? frame - 2U : 0U;
+    for (auto preroll_frame = first_preroll_frame; preroll_frame < frame;
+         ++preroll_frame) {
+      const auto preroll_offset =
+          static_cast<std::uint64_t>(track.data_offset) +
+          preroll_frame * track.block_align;
+      if (preroll_offset > UINT32_MAX ||
+          !decode_preroll_packet(static_cast<std::uint32_t>(preroll_offset)))
+        return false;
+    }
     data_cursor = static_cast<std::uint32_t>(offset);
     decoded_samples = sample;
     skip_samples =
@@ -233,11 +304,41 @@ struct Decoder {
     return true;
   }
 
+  [[nodiscard]] bool loop_active() const {
+    return loop_count != 0 && track.loop_start != all_data_on_memory &&
+           track.loop_end != all_data_on_memory &&
+           track.loop_start <= track.loop_end;
+  }
+
+  [[nodiscard]] std::uint32_t limit_output_samples(
+      std::uint32_t available) const {
+    if (!loop_active() || decoded_samples > track.loop_end) return available;
+    const auto through_loop_end = static_cast<std::uint64_t>(track.loop_end) +
+                                  1U - decoded_samples;
+    return static_cast<std::uint32_t>(std::min<std::uint64_t>(
+        available, through_loop_end));
+  }
+
+  bool advance_output_position(std::uint32_t sample_count) {
+    decoded_samples += sample_count;
+    if (!loop_active() || decoded_samples <= track.loop_end) return false;
+    loop_pending = true;
+    if (!seek(track.loop_start)) return false;
+    loop_pending = false;
+    if (loop_count > 0) --loop_count;
+    return true;
+  }
+
   std::uint32_t decode(std::int16_t* output, std::uint32_t& sample_count,
                        bool& reached_end) {
     sample_count = 0U;
     reached_end = false;
     if (encoded.empty() || track.block_align == 0U) return unset_data;
+    if (loop_pending) {
+      if (!seek(track.loop_start)) return no_data;
+      loop_pending = false;
+      if (loop_count > 0) --loop_count;
+    }
     const auto end_exclusive = static_cast<std::uint64_t>(track.end_sample) + 1U;
     if (decoded_samples >= end_exclusive) {
       if (loop_count != 0) {
@@ -301,7 +402,8 @@ struct Decoder {
         end_exclusive > decoded_samples
             ? end_exclusive - decoded_samples
             : 0U);
-    sample_count = std::min(decoded_after_skip, remaining);
+    sample_count = limit_output_samples(
+        std::min(decoded_after_skip, remaining));
     last_peak = 0.0F;
     if (output != nullptr) {
       for (std::uint32_t index = 0; index < sample_count; ++index) {
@@ -321,9 +423,10 @@ struct Decoder {
         output[index * 2U + 1U] = clamp(right_sample);
       }
     }
-    decoded_samples += sample_count;
+    const auto looped = advance_output_position(sample_count);
     ++decoded_frames;
-    reached_end = decoded_samples >= end_exclusive && loop_count == 0;
+    reached_end = !looped && decoded_samples >= end_exclusive &&
+                  loop_count == 0;
     finished = reached_end;
     return success;
   }
@@ -338,7 +441,7 @@ struct Decoder {
         end_exclusive > decoded_samples
             ? end_exclusive - decoded_samples
             : 0U);
-    return std::min(frame_samples, remaining);
+    return limit_output_samples(std::min(frame_samples, remaining));
   }
 
   [[nodiscard]] std::uint32_t remaining_frames() const {
@@ -409,6 +512,7 @@ struct Decoder {
   std::uint32_t skip_samples{};
   int loop_count{};
   bool finished{};
+  bool loop_pending{};
   bool audible_reported{};
   float last_peak{};
   std::uint32_t internal_error{};

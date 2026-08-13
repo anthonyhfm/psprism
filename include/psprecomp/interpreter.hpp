@@ -12,8 +12,7 @@
 namespace psprecomp {
 
 inline bool interpret_allegrex(State& state, std::uint32_t current_pc) {
-    if ((current_pc & 3U) != 0U ||
-        (!state.direct_memory_access && !address_ok(state, current_pc, 4))) {
+    if ((current_pc & 3U) != 0U) {
         return false;
     }
 

@@ -4,8 +4,9 @@ void sceAudioOutputBlocking(Implementation& implementation, psprecomp::State& st
 #if !defined(__PSP__)
   {
     GuestExecutionPause pause(implementation);
-    state.gpr[2] = audio_state::output(state, state.gpr[4], state.gpr[5],
-                                       state.gpr[5], state.gpr[6], true);
+    state.gpr[2] = audio_state::output(
+        state, state.gpr[4], static_cast<std::int32_t>(state.gpr[5]),
+        static_cast<std::int32_t>(state.gpr[5]), state.gpr[6], true);
   }
   return;
 #else

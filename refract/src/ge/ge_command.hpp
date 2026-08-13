@@ -32,7 +32,25 @@ enum class Command : std::uint8_t {
   view_matrix_data = 0x3d,
   projection_matrix_number = 0x3e,
   projection_matrix_data = 0x3f,
+  framebuffer_address = 0x9c,
+  framebuffer_width = 0x9d,
+  depthbuffer_address = 0x9e,
+  depthbuffer_width = 0x9f,
+  texture_address_0 = 0xa0,
+  texture_buffer_width_0 = 0xa8,
+  clut_address = 0xb0,
+  clut_address_upper = 0xb1,
+  texture_size_0 = 0xb8,
+  texture_mode = 0xc2,
+  texture_format = 0xc3,
   load_clut = 0xc4,
+  clut_format = 0xc5,
+  texture_filter = 0xc6,
+  texture_wrap = 0xc7,
+  texture_level = 0xc8,
+  texture_function = 0xc9,
+  framebuffer_format = 0xd2,
+  clear_mode = 0xd3,
   transfer_start = 0xea,
 };
 
@@ -55,6 +73,13 @@ struct CommandMetadata {
 };
 
 constexpr CommandMetadata command_metadata(std::uint8_t opcode) {
+  if (opcode >= 0xa0U && opcode <= 0xa7U)
+    return {static_cast<Command>(opcode), "TEXADDR", CommandFlow::linear};
+  if (opcode >= 0xa8U && opcode <= 0xafU)
+    return {static_cast<Command>(opcode), "TEXBUFWIDTH",
+            CommandFlow::linear};
+  if (opcode >= 0xb8U && opcode <= 0xbfU)
+    return {static_cast<Command>(opcode), "TEXSIZE", CommandFlow::linear};
   switch (static_cast<Command>(opcode)) {
   case Command::nop: return {Command::nop, "NOP", CommandFlow::linear};
   case Command::vertex_address:
@@ -108,10 +133,45 @@ constexpr CommandMetadata command_metadata(std::uint8_t opcode) {
   case Command::projection_matrix_data:
     return {Command::projection_matrix_data, "PROJMATRIXDATA",
             CommandFlow::linear};
+  case Command::framebuffer_address:
+    return {Command::framebuffer_address, "FRAMEBUFPTR", CommandFlow::linear};
+  case Command::framebuffer_width:
+    return {Command::framebuffer_width, "FRAMEBUFWIDTH", CommandFlow::linear};
+  case Command::depthbuffer_address:
+    return {Command::depthbuffer_address, "ZBUFPTR", CommandFlow::linear};
+  case Command::depthbuffer_width:
+    return {Command::depthbuffer_width, "ZBUFWIDTH", CommandFlow::linear};
+  case Command::clut_address:
+    return {Command::clut_address, "CLUTADDR", CommandFlow::linear};
+  case Command::clut_address_upper:
+    return {Command::clut_address_upper, "CLUTADDRUPPER",
+            CommandFlow::linear};
+  case Command::texture_mode:
+    return {Command::texture_mode, "TEXMODE", CommandFlow::linear};
+  case Command::texture_format:
+    return {Command::texture_format, "TEXFORMAT", CommandFlow::linear};
   case Command::load_clut:
     return {Command::load_clut, "LOADCLUT", CommandFlow::transfer};
+  case Command::clut_format:
+    return {Command::clut_format, "CLUTFORMAT", CommandFlow::linear};
+  case Command::texture_filter:
+    return {Command::texture_filter, "TEXFILTER", CommandFlow::linear};
+  case Command::texture_wrap:
+    return {Command::texture_wrap, "TEXWRAP", CommandFlow::linear};
+  case Command::texture_level:
+    return {Command::texture_level, "TEXLEVEL", CommandFlow::linear};
+  case Command::texture_function:
+    return {Command::texture_function, "TEXFUNC", CommandFlow::linear};
+  case Command::framebuffer_format:
+    return {Command::framebuffer_format, "FRAMEBUFPIXFORMAT",
+            CommandFlow::linear};
+  case Command::clear_mode:
+    return {Command::clear_mode, "CLEARMODE", CommandFlow::linear};
   case Command::transfer_start:
     return {Command::transfer_start, "TRANSFERSTART", CommandFlow::transfer};
+  case Command::texture_address_0:
+  case Command::texture_buffer_width_0:
+  case Command::texture_size_0: break;
   }
   return {static_cast<Command>(opcode), "unknown", CommandFlow::linear};
 }

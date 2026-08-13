@@ -50,9 +50,26 @@ int main() {
     });
     checksum += state.gpr[2];
 
+    std::array<std::uint8_t, 4096> data{};
+    psprecomp::State memory_state;
+    memory_state.memory = data.data();
+    memory_state.memory_size = data.size();
+    memory_state.memory_base = 0x08800000U;
+    const auto memory_ns = measure([&] {
+        for (std::uint64_t i = 0; i < iterations; ++i) {
+            const auto address = memory_state.memory_base +
+                                 static_cast<std::uint32_t>((i & 1023U) * 4U);
+            psprecomp::store32(memory_state, address,
+                              static_cast<std::uint32_t>(i));
+            checksum += psprecomp::load32(memory_state, address);
+        }
+    });
+
     std::cout << "decoder_ns_per_instruction="
               << static_cast<double>(decode_ns) / iterations << '\n'
               << "interpreter_ns_per_instruction="
               << static_cast<double>(interpret_ns) / iterations << '\n'
+              << "memory_roundtrip_ns="
+              << static_cast<double>(memory_ns) / iterations << '\n'
               << "checksum=" << checksum << '\n';
 }

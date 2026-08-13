@@ -49,6 +49,15 @@ enum class EnvelopePhase {
   release,
 };
 
+enum class EnvelopeCurve : std::uint32_t {
+  linear_increase = 0U,
+  linear_decrease = 1U,
+  linear_bent = 2U,
+  exponent_decrease = 3U,
+  exponent_increase = 4U,
+  direct = 5U,
+};
+
 struct Voice {
   bool configured{};
   bool playing{};
@@ -71,6 +80,10 @@ struct Voice {
   std::uint32_t sustain_rate{};
   std::uint32_t release_rate{};
   std::uint32_t sustain_level{max_envelope_height};
+  EnvelopeCurve attack_curve{EnvelopeCurve::linear_increase};
+  EnvelopeCurve decay_curve{EnvelopeCurve::linear_decrease};
+  EnvelopeCurve sustain_curve{EnvelopeCurve::linear_decrease};
+  EnvelopeCurve release_curve{EnvelopeCurve::linear_decrease};
   std::vector<std::int16_t> samples;
 };
 
@@ -106,38 +119,71 @@ inline std::int16_t clamp_sample(std::int64_t sample) {
       std::numeric_limits<std::int16_t>::max()));
 }
 
+inline std::uint32_t walk_envelope_curve(std::uint32_t height,
+                                         EnvelopeCurve curve,
+                                         std::uint32_t rate) {
+  const auto subtract = [](std::uint32_t value, std::uint32_t amount) {
+    return amount >= value ? 0U : value - amount;
+  };
+  switch (curve) {
+  case EnvelopeCurve::linear_increase:
+    return static_cast<std::uint32_t>(std::min<std::uint64_t>(
+        max_envelope_height, static_cast<std::uint64_t>(height) + rate));
+  case EnvelopeCurve::linear_decrease:
+    return subtract(height, rate);
+  case EnvelopeCurve::linear_bent: {
+    const auto adjusted_rate =
+        height <= max_envelope_height * 3U / 4U ? rate : rate / 4U;
+    return static_cast<std::uint32_t>(std::min<std::uint64_t>(
+        max_envelope_height,
+        static_cast<std::uint64_t>(height) + adjusted_rate));
+  }
+  case EnvelopeCurve::exponent_decrease: {
+    const auto scaled =
+        static_cast<std::uint64_t>(height) * rate >> 32U;
+    return subtract(height,
+                    static_cast<std::uint32_t>(scaled + (rate + 3U) / 4U));
+  }
+  case EnvelopeCurve::exponent_increase: {
+    const auto distance = max_envelope_height - height;
+    const auto delta =
+        (static_cast<std::uint64_t>(distance) * rate >> 32U) + 0x4000U;
+    return static_cast<std::uint32_t>(std::min<std::uint64_t>(
+        max_envelope_height, static_cast<std::uint64_t>(height) + delta));
+  }
+  case EnvelopeCurve::direct:
+    return std::min(rate, max_envelope_height);
+  }
+  return height;
+}
+
 inline void advance_envelope(Voice& voice) {
   if (!voice.envelope_configured) {
     voice.envelope_height = max_envelope_height;
     return;
   }
-  const auto subtract = [](std::uint32_t value, std::uint32_t amount) {
-    return amount >= value ? 0U : value - amount;
-  };
   switch (voice.envelope_phase) {
   case EnvelopePhase::attack:
-    voice.envelope_height = static_cast<std::uint32_t>(std::min<std::uint64_t>(
-        max_envelope_height,
-        static_cast<std::uint64_t>(voice.envelope_height) +
-            voice.attack_rate));
+    voice.envelope_height = walk_envelope_curve(
+        voice.envelope_height, voice.attack_curve, voice.attack_rate);
     if (voice.envelope_height >= max_envelope_height)
       voice.envelope_phase = EnvelopePhase::decay;
     break;
   case EnvelopePhase::decay:
-    voice.envelope_height =
-        subtract(voice.envelope_height, voice.decay_rate);
+    voice.envelope_height = walk_envelope_curve(
+        voice.envelope_height, voice.decay_curve, voice.decay_rate);
     if (voice.envelope_height <= voice.sustain_level) {
       voice.envelope_height = voice.sustain_level;
       voice.envelope_phase = EnvelopePhase::sustain;
     }
     break;
   case EnvelopePhase::sustain:
-    voice.envelope_height =
-        subtract(voice.envelope_height, voice.sustain_rate);
+    voice.envelope_height = walk_envelope_curve(
+        voice.envelope_height, voice.sustain_curve, voice.sustain_rate);
     break;
   case EnvelopePhase::release:
-    voice.envelope_height =
-        subtract(voice.envelope_height, voice.release_rate);
+    voice.envelope_height = walk_envelope_curve(
+        voice.envelope_height, voice.release_curve, voice.release_rate);
     if (voice.envelope_height == 0U) {
       voice.envelope_phase = EnvelopePhase::off;
       voice.playing = false;
@@ -150,23 +196,39 @@ inline void advance_envelope(Voice& voice) {
   }
 }
 
-inline std::vector<std::int16_t> decode_vag(const std::uint8_t* source,
-                                             std::size_t size) {
-  std::vector<std::int16_t> decoded;
-  if (source == nullptr || size < 16U) return decoded;
+struct DecodedVag {
+  std::vector<std::int16_t> samples;
+  std::size_t loop_start{};
+  bool has_loop_start{};
+  bool has_loop_end{};
+};
+
+inline DecodedVag decode_vag_details(const std::uint8_t* source,
+                                     std::size_t size) {
+  DecodedVag result;
+  if (source == nullptr || size < 16U) return result;
   std::size_t offset = 0U;
   if (size >= 0x30U && source[0] == 'V' && source[1] == 'A' &&
       source[2] == 'G' && source[3] == 'p')
     offset = 0x30U;
-  decoded.reserve((size - offset) / 16U * 28U);
-  constexpr std::int32_t coefficients[5][2] = {
-      {0, 0}, {60, 0}, {115, -52}, {98, -55}, {122, -60}};
+  result.samples.reserve((size - offset) / 16U * 28U);
+  constexpr std::int32_t coefficients[16][2] = {
+      {0, 0},    {60, 0},    {115, -52}, {98, -55},  {122, -60},
+      {0, 0},    {0, 0},     {52, 0},    {55, -2},   {60, -125},
+      {0, 0},    {0, -91},   {0, 0},     {2, -216},  {125, -6},
+      {0, -151},
+  };
   std::int32_t previous_1 = 0;
   std::int32_t previous_2 = 0;
   for (; offset + 16U <= size; offset += 16U) {
-    const auto predictor = std::min<std::uint32_t>(source[offset] >> 4U, 4U);
-    const auto shift = std::min<std::uint32_t>(source[offset] & 0xfU, 12U);
+    const auto predictor = static_cast<std::uint32_t>(source[offset] >> 4U);
+    const auto shift = static_cast<std::uint32_t>(source[offset] & 0xfU);
     const auto flags = source[offset + 1U];
+    if (flags == 7U) break;
+    if (flags == 6U) {
+      result.loop_start = result.samples.size();
+      result.has_loop_start = true;
+    }
     for (std::size_t index = 0; index < 28U; ++index) {
       const auto packed = source[offset + 2U + index / 2U];
       const auto nibble = static_cast<std::int8_t>(
@@ -176,13 +238,22 @@ inline std::vector<std::int16_t> decode_vag(const std::uint8_t* source,
                  previous_2 * coefficients[predictor][1] + 32) >>
                 6U;
       const auto clamped = clamp_sample(sample);
-      decoded.push_back(clamped);
+      result.samples.push_back(clamped);
       previous_2 = previous_1;
       previous_1 = clamped;
     }
+    if (flags == 3U) {
+      result.has_loop_end = true;
+      break;
+    }
     if ((flags & 1U) != 0U) break;
   }
-  return decoded;
+  return result;
+}
+
+inline std::vector<std::int16_t> decode_vag(const std::uint8_t* source,
+                                            std::size_t size) {
+  return decode_vag_details(source, size).samples;
 }
 
 inline std::uint32_t initialize(psprecomp::State& state,
@@ -229,7 +300,11 @@ inline std::uint32_t update_voice(std::uint32_t core_address,
 }
 
 inline std::uint32_t mix(psprecomp::State& state, std::uint32_t core_address,
-                         std::uint32_t output_address, bool preserve) {
+                         std::uint32_t output_address, bool preserve,
+                         std::int32_t preserve_left_volume =
+                             static_cast<std::int32_t>(max_volume),
+                         std::int32_t preserve_right_volume =
+                             static_cast<std::int32_t>(max_volume)) {
   std::lock_guard lock(mutex());
   auto* core = find_unlocked(core_address);
   if (core == nullptr) return not_initialized;
@@ -242,10 +317,20 @@ inline std::uint32_t mix(psprecomp::State& state, std::uint32_t core_address,
   auto* mixed = core->mix_buffer.data();
   std::fill_n(mixed, sample_total, 0);
   if (preserve) {
-    for (std::size_t index = 0; index < sample_total; ++index) {
-      std::int16_t sample{};
-      std::memcpy(&sample, output + index * sizeof(sample), sizeof(sample));
-      mixed[index] = sample;
+    for (std::size_t frame = 0; frame < grain_size; ++frame) {
+      for (std::size_t side = 0; side < channels; ++side) {
+        const auto output_index = channels == 4U
+                                      ? side * grain_size + frame
+                                      : frame * channels + side;
+        std::int16_t sample{};
+        std::memcpy(&sample, output + output_index * sizeof(sample),
+                    sizeof(sample));
+        const auto volume = (side & 1U) == 0U ? preserve_left_volume
+                                              : preserve_right_volume;
+        mixed[frame * channels + side] =
+            static_cast<std::int32_t>(sample) * volume /
+            static_cast<std::int32_t>(max_volume);
+      }
     }
   }
 
@@ -303,9 +388,15 @@ inline std::uint32_t mix(psprecomp::State& state, std::uint32_t core_address,
                                   ? voice.samples.size() - position
                                   : 0U;
   }
-  for (std::size_t index = 0; index < sample_total; ++index) {
-    const auto sample = clamp_sample(mixed[index]);
-    std::memcpy(output + index * sizeof(sample), &sample, sizeof(sample));
+  for (std::size_t frame = 0; frame < grain_size; ++frame) {
+    for (std::size_t side = 0; side < channels; ++side) {
+      const auto sample = clamp_sample(mixed[frame * channels + side]);
+      const auto output_index = channels == 4U
+                                    ? side * grain_size + frame
+                                    : frame * channels + side;
+      std::memcpy(output + output_index * sizeof(sample), &sample,
+                  sizeof(sample));
+    }
   }
   return 0U;
 }
@@ -356,13 +447,15 @@ inline std::uint32_t set_voice(std::uint32_t core_address,
       state, source_address, static_cast<std::size_t>(source_size));
   if (source == nullptr)
     return invalid_parameter;
-  auto samples = decode_vag(source, static_cast<std::size_t>(source_size));
-  if (samples.empty()) return invalid_parameter;
+  auto decoded = decode_vag_details(source,
+                                    static_cast<std::size_t>(source_size));
+  if (decoded.samples.empty()) return invalid_parameter;
   return update_voice(core_address, voice_index, [&](Voice& voice) {
     voice = {};
     voice.configured = true;
-    voice.loop = loop != 0;
-    voice.samples = std::move(samples);
+    voice.loop = loop != 0 && decoded.has_loop_end;
+    voice.loop_start = decoded.has_loop_start ? decoded.loop_start : 0U;
+    voice.samples = std::move(decoded.samples);
     voice.remaining_samples = voice.samples.size();
     return 0U;
   });
@@ -469,6 +562,85 @@ inline std::uint32_t set_adsr_rates(std::uint32_t core_address,
     if ((mask & 2U) != 0U) voice.decay_rate = rates[1];
     if ((mask & 4U) != 0U) voice.sustain_rate = rates[2];
     if ((mask & 8U) != 0U) voice.release_rate = rates[3];
+    voice.envelope_configured = true;
+    return 0U;
+  });
+}
+
+inline std::uint32_t set_adsr_curves(
+    std::uint32_t core_address, std::int32_t voice_index, std::uint32_t mask,
+    const std::array<std::uint32_t, 4>& curves) {
+  return update_voice(core_address, voice_index, [&](Voice& voice) {
+    if ((mask & 1U) != 0U)
+      voice.attack_curve = static_cast<EnvelopeCurve>(curves[0]);
+    if ((mask & 2U) != 0U)
+      voice.decay_curve = static_cast<EnvelopeCurve>(curves[1]);
+    if ((mask & 4U) != 0U)
+      voice.sustain_curve = static_cast<EnvelopeCurve>(curves[2]);
+    if ((mask & 8U) != 0U)
+      voice.release_curve = static_cast<EnvelopeCurve>(curves[3]);
+    voice.envelope_configured = true;
+    return 0U;
+  });
+}
+
+inline std::uint32_t simple_rate(std::uint32_t value) {
+  const auto rate_index = value & 0x7fU;
+  if (rate_index == 0x7fU) return 0U;
+  const auto numerator = static_cast<std::uint64_t>(7U - (rate_index & 3U))
+                         << 26U;
+  return static_cast<std::uint32_t>(
+      std::max<std::uint64_t>(1U, numerator >> (rate_index >> 2U)));
+}
+
+inline std::uint32_t exponent_rate(std::uint32_t value) {
+  const auto rate_index = value & 0x7fU;
+  if (rate_index == 0x7fU) return 0U;
+  const auto numerator = static_cast<std::uint64_t>(7U - (rate_index & 3U))
+                         << 24U;
+  return static_cast<std::uint32_t>(
+      std::max<std::uint64_t>(1U, numerator >> (rate_index >> 2U)));
+}
+
+inline std::uint32_t set_simple_adsr(std::uint32_t core_address,
+                                     std::int32_t voice_index,
+                                     std::uint32_t env1,
+                                     std::uint32_t env2) {
+  return update_voice(core_address, voice_index, [&](Voice& voice) {
+    voice.attack_rate = simple_rate(env1 >> 8U);
+    voice.attack_curve = (env1 & 0x8000U) == 0U
+                             ? EnvelopeCurve::linear_increase
+                             : EnvelopeCurve::linear_bent;
+    const auto decay_index = (env1 >> 4U) & 0xfU;
+    voice.decay_rate = decay_index == 0U
+                           ? 0x7fffffffU
+                           : 0x80000000U >> decay_index;
+    voice.decay_curve = EnvelopeCurve::exponent_decrease;
+    voice.sustain_level = ((env1 & 0xfU) + 1U) << 26U;
+    const auto sustain_curve = (env2 >> 14U) & 3U;
+    voice.sustain_curve = static_cast<EnvelopeCurve>(sustain_curve);
+    voice.sustain_rate =
+        sustain_curve ==
+                static_cast<std::uint32_t>(EnvelopeCurve::exponent_decrease)
+            ? exponent_rate(env2 >> 6U)
+            : simple_rate(env2 >> 6U);
+    const auto release_index = env2 & 0x1fU;
+    voice.release_curve = (env2 & 0x20U) == 0U
+                              ? EnvelopeCurve::linear_decrease
+                              : EnvelopeCurve::exponent_decrease;
+    if (release_index == 31U) {
+      voice.release_rate = 0U;
+    } else if (voice.release_curve == EnvelopeCurve::linear_decrease) {
+      voice.release_rate = release_index == 30U
+                               ? max_envelope_height
+                               : release_index == 29U
+                                     ? 1U
+                                     : 0x10000000U >> release_index;
+    } else {
+      voice.release_rate = release_index == 0U
+                               ? 0x7fffffffU
+                               : 0x80000000U >> release_index;
+    }
     voice.envelope_configured = true;
     return 0U;
   });

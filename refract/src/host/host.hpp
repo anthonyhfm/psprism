@@ -120,13 +120,23 @@ struct GeometryVertex {
 
 struct GeometryState {
   std::uint32_t render_target_address{};
+  std::uint32_t render_target_stride{};
+  std::uint32_t render_target_format{};
   std::uint32_t render_target_width{480};
   std::uint32_t render_target_height{272};
+  std::uint32_t depth_target_address{};
+  std::uint32_t depth_target_stride{};
   std::uint32_t scissor_left{};
   std::uint32_t scissor_top{};
   std::uint32_t scissor_right{480};
   std::uint32_t scissor_bottom{272};
   std::uint32_t texture_address{};
+  std::uint32_t texture_format{};
+  std::uint32_t texture_buffer_width{};
+  std::uint32_t texture_mipmap_level{};
+  std::uint32_t texture_max_mipmap_level{};
+  std::int32_t texture_lod_bias{};
+  std::uint64_t texture_generation{};
   bool through_coordinates{};
   bool cull_face{};
   bool front_face_clockwise{true};
@@ -151,6 +161,10 @@ struct GeometryState {
   bool texture_clamp_s{};
   bool texture_clamp_t{};
   bool texture_linear_filter{};
+  bool texture_min_linear{};
+  bool texture_mag_linear{};
+  bool texture_mipmap_enabled{};
+  bool texture_mipmap_linear{};
   std::uint32_t texture_function{};
   bool texture_alpha_used{true};
   bool texture_color_double{};

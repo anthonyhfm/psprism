@@ -45,6 +45,33 @@ std::vector<std::uint8_t> streaming_atrac_header() {
   return bytes;
 }
 
+std::vector<std::uint8_t> looping_atrac_header() {
+  std::vector<std::uint8_t> bytes(176U);
+  write_u32(bytes, 0U, 0x46464952U);
+  write_u32(bytes, 4U, 168U);
+  write_u32(bytes, 8U, 0x45564157U);
+  write_u32(bytes, 12U, 0x20746d66U);
+  write_u32(bytes, 16U, 52U);
+  write_u16(bytes, 20U, 0xfffeU);
+  write_u16(bytes, 22U, 2U);
+  write_u32(bytes, 24U, 44100U);
+  write_u32(bytes, 28U, 16016U);
+  write_u16(bytes, 32U, 16U);
+  write_u32(bytes, 72U, 0x74636166U);
+  write_u32(bytes, 76U, 8U);
+  write_u32(bytes, 80U, 3000U);
+  write_u32(bytes, 84U, 100U);
+  write_u32(bytes, 88U, 0x6c706d73U);
+  write_u32(bytes, 92U, 60U);
+  write_u32(bytes, 124U, 1U);
+  write_u32(bytes, 140U, 500U);
+  write_u32(bytes, 144U, 1499U);
+  write_u32(bytes, 152U, 3U);
+  write_u32(bytes, 156U, 0x61746164U);
+  write_u32(bytes, 160U, 12U);
+  return bytes;
+}
+
 } // namespace
 
 int main() {
@@ -64,17 +91,33 @@ int main() {
   CHECK(track.data_offset == 96U);
   CHECK(track.data_size == 416U);
 
+  auto loop_memory = looping_atrac_header();
+  atrac_state::Track loop_track;
+  CHECK(atrac_state::parse_riff(loop_memory.data(), loop_memory.size(),
+                                loop_track));
+  CHECK(loop_track.end_sample == 2999U);
+  CHECK(loop_track.loop_start == 400U);
+  CHECK(loop_track.loop_end == 1399U);
+  CHECK(loop_track.loop_play_count == 3U);
+  atrac_state::Decoder loop_decoder;
+  loop_decoder.track = loop_track;
+  loop_decoder.loop_count = 2;
+  loop_decoder.decoded_samples = 1300U;
+  CHECK(loop_decoder.limit_output_samples(200U) == 100U);
+  CHECK(!loop_decoder.advance_output_position(99U));
+  CHECK(loop_decoder.decoded_samples == 1399U);
+
   auto offset_header = memory;
   write_u32(offset_header, 84U, 100U);
   atrac_state::Decoder offset_decoder(atrac_state::codec_atrac3plus);
   CHECK(offset_decoder.set_data(offset_header.data(), offset_header.size(),
                                 memory_base));
-  CHECK(offset_decoder.skip_samples == 100U);
-  CHECK(offset_decoder.next_samples() == 1948U);
+  CHECK(offset_decoder.skip_samples == 468U);
+  CHECK(offset_decoder.next_samples() == 1580U);
   CHECK(offset_decoder.seek(200U));
   CHECK(offset_decoder.decoded_samples == 200U);
-  CHECK(offset_decoder.skip_samples == 300U);
-  CHECK(offset_decoder.next_samples() == 1748U);
+  CHECK(offset_decoder.skip_samples == 668U);
+  CHECK(offset_decoder.next_samples() == 1380U);
   CHECK(!offset_decoder.seek(4097U));
 
   atrac_state::Decoder decoder(atrac_state::codec_atrac3plus);
