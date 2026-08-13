@@ -66,6 +66,14 @@ make macos-run   # build and execute the native Release app
 make clean       # remove compiler products
 ```
 
+`make psp` and `make psp-run` never fall back to packaging an untouched PSP
+executable. Fixed-address executables and relocatable PRX files both use the
+complete generated C++ dispatcher by default. Code-map `overlay` entries opt
+relocatable PRXs into the hybrid mode for the explicitly selected translated
+functions. The generated Makefile prints `PSP recompile mode: full` or
+`PSP recompile mode: overlays` before compiling. PSP C and C++ translation
+units are optimized with `-O2`.
+
 The native macOS build discovers FFmpeg from the system and common Homebrew
 prefixes. Install it with `brew install ffmpeg`; the generated project links
 `avcodec`, `avformat`, `avutil` and `swscale` for PSMF/H.264 cutscenes. CMake
@@ -93,9 +101,11 @@ headers or SCE functions.
 Generated C++ lives in `src/generated`. With a code map, Guest functions are
 written one per address-named `func_*.cpp` file, with the original binary range
 documented above every definition. Without a map, address-based `shard_*.cpp`
-files are emitted. Functions marked with `overlay ADDRESS` in the map are also
-compiled into the hybrid PSP PRX, so edits to those generated bodies affect
-`make psp` while all other functions continue using the original Guest code.
+files are emitted. Without overlay selections, all emitted shards/functions
+are compiled into the full PSP PRX. Functions marked with `overlay ADDRESS`
+switch a relocatable input to the hybrid PSP mode, so edits to those selected
+generated bodies affect `make psp` while unselected functions continue using
+Guest code.
 Generated continuation trampolines let an overlay call an unchanged direct or
 indirect Guest function and resume the edited body afterward. Unsupported
 dynamic non-return jumps are reported during export.

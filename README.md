@@ -38,7 +38,17 @@ Before targeting native host operating systems, generated code is validated dire
  └─────────────┘ └─────────────┘
 ```
 
-The PSP backend uses a hybrid overlay model. Unchanged functions remain as their original Allegrex code, while selected generated functions are compiled back to Allegrex and installed through ABI-, GP-, FPU-, and VFPU-safe trampolines. This keeps the compatibility baseline intact while ensuring edits to generated game logic are effective in the rebuilt PRX.
+The PSP backend normally compiles the complete generated C++ dispatcher and
+all translated functions into a new PRX. An explicit code-map `overlay`
+selection enables the optional hybrid model: selected generated functions are
+installed through ABI-, GP-, FPU-, and VFPU-safe trampolines while unselected
+functions remain Allegrex code.
+
+`make psp` and `make psp-run` always use an actual recompiled path.
+Fixed-address executables and relocatable PRXs are replaced by the full
+generated C++ PRX by default. Code-map `overlay` entries explicitly opt into a
+hybrid build for selected functions; original-only PSP packaging is never used
+by these targets. PSP generated code is compiled with `-O2`.
 
 An automated PSP roundtrip test modifies a generated function, rebuilds the PRX and verifies that the changed result is observable. This exercises translation, relocation, mixed original/generated calls and the overlay ABI instead of merely repackaging the original executable.
 

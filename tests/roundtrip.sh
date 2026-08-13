@@ -112,7 +112,9 @@ grep -q '// Original PSP binary range: \[0x00000020, 0x' \
 
 # Exercise the beginner-facing, self-contained codebase exporter. The exported
 # project must build without referring back to PSPRecomp's source tree.
-"$RECOMPILER" init "$ROUNDTRIP_TMP/project.elf" \
+# Use the fixed-address fixture here so the beginner-facing target also covers
+# that full-C++ loader; the relocatable full loader is exercised below.
+"$RECOMPILER" init "$ROUNDTRIP_TMP/arithmetic.elf" \
     --display-name "Roundtrip Export" \
     --project-name roundtrip_export \
     --output "$ROUNDTRIP_TMP/exported" \
@@ -135,6 +137,15 @@ grep -q 'refract::Runtime::instance' \
     "$ROUNDTRIP_TMP/exported/platform/macos/platform.cpp"
 grep -q '^psp:' "$ROUNDTRIP_TMP/exported/Makefile"
 grep -q '^psp-run:' "$ROUNDTRIP_TMP/exported/Makefile"
+grep -q '^PSP_RECOMPILE_MODE := full$' "$ROUNDTRIP_TMP/exported/Makefile"
+grep -q '^psp: psp-binary$' "$ROUNDTRIP_TMP/exported/Makefile"
+grep -q '^CFLAGS = -O2 ' \
+    "$ROUNDTRIP_TMP/exported/src/generated/Makefile"
+if grep -q '^CFLAGS = -Os ' \
+    "$ROUNDTRIP_TMP/exported/src/generated/Makefile"; then
+    echo "generated PSP build still optimizes for size" >&2
+    exit 1
+fi
 grep -q '^macos:' "$ROUNDTRIP_TMP/exported/Makefile"
 grep -q '^macos-debug:' "$ROUNDTRIP_TMP/exported/Makefile"
 grep -q '^macos-run:' "$ROUNDTRIP_TMP/exported/Makefile"
@@ -194,6 +205,19 @@ overlay_resume=$("$PSP_BIN_DIR/psp-objdump" -d \
          }
          in_overlay && /^$/ { in_overlay = 0 }')
 test -n "$overlay_resume"
+# A relocatable PRX without explicit overlays must use the complete translated
+# dispatcher rather than silently packaging its untouched Allegrex image.
+"$RECOMPILER" init "$ROUNDTRIP_TMP/relocatable-fixture.prx" \
+    --display-name "Relocatable Original Guard" \
+    --project-name relocatable_original_guard \
+    --output "$ROUNDTRIP_TMP/relocatable-original-guard" \
+    --code-map "$ROUNDTRIP_TMP/relocatable.map" \
+    --yes
+grep -q '^PSP_RECOMPILE_MODE := full$' \
+    "$ROUNDTRIP_TMP/relocatable-original-guard/Makefile"
+grep -q '^OBJS = main[.]o platform[.]o imports[.]o dispatch[.]o' \
+    "$ROUNDTRIP_TMP/relocatable-original-guard/src/generated/Makefile"
+make -C "$ROUNDTRIP_TMP/relocatable-original-guard" psp -j2
 printf 'overlay 0x%s\n' "$overlay_address" \
     >> "$ROUNDTRIP_TMP/relocatable.map"
 "$RECOMPILER" init "$ROUNDTRIP_TMP/relocatable-fixture.prx" \
@@ -202,6 +226,10 @@ printf 'overlay 0x%s\n' "$overlay_address" \
     --output "$ROUNDTRIP_TMP/relocatable-exported" \
     --code-map "$ROUNDTRIP_TMP/relocatable.map" \
     --yes
+grep -q '^PSP_RECOMPILE_MODE := overlays$' \
+    "$ROUNDTRIP_TMP/relocatable-exported/Makefile"
+grep -q '^psp: psp-binary$' \
+    "$ROUNDTRIP_TMP/relocatable-exported/Makefile"
 overlay_source="$ROUNDTRIP_TMP/relocatable-exported/src/generated/func_${overlay_address}.cpp"
 test -s "$overlay_source"
 grep -q 'state[.]gpr\[2\] = state[.]gpr\[2\] + 0x00000007U;' \

@@ -171,38 +171,42 @@ std::string generated_readme(const ExportConfig& config, InputKind kind,
 std::string root_makefile(const ExportConfig& config, bool has_disc,
                           std::string_view disc_executable,
                           std::string_view sfo_path,
-                          bool preserve_original_psp) {
+                          std::string_view psp_recompile_mode) {
   std::ostringstream out;
   out << "PPSSPP ?= ppsspp\n"
          "CMAKE ?= cmake\n"
          "CXX ?= c++\n"
+         "PSP_RECOMPILE_MODE := "
+      << psp_recompile_mode
+      << "\n"
          "MACOS_BUILD_TYPE ?= Release\n"
          "MACOS_RUN_ARGS ?=\n"
          "\n"
-         ".PHONY: all psp-binary psp psp-run macos macos-debug macos-run "
+         ".PHONY: all psp-recompile-check psp-binary psp psp-run macos "
+         "macos-debug macos-run "
          "clean rebuild "
          "ppsspp "
          "disc-tree help\n\n"
          "all: psp\n\n"
-         "psp-binary:\n"
+         "psp-recompile-check:\n"
+         "\t@echo \"PSP recompile mode: $(PSP_RECOMPILE_MODE)\"\n\n"
+         "psp-binary: psp-recompile-check\n"
          "\t$(MAKE) -C src/generated\n\n";
   if (has_disc) {
-    out << "psp:" << (preserve_original_psp ? "\n" : " psp-binary\n")
+    out << "psp: psp-binary\n"
         << "\tmkdir -p dist .psprecomp\n"
            "\t$(CXX) -std=c++20 -O2 -o .psprecomp/iso_patch "
            "tools/iso_patch.cpp\n"
            "\t.psprecomp/iso_patch \"$(CURDIR)/original/disc.iso\" "
            "\"$(CURDIR)/dist/"
         << config.project_name << ".iso\""
-        << (preserve_original_psp
-                ? "\n"
-                : " \"" + std::string(disc_executable) +
-                      "\"=\"$(CURDIR)/src/generated/" + config.project_name +
-                      ".prx\"" +
-                      (!sfo_path.empty()
-                           ? " \"" + std::string(sfo_path) +
-                                 "\"=\"$(CURDIR)/src/generated/PARAM.SFO\"\n"
-                           : "\n"))
+        << " \"" + std::string(disc_executable) +
+               "\"=\"$(CURDIR)/src/generated/" + config.project_name +
+               ".prx\"" +
+               (!sfo_path.empty()
+                    ? " \"" + std::string(sfo_path) +
+                          "\"=\"$(CURDIR)/src/generated/PARAM.SFO\"\n"
+                    : "\n")
         << "\n"
            "psp-run: psp\n"
            "\t$(PPSSPP) \"$(CURDIR)/dist/"
@@ -233,20 +237,17 @@ std::string root_makefile(const ExportConfig& config, bool has_disc,
          "\t$(CMAKE) -E rm -rf build/macos\n\n"
          "rebuild: clean all\n\n";
   if (has_disc) {
-    out << "disc-tree:"
-        << (preserve_original_psp ? "\n" : " psp-binary\n")
-        <<
+    out << "disc-tree: psp-binary\n"
            "\trm -rf dist/disc\n"
            "\tmkdir -p dist\n"
            "\tcp -R disc dist/disc\n"
-        << (preserve_original_psp
-                ? "\t@echo \"Prepared dist/disc with the original fixed-address PSP executable.\"\n\n"
-                : "\tcp src/generated/" + config.project_name +
-                      ".prx dist/disc/" + std::string(disc_executable) +
-                      (!sfo_path.empty()
-                           ? "\n\tcp src/generated/PARAM.SFO dist/disc/" + std::string(sfo_path) + "\n"
-                           : "\n") +
-                      "\t@echo \"Prepared dist/disc with the recompiled executable.\"\n\n");
+        << "\tcp src/generated/" + config.project_name +
+               ".prx dist/disc/" + std::string(disc_executable) +
+               (!sfo_path.empty()
+                    ? "\n\tcp src/generated/PARAM.SFO dist/disc/" +
+                          std::string(sfo_path) + "\n"
+                    : "\n") +
+               "\t@echo \"Prepared dist/disc with the recompiled executable ($(PSP_RECOMPILE_MODE)).\"\n\n";
   } else {
     out << "disc-tree:\n"
            "\t@echo \"disc-tree requires an ISO export.\"\n"
@@ -882,10 +883,12 @@ ExportSummary export_codebase(const ExportConfig& config) {
       config.progress("Writing project files");
     }
     const bool has_disc = info.kind == InputKind::iso && config.extract_disc;
-    const bool preserve_original_psp = elf.preferred_base != 0U;
+    const auto psp_recompile_mode =
+        map && !map->overlay_starts.empty() ? std::string_view("overlays")
+                                            : std::string_view("full");
     write_text(staging / "Makefile",
                root_makefile(config, has_disc, info.executable_path,
-                             info.sfo_path, preserve_original_psp));
+                             info.sfo_path, psp_recompile_mode));
     write_text(staging / "CMakeLists.txt", macos_cmake(config));
     if (has_disc) {
       write_text(staging / "tools" / "iso_patch.cpp", iso_patch_tool_source());
@@ -913,6 +916,7 @@ ExportSummary export_codebase(const ExportConfig& config) {
              << "\ndecryption_backend = " << toml_string(decryption_backend)
              << "\ncode_map = "
              << toml_string(config.code_map ? "config/code.map" : "")
+             << "\npsp_recompile_mode = " << toml_string(psp_recompile_mode)
              << "\ndisc_extracted = " << (has_disc ? "true" : "false") << "\n";
     write_text(staging / "project.toml", manifest.str());
 
