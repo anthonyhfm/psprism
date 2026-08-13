@@ -7,6 +7,52 @@
 
 #include <array>
 
+namespace {
+
+constexpr std::uint32_t vector_word(std::uint32_t base, int size,
+                                    std::uint32_t vd, std::uint32_t vs,
+                                    std::uint32_t vt) {
+    const auto size_bits = size == 1   ? 0U
+                           : size == 2 ? 1U << 7U
+                           : size == 3 ? 1U << 15U
+                                       : (1U << 15U) | (1U << 7U);
+    return base | size_bits | vd | (vs << 8U) | (vt << 16U);
+}
+
+template <psprecomp::VfpuStaticOperation Operation, int Size>
+bool vfpu_static_matches_helper(std::uint32_t instruction) {
+    psprecomp::State expected;
+    for (std::uint32_t index = 0; index < 128U; ++index) {
+        const auto value = (static_cast<int>(index % 23U) - 11) * 0.25F;
+        expected.vfpu[index] = std::bit_cast<std::uint32_t>(value);
+    }
+    auto actual = expected;
+    psprecomp::execute_vfpu(expected, instruction, 0x1000U);
+    psprecomp::execute_vfpu_prefix_free<Operation, Size>(
+        actual, instruction & 0x7fU, (instruction >> 8U) & 0x7fU,
+        (instruction >> 16U) & 0x7fU);
+    return std::equal(std::begin(expected.vfpu), std::end(expected.vfpu),
+                      std::begin(actual.vfpu)) &&
+           std::equal(std::begin(expected.vfpu_ctrl),
+                      std::end(expected.vfpu_ctrl),
+                      std::begin(actual.vfpu_ctrl));
+}
+
+template <psprecomp::VfpuStaticOperation Operation>
+bool vfpu_static_matches_all_sizes(std::uint32_t base,
+                                   std::uint32_t vt = 9U) {
+    return vfpu_static_matches_helper<Operation, 1>(
+               vector_word(base, 1, 3U, 5U, vt)) &&
+           vfpu_static_matches_helper<Operation, 2>(
+               vector_word(base, 2, 35U, 12U, vt)) &&
+           vfpu_static_matches_helper<Operation, 3>(
+               vector_word(base, 3, 66U, 33U, vt)) &&
+           vfpu_static_matches_helper<Operation, 4>(
+               vector_word(base, 4, 69U, 37U, vt));
+}
+
+} // namespace
+
 #define CHECK(expression)                                                      \
     do {                                                                       \
         if (!(expression)) {                                                   \
@@ -152,6 +198,43 @@ int main() {
     CHECK(psprecomp::vfpu_opcode_supported(vidt_q_r003));
     CHECK(psprecomp::decode_allegrex(vidt_q_r003).lowering ==
           psprecomp::InstructionLowering::runtime_fallback);
+
+    constexpr auto vadd_s = vector_word(0x60000000U, 1, 3U, 5U, 9U);
+    constexpr auto vsub_p = vector_word(0x60800000U, 2, 35U, 12U, 7U);
+    constexpr auto vmul_t = vector_word(0x64000000U, 3, 66U, 33U, 44U);
+    constexpr auto vdot_q = vector_word(0x64800000U, 4, 4U, 36U, 68U);
+    constexpr auto vmov_q = vector_word(0xd0000000U, 4, 69U, 37U, 0U);
+    static_assert(psprecomp::vfpu_static_operation(vadd_s) ==
+                  psprecomp::VfpuStaticOperation::add);
+    static_assert(psprecomp::decode_allegrex(vadd_s).lowering ==
+                  psprecomp::InstructionLowering::guarded_native);
+    CHECK((vfpu_static_matches_helper<psprecomp::VfpuStaticOperation::add, 1>(
+        vadd_s)));
+    CHECK((vfpu_static_matches_helper<
+           psprecomp::VfpuStaticOperation::subtract, 2>(vsub_p)));
+    CHECK((vfpu_static_matches_helper<
+           psprecomp::VfpuStaticOperation::multiply, 3>(vmul_t)));
+    CHECK((vfpu_static_matches_helper<psprecomp::VfpuStaticOperation::dot, 4>(
+        vdot_q)));
+    CHECK((vfpu_static_matches_helper<psprecomp::VfpuStaticOperation::move, 4>(
+        vmov_q)));
+    CHECK((vfpu_static_matches_all_sizes<
+           psprecomp::VfpuStaticOperation::add>(0x60000000U)));
+    CHECK((vfpu_static_matches_all_sizes<
+           psprecomp::VfpuStaticOperation::subtract>(0x60800000U)));
+    CHECK((vfpu_static_matches_all_sizes<
+           psprecomp::VfpuStaticOperation::multiply>(0x64000000U)));
+    CHECK((vfpu_static_matches_all_sizes<
+           psprecomp::VfpuStaticOperation::dot>(0x64800000U)));
+    CHECK((vfpu_static_matches_all_sizes<
+           psprecomp::VfpuStaticOperation::move>(0xd0000000U, 0U)));
+    auto prefixed_state = state;
+    prefixed_state.vfpu_ctrl[0] = 0x0000001bU;
+    CHECK(!psprecomp::vfpu_prefixes_identity(prefixed_state));
+    psprecomp::note_vfpu_static_lowering(state);
+    psprecomp::note_vfpu_helper_fallback(state);
+    CHECK(state.cpu_profile.vfpu_static_lowerings == 1U);
+    CHECK(state.cpu_profile.vfpu_helper_fallbacks == 1U);
     state.vfpu_ctrl[0] = 0xe4U;
     state.vfpu_ctrl[2] = 0U;
     psprecomp::execute_vfpu(state, vidt_q_r003, 0x1000U);

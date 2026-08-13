@@ -10,6 +10,7 @@ namespace psprecomp {
 
 enum class InstructionLowering : std::uint8_t {
     native,
+    guarded_native,
     runtime_fallback,
     invalid,
 };
@@ -136,8 +137,18 @@ decode_allegrex(std::uint32_t word) {
     };
 
     if (vfpu_opcode_supported(word)) {
-        result.lowering = InstructionLowering::runtime_fallback;
-        result.name = "vfpu";
+        const auto operation = vfpu_static_operation(word);
+        result.lowering = operation == VfpuStaticOperation::none
+                              ? InstructionLowering::runtime_fallback
+                              : InstructionLowering::guarded_native;
+        switch (operation) {
+        case VfpuStaticOperation::add: result.name = "vadd"; break;
+        case VfpuStaticOperation::subtract: result.name = "vsub"; break;
+        case VfpuStaticOperation::multiply: result.name = "vmul"; break;
+        case VfpuStaticOperation::dot: result.name = "vdot"; break;
+        case VfpuStaticOperation::move: result.name = "vmov"; break;
+        default: result.name = "vfpu"; break;
+        }
         if (result.op == 0x12U && result.rs == 0x08U) {
             result.flags = instruction_delayed_branch;
             if ((result.rt & 2U) != 0U) {

@@ -65,11 +65,42 @@ int main() {
         }
     });
 
+    psprecomp::State vfpu_state;
+    for (std::uint32_t index = 0; index < 128U; ++index) {
+        vfpu_state.vfpu[index] = std::bit_cast<std::uint32_t>(
+            static_cast<float>(index + 1U) * 0.125F);
+    }
+    constexpr std::uint32_t vadd_q = 0x60008080U | 4U | (36U << 8U) |
+                                     (68U << 16U);
+    const auto varying_source = psprecomp::vfpu_index(36U, 4);
+    const auto vfpu_static_ns = measure([&] {
+        for (std::uint64_t i = 0; i < iterations; ++i) {
+            vfpu_state.vfpu[varying_source] = std::bit_cast<std::uint32_t>(
+                static_cast<float>((i & 255U) + 1U) * 0.125F);
+            psprecomp::execute_vfpu_prefix_free<
+                psprecomp::VfpuStaticOperation::add, 4>(vfpu_state, 4U, 36U,
+                                                        68U);
+            checksum += vfpu_state.vfpu[psprecomp::vfpu_index(4U, 4)];
+        }
+    });
+    const auto vfpu_helper_ns = measure([&] {
+        for (std::uint64_t i = 0; i < iterations; ++i) {
+            vfpu_state.vfpu[varying_source] = std::bit_cast<std::uint32_t>(
+                static_cast<float>((i & 255U) + 1U) * 0.125F);
+            psprecomp::execute_vfpu(vfpu_state, vadd_q, 0x1000U);
+            checksum += vfpu_state.vfpu[psprecomp::vfpu_index(4U, 4)];
+        }
+    });
+
     std::cout << "decoder_ns_per_instruction="
               << static_cast<double>(decode_ns) / iterations << '\n'
               << "interpreter_ns_per_instruction="
               << static_cast<double>(interpret_ns) / iterations << '\n'
               << "memory_roundtrip_ns="
               << static_cast<double>(memory_ns) / iterations << '\n'
+              << "vfpu_static_ns="
+              << static_cast<double>(vfpu_static_ns) / iterations << '\n'
+              << "vfpu_helper_ns="
+              << static_cast<double>(vfpu_helper_ns) / iterations << '\n'
               << "checksum=" << checksum << '\n';
 }

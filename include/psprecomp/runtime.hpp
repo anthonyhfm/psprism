@@ -33,6 +33,8 @@ struct CpuProfileCounters {
     std::uint64_t memory_reads{};
     std::uint64_t memory_writes{};
     std::uint64_t memory_faults{};
+    std::uint64_t vfpu_static_lowerings{};
+    std::uint64_t vfpu_helper_fallbacks{};
 };
 
 struct State {
@@ -101,6 +103,22 @@ inline void note_cpu_direct_cfg_edge(State& state) {
     if constexpr (cpu_profiling_compiled) {
         if (state.cpu_profile_enabled) {
             ++state.cpu_profile.direct_cfg_edges;
+        }
+    }
+}
+
+inline void note_vfpu_static_lowering(State& state) {
+    if constexpr (cpu_profiling_compiled) {
+        if (state.cpu_profile_enabled) {
+            ++state.cpu_profile.vfpu_static_lowerings;
+        }
+    }
+}
+
+inline void note_vfpu_helper_fallback(State& state) {
+    if constexpr (cpu_profiling_compiled) {
+        if (state.cpu_profile_enabled) {
+            ++state.cpu_profile.vfpu_helper_fallbacks;
         }
     }
 }

@@ -105,14 +105,16 @@ void execute_ge_list(Implementation& implementation, psprecomp::State& state,
         const auto clut_address =
             (graphics.commands[0xb0U] & 0x00fffff0U) |
             ((graphics.commands[0xb1U] << 8U) & 0x0f000000U);
-        const auto clut_bytes =
-            std::min<std::size_t>((argument & 0x3fU) * 32U,
-                                  graphics.clut.size());
+        const auto requested_blocks =
+            (argument & 0x7fU) == 0x40U ? 0x40U : argument & 0x3fU;
+        const auto clut_bytes = std::min<std::size_t>(
+            requested_blocks * 32U, graphics.clut.size());
         if (const auto* source =
                 psprecomp::mapped_address(state, clut_address, clut_bytes)) {
           if (!std::equal(source, source + clut_bytes,
                           graphics.clut.begin())) {
             std::copy_n(source, clut_bytes, graphics.clut.begin());
+            ++graphics.texture_generation;
             texture_cache.clear();
           }
         }
@@ -216,11 +218,29 @@ void execute_ge_list(Implementation& implementation, psprecomp::State& state,
             if (const auto* source = psprecomp::mapped_address(
                     state, graphics.vertex_address, vertex_byte_count)) {
               std::vector<host::GeometryVertex> vertices(vertex_count);
+              const auto maximum_mip =
+                  (graphics.commands[0xc2U] >> 16U) & 7U;
+              const auto mip_mode = graphics.commands[0xc8U] & 3U;
+              const auto mip_bias = static_cast<std::int8_t>(
+                  graphics.commands[0xc8U] >> 16U);
+              const auto selected_mip =
+                  mip_mode == 1U || mip_mode == 3U
+                      ? std::min<std::uint32_t>(
+                            maximum_mip,
+                            static_cast<std::uint32_t>(
+                                std::max<int>(mip_bias, 0) / 16))
+                      : 0U;
               const TextureKey texture_key{
-                  graphics.commands[0x1eU], graphics.commands[0xa0U],
-                  graphics.commands[0xa8U], graphics.commands[0xb8U],
-                  graphics.commands[0xc2U], graphics.commands[0xc3U],
-                  graphics.commands[0xc5U]};
+                  graphics.commands[0x1eU], graphics.commands[0xc2U],
+                  graphics.commands[0xc3U], graphics.commands[0xc5U],
+                  graphics.commands[0xc8U],
+                  graphics.commands[0xa0U + selected_mip],
+                  graphics.commands[0xa8U + selected_mip],
+                  graphics.commands[0xb8U + selected_mip],
+                  static_cast<std::uint32_t>(graphics.texture_generation),
+                  static_cast<std::uint32_t>(graphics.texture_generation >>
+                                             32U),
+                  0U, 0U};
               auto cached_texture = texture_cache.find(texture_key);
               if (cached_texture == texture_cache.end()) {
                 cached_texture = texture_cache
@@ -241,13 +261,18 @@ void execute_ge_list(Implementation& implementation, psprecomp::State& state,
                 const auto* position = input + layout.position_offset;
                 float decoded[3]{};
                 if (layout.position_type == 1U) {
-                  for (std::size_t component = 0; component < 3U; ++component)
+                  for (std::size_t component = 0; component < 3U;
+                       ++component) {
+                    const auto signed_value =
+                        reinterpret_cast<const std::int8_t*>(position)
+                            [component];
                     decoded[component] =
-                        through ? static_cast<float>(position[component])
-                                : static_cast<float>(
-                                      reinterpret_cast<const std::int8_t*>(
-                                          position)[component]) /
-                                      127.0F;
+                        through
+                            ? static_cast<float>(component < 2U
+                                                     ? signed_value
+                                                     : position[component])
+                            : static_cast<float>(signed_value) / 127.0F;
+                  }
                 } else if (layout.position_type == 2U) {
                   for (std::size_t component = 0; component < 3U;
                        ++component) {
@@ -595,14 +620,32 @@ void execute_ge_list(Implementation& implementation, psprecomp::State& state,
               render_state.render_target_address =
                   0x04000000U |
                   (graphics.commands[0x9cU] & 0x001ffff0U);
+              render_state.render_target_stride = framebuffer_stride;
+              render_state.render_target_format =
+                  graphics.commands[0xd2U] & 3U;
               last_render_target = render_state.render_target_address;
               render_state.render_target_width = render_target_width;
               render_state.render_target_height = render_target_height;
+              render_state.depth_target_address =
+                  0x04000000U |
+                  (graphics.commands[0x9eU] & 0x001ffff0U);
+              render_state.depth_target_stride =
+                  graphics.commands[0x9fU] & 0x7fcU;
               render_state.scissor_left = scissor_left;
               render_state.scissor_top = scissor_top;
               render_state.scissor_right = scissor_right;
               render_state.scissor_bottom = scissor_bottom;
               render_state.texture_address = texture.address;
+              render_state.texture_format = texture.format;
+              render_state.texture_buffer_width = texture.buffer_width;
+              render_state.texture_mipmap_level = texture.mipmap_level;
+              render_state.texture_max_mipmap_level =
+                  (graphics.commands[0xc2U] >> 16U) & 7U;
+              render_state.texture_lod_bias = static_cast<std::int8_t>(
+                  graphics.commands[0xc8U] >> 16U);
+              render_state.texture_generation =
+                  graphics.texture_generation;
+              render_state.texture_content_hash = texture.content_hash;
               render_state.through_coordinates = through;
               const auto clear_mode =
                   (graphics.commands[0xd3U] & 1U) != 0;
@@ -660,6 +703,15 @@ void execute_ge_list(Implementation& implementation, psprecomp::State& state,
               render_state.texture_linear_filter =
                   (graphics.commands[0xc6U] & 1U) != 0 ||
                   (graphics.commands[0xc6U] & 0x100U) != 0;
+              render_state.texture_min_linear =
+                  (graphics.commands[0xc6U] & 1U) != 0;
+              render_state.texture_mag_linear =
+                  (graphics.commands[0xc6U] & 0x100U) != 0;
+              render_state.texture_mipmap_enabled =
+                  (graphics.commands[0xc6U] & 4U) != 0 &&
+                  render_state.texture_max_mipmap_level != 0U;
+              render_state.texture_mipmap_linear =
+                  (graphics.commands[0xc6U] & 2U) != 0;
               render_state.texture_function = graphics.commands[0xc9U] & 7U;
               render_state.texture_alpha_used =
                   (graphics.commands[0xc9U] & 0x100U) != 0;
@@ -736,9 +788,9 @@ void execute_ge_list(Implementation& implementation, psprecomp::State& state,
                 render_state.cull_face = false;
               }
               implementation.ge_backend->submit(
-                  submitted_type, std::move(vertices),
-                  std::move(texture.pixels), texture.width, texture.height,
-                  render_state);
+                  {submitted_type, std::move(vertices),
+                   std::move(texture.pixels), texture.width, texture.height,
+                   render_state});
               ++submitted_primitives;
             } else {
               ++invalid_vertices;
@@ -821,6 +873,7 @@ void execute_ge_list(Implementation& implementation, psprecomp::State& state,
         // A GE block transfer can modify a texture without changing any
         // texture-state command, so cached decodes are no longer valid.
         texture_cache.clear();
+        ++graphics.texture_generation;
         const auto source_address =
             (graphics.commands[0xb2U] & 0x00fffff0U) |
             ((graphics.commands[0xb3U] & 0x00ff0000U) << 8U);

@@ -562,6 +562,31 @@ std::string opcode_group(std::uint32_t instruction) {
     return stream.str();
 }
 
+std::string emit_guarded_vfpu(std::uint32_t pc, std::uint32_t instruction,
+                              VfpuStaticOperation operation) {
+    const auto vd = instruction & 0x7fU;
+    const auto vs = (instruction >> 8U) & 0x7fU;
+    const auto vt = (instruction >> 16U) & 0x7fU;
+    const auto size = vfpu_size(instruction);
+    std::string_view operation_name;
+    switch (operation) {
+    case VfpuStaticOperation::add: operation_name = "add"; break;
+    case VfpuStaticOperation::subtract: operation_name = "subtract"; break;
+    case VfpuStaticOperation::multiply: operation_name = "multiply"; break;
+    case VfpuStaticOperation::dot: operation_name = "dot"; break;
+    case VfpuStaticOperation::move: operation_name = "move"; break;
+    default: throw std::logic_error("invalid static VFPU operation");
+    }
+    std::ostringstream out;
+    out << "if (vfpu_prefixes_identity(state)) { "
+        << "execute_vfpu_prefix_free<VfpuStaticOperation::" << operation_name
+        << ", " << size << ">(state, " << vd << "U, " << vs << "U, " << vt
+        << "U); note_vfpu_static_lowering(state); } else { "
+        << "note_vfpu_helper_fallback(state); execute_vfpu(state, "
+        << hex(instruction) << ", state.memory_base + " << hex(pc) << "); }";
+    return out.str();
+}
+
 std::string emit_instruction(std::uint32_t pc, std::uint32_t instruction,
                              bool relocated = true,
                              std::uint32_t preferred_base = 0) {
@@ -576,6 +601,10 @@ std::string emit_instruction(std::uint32_t pc, std::uint32_t instruction,
     if (!decoded.valid()) {
         return "/* unsupported/reserved PSP word */ "
                "state.stop_reason = StopReason::invalid_pc;";
+    }
+    if (decoded.lowering == InstructionLowering::guarded_native) {
+        return emit_guarded_vfpu(pc, instruction,
+                                 vfpu_static_operation(instruction));
     }
     if (decoded.lowering == InstructionLowering::runtime_fallback) {
         out << "execute_vfpu(state, " << hex(instruction)
@@ -2164,6 +2193,10 @@ void emit_project(const ElfImage& image, const std::filesystem::path& directory,
                "faults=%u\\n\", "
                "static_cast<std::uint32_t>(p.memory_writes), "
                "static_cast<std::uint32_t>(p.memory_faults));\n"
+               "  platform::log(\"[psprecomp-profile] vfpu_static=%u "
+               "vfpu_fallback=%u\\n\", "
+               "static_cast<std::uint32_t>(p.vfpu_static_lowerings), "
+               "static_cast<std::uint32_t>(p.vfpu_helper_fallbacks));\n"
                "}\n"
                "} // namespace\n"
                "#endif\n";
@@ -3332,6 +3365,7 @@ bool analyze_coverage(const ElfImage& image, const CodeMap* code_map,
         std::uint32_t example_instruction{};
     };
     std::map<std::string, MissingGroup> invalid;
+    std::map<std::string, MissingGroup> guarded;
     std::map<std::string, MissingGroup> fallback;
     std::size_t translated = 0;
     std::size_t excluded = 0;
@@ -3348,6 +3382,14 @@ bool analyze_coverage(const ElfImage& image, const CodeMap* code_map,
             const auto decoded = decode_allegrex(instruction);
             if (decoded.lowering == InstructionLowering::native) {
                 ++translated;
+            } else if (decoded.lowering ==
+                       InstructionLowering::guarded_native) {
+                auto& group = guarded[opcode_group(instruction)];
+                if (group.count == 0) {
+                    group.example_pc = pc;
+                    group.example_instruction = instruction;
+                }
+                ++group.count;
             } else {
                 auto& groups =
                     decoded.lowering == InstructionLowering::runtime_fallback
@@ -3364,6 +3406,14 @@ bool analyze_coverage(const ElfImage& image, const CodeMap* code_map,
     }
     output << "translated_words=" << translated << '\n'
            << "excluded_words=" << excluded << '\n';
+    std::size_t guarded_total = 0;
+    for (const auto& [name, group] : guarded) {
+        guarded_total += group.count;
+        output << "guarded_native " << name << " count=" << group.count
+               << " example_pc=" << hex(group.example_pc)
+               << " instruction=" << hex(group.example_instruction) << '\n';
+    }
+    output << "guarded_native_words=" << guarded_total << '\n';
     std::size_t fallback_total = 0;
     for (const auto& [name, group] : fallback) {
         fallback_total += group.count;

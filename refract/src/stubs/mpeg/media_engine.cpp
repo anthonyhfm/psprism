@@ -300,6 +300,7 @@ struct MediaEngine::Implementation {
   AVPacket* packet{};
   AVFrame* frame{};
   SwsContext* scaler{};
+  std::vector<std::uint8_t> rgba_scratch;
 #endif
 };
 
@@ -397,6 +398,7 @@ std::optional<MediaAccessUnit> MediaEngine::next_access_unit(
 
 namespace {
 
+#if defined(REFRACT_HAS_FFMPEG)
 std::uint16_t pack_565(std::uint8_t red, std::uint8_t green,
                        std::uint8_t blue) {
   return static_cast<std::uint16_t>((red >> 3U) | ((green >> 2U) << 5U) |
@@ -416,6 +418,56 @@ std::uint16_t pack_4444(std::uint8_t red, std::uint8_t green,
                                     ((blue >> 4U) << 8U) |
                                     ((alpha >> 4U) << 12U));
 }
+
+bool copy_video_frame(AVFrame* frame, SwsContext*& scaler,
+                      std::vector<std::uint8_t>& rgba,
+                      std::span<std::uint8_t> output,
+                      std::uint32_t frame_stride,
+                      std::uint32_t pixel_format, std::uint32_t& frame_number,
+                      VideoFrameInfo& last_frame, VideoFrameInfo& info) {
+  const auto width = static_cast<std::uint32_t>(frame->width);
+  const auto height = static_cast<std::uint32_t>(frame->height);
+  if (width == 0U || height == 0U || frame_stride < width) return false;
+  const auto bytes_per_pixel = pixel_format == 3U ? 4U : 2U;
+  if (height > output.size() / frame_stride / bytes_per_pixel) return false;
+  rgba.resize(static_cast<std::size_t>(width) * height * 4U);
+  scaler = sws_getCachedContext(
+      scaler, frame->width, frame->height,
+      static_cast<AVPixelFormat>(frame->format), frame->width, frame->height,
+      AV_PIX_FMT_RGBA, SWS_BILINEAR, nullptr, nullptr, nullptr);
+  if (scaler == nullptr) return false;
+  std::uint8_t* destination[]{rgba.data()};
+  const int destination_stride[]{frame->width * 4};
+  sws_scale(scaler, frame->data, frame->linesize, 0, frame->height,
+            destination, destination_stride);
+  for (std::uint32_t y = 0; y < height; ++y) {
+    for (std::uint32_t x = 0; x < width; ++x) {
+      const auto source = (static_cast<std::size_t>(y) * width + x) * 4U;
+      const auto target = (static_cast<std::size_t>(y) * frame_stride + x) *
+                          bytes_per_pixel;
+      const auto red = rgba[source];
+      const auto green = rgba[source + 1U];
+      const auto blue = rgba[source + 2U];
+      const auto alpha = rgba[source + 3U];
+      if (pixel_format == 3U) {
+        output[target] = red;
+        output[target + 1U] = green;
+        output[target + 2U] = blue;
+        output[target + 3U] = alpha;
+      } else {
+        const auto packed = pixel_format == 0U ? pack_565(red, green, blue)
+                            : pixel_format == 1U
+                                ? pack_5551(red, green, blue, alpha)
+                                : pack_4444(red, green, blue, alpha);
+        std::memcpy(output.data() + target, &packed, sizeof(packed));
+      }
+    }
+  }
+  info = {width, height, ++frame_number, true};
+  last_frame = info;
+  return true;
+}
+#endif
 
 } // namespace
 
@@ -451,48 +503,9 @@ bool MediaEngine::decode_video(const MediaAccessUnit& access_unit,
     impl.packet->dts = access_unit.dts;
     if (avcodec_send_packet(impl.codec, impl.packet) < 0) return false;
     if (avcodec_receive_frame(impl.codec, impl.frame) != 0) continue;
-    const auto width = static_cast<std::uint32_t>(impl.frame->width);
-    const auto height = static_cast<std::uint32_t>(impl.frame->height);
-    if (width == 0U || height == 0U || frame_stride < width) return false;
-    const auto bytes_per_pixel = pixel_format == 3U ? 4U : 2U;
-    if (height > output.size() / frame_stride / bytes_per_pixel) return false;
-    std::vector<std::uint8_t> rgba(static_cast<std::size_t>(width) * height * 4U);
-    impl.scaler = sws_getCachedContext(
-        impl.scaler, impl.frame->width, impl.frame->height,
-        static_cast<AVPixelFormat>(impl.frame->format), impl.frame->width,
-        impl.frame->height, AV_PIX_FMT_RGBA, SWS_BILINEAR, nullptr, nullptr,
-        nullptr);
-    if (impl.scaler == nullptr) return false;
-    std::uint8_t* destination[] = {rgba.data()};
-    const int destination_stride[] = {impl.frame->width * 4};
-    sws_scale(impl.scaler, impl.frame->data, impl.frame->linesize, 0,
-              impl.frame->height, destination, destination_stride);
-    for (std::uint32_t y = 0; y < height; ++y) {
-      for (std::uint32_t x = 0; x < width; ++x) {
-        const auto source = (static_cast<std::size_t>(y) * width + x) * 4U;
-        const auto target = (static_cast<std::size_t>(y) * frame_stride + x) *
-                            bytes_per_pixel;
-        const auto red = rgba[source];
-        const auto green = rgba[source + 1U];
-        const auto blue = rgba[source + 2U];
-        const auto alpha = rgba[source + 3U];
-        if (pixel_format == 3U) {
-          output[target] = red;
-          output[target + 1U] = green;
-          output[target + 2U] = blue;
-          output[target + 3U] = alpha;
-        } else {
-          const auto packed = pixel_format == 0U ? pack_565(red, green, blue)
-                              : pixel_format == 1U
-                                  ? pack_5551(red, green, blue, alpha)
-                                  : pack_4444(red, green, blue, alpha);
-          std::memcpy(output.data() + target, &packed, sizeof(packed));
-        }
-      }
-    }
-    info = {width, height, ++impl.frame_number, true};
-    impl.last_frame = info;
-    return true;
+    return copy_video_frame(impl.frame, impl.scaler, impl.rgba_scratch, output,
+                            frame_stride, pixel_format, impl.frame_number,
+                            impl.last_frame, info);
   }
   return true;
 #else
@@ -579,17 +592,24 @@ bool MediaEngine::drain_video(std::span<std::uint8_t> output,
                               std::uint32_t frame_stride,
                               std::uint32_t pixel_format,
                               VideoFrameInfo& info) {
-  static_cast<void>(output);
-  static_cast<void>(frame_stride);
-  static_cast<void>(pixel_format);
   info = {};
 #if defined(REFRACT_HAS_FFMPEG)
   auto& impl = *implementation_;
   std::lock_guard lock(impl.mutex);
-  if (!impl.ensure_decoder() || avcodec_send_packet(impl.codec, nullptr) < 0)
-    return false;
-  return avcodec_receive_frame(impl.codec, impl.frame) == 0;
+  if (!impl.ensure_decoder()) return false;
+  const auto send_result = avcodec_send_packet(impl.codec, nullptr);
+  if (send_result < 0 && send_result != AVERROR_EOF) return false;
+  const auto receive_result = avcodec_receive_frame(impl.codec, impl.frame);
+  if (receive_result == AVERROR(EAGAIN) || receive_result == AVERROR_EOF)
+    return true;
+  if (receive_result < 0) return false;
+  return copy_video_frame(impl.frame, impl.scaler, impl.rgba_scratch, output,
+                          frame_stride, pixel_format, impl.frame_number,
+                          impl.last_frame, info);
 #else
+  static_cast<void>(output);
+  static_cast<void>(frame_stride);
+  static_cast<void>(pixel_format);
   return false;
 #endif
 }

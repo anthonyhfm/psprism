@@ -44,6 +44,19 @@ int main() {
   CHECK(std::abs(render_target_geometry_scale(true, 256U, 512U) - 0.5F) <
         0.0001F);
 
+  refract::host::reset_ge_cache_metrics();
+  CHECK(refract::host::ge_cache_metrics() == refract::ge::CacheMetrics{});
+  ge_cache_counters.record_texture(false, 128U);
+  ge_cache_counters.record_pipeline(true);
+  ge_cache_counters.record_vertex_buffer(true, 64U);
+  const auto cache_metrics = refract::host::ge_cache_metrics();
+  CHECK(cache_metrics.texture_misses == 1U);
+  CHECK(cache_metrics.texture_upload_bytes == 128U);
+  CHECK(cache_metrics.pipeline_hits == 1U);
+  CHECK(cache_metrics.vertex_buffer_reuses == 1U);
+  CHECK(cache_metrics.vertex_upload_bytes == 64U);
+  refract::host::reset_ge_cache_metrics();
+
   {
     std::lock_guard lock(geometry_mutex);
     building_geometry_batches.clear();

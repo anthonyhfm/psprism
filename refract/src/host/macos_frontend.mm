@@ -131,7 +131,11 @@ std::mutex geometry_mutex;
 std::vector<GeometryBatch> building_geometry_batches;
 std::vector<GeometryBatch> pending_geometry_batches;
 std::vector<GeometryBatch> presented_geometry_batches;
+std::mutex vertex_buffer_pool_mutex;
+NSMutableArray<id<MTLBuffer>>* vertex_buffer_pool;
+refract::ge::CacheMetricsAccumulator ge_cache_counters;
 std::atomic_uint32_t display_framebuffer_address{0x04000000U};
+std::atomic_uint32_t ge_presented_frames{};
 std::atomic_uint32_t keyboard_buttons{};
 std::atomic_uint32_t keyboard_latched_buttons{};
 std::atomic_uint64_t keyboard_latched_until{};
@@ -216,6 +220,7 @@ refract::desktop::DialogFrame current_dialog_frame();
 @property(nonatomic, strong) NSArray<id<MTLSamplerState>>* samplerStates;
 @property(nonatomic, strong) NSMutableDictionary<NSNumber*, id<MTLTexture>>* renderTargets;
 @property(nonatomic, strong) NSMutableDictionary<NSNumber*, id<MTLTexture>>* depthTargets;
+@property(nonatomic, strong) NSMutableDictionary<NSString*, id<MTLTexture>>* uploadedTextures;
 @end
 
 @implementation PsprismRenderer
@@ -226,6 +231,12 @@ refract::desktop::DialogFrame current_dialog_frame();
   self.queue = [self.device newCommandQueue];
   self.renderTargets = [NSMutableDictionary dictionary];
   self.depthTargets = [NSMutableDictionary dictionary];
+  self.uploadedTextures = [NSMutableDictionary dictionary];
+  {
+    std::lock_guard lock(vertex_buffer_pool_mutex);
+    if (vertex_buffer_pool == nil)
+      vertex_buffer_pool = [NSMutableArray array];
+  }
   NSString* source = @R"METAL(
     #include <metal_stdlib>
     using namespace metal;
@@ -508,8 +519,11 @@ refract::desktop::DialogFrame current_dialog_frame();
                             (destination_fixed_class << 14U) |
                             ((state.color_write_mask & 0xfU) << 16U) |
                             (state.alpha_blend ? (1U << 20U) : 0U);
-  if (id<MTLRenderPipelineState> cached = self.blendPipelines[@(key)])
+  if (id<MTLRenderPipelineState> cached = self.blendPipelines[@(key)]) {
+    ge_cache_counters.record_pipeline(true);
     return cached;
+  }
+  ge_cache_counters.record_pipeline(false);
   MTLRenderPipelineDescriptor* descriptor =
       [[MTLRenderPipelineDescriptor alloc] init];
   descriptor.vertexFunction =
@@ -556,12 +570,42 @@ refract::desktop::DialogFrame current_dialog_frame();
   id<CAMetalDrawable> drawable = view.currentDrawable;
   if (display_pass == nil || drawable == nil || self.pipeline == nil) return;
   id<MTLCommandBuffer> commands = [self.queue commandBuffer];
-  NSMutableDictionary<NSValue*, id<MTLTexture>>* uploaded_textures =
-      [NSMutableDictionary dictionary];
-  NSMutableArray<id<MTLBuffer>>* uploaded_vertex_buffers =
-      [NSMutableArray array];
+  id<MTLBuffer> frame_vertex_buffer = nil;
+  std::size_t frame_vertex_offset{};
   if (self.geometryPipeline != nil) {
     std::lock_guard lock(geometry_mutex);
+    std::size_t required_vertex_bytes{};
+    for (const auto& batch : presented_geometry_batches) {
+      required_vertex_bytes =
+          (required_vertex_bytes + 255U) & ~std::size_t{255U};
+      required_vertex_bytes +=
+          batch.vertices.size() * sizeof(refract::host::GeometryVertex);
+    }
+    if (required_vertex_bytes != 0U) {
+      bool reused{};
+      {
+        std::lock_guard pool_lock(vertex_buffer_pool_mutex);
+        for (NSInteger index =
+                 static_cast<NSInteger>(vertex_buffer_pool.count) - 1;
+             index >= 0; --index) {
+          id<MTLBuffer> candidate = vertex_buffer_pool[index];
+          if (candidate.length < required_vertex_bytes) continue;
+          frame_vertex_buffer = candidate;
+          [vertex_buffer_pool removeObjectAtIndex:index];
+          reused = true;
+          break;
+        }
+      }
+      if (frame_vertex_buffer == nil) {
+        constexpr std::size_t initial_vertex_buffer_size = 4U << 20U;
+        const auto allocation_size =
+            std::max(required_vertex_bytes, initial_vertex_buffer_size);
+        frame_vertex_buffer = [self.device
+            newBufferWithLength:allocation_size
+                        options:MTLResourceStorageModeShared];
+      }
+      ge_cache_counters.record_vertex_buffer(reused, required_vertex_bytes);
+    }
     id<MTLRenderCommandEncoder> encoder = nil;
     std::uint32_t active_target = UINT32_MAX;
     id<MTLTexture> active_target_texture = nil;
@@ -694,8 +738,20 @@ refract::desktop::DialogFrame current_dialog_frame();
       }
       if (sampled_texture == nil && batch.texture != nullptr &&
           !batch.texture->empty()) {
-        NSValue* texture_key = [NSValue valueWithPointer:batch.texture.get()];
-        sampled_texture = [uploaded_textures objectForKey:texture_key];
+        NSString* texture_key = [NSString
+            stringWithFormat:@"%08x:%u:%u:%u:%016llx:%016llx",
+                             batch.state.texture_address,
+                             batch.texture_width, batch.texture_height,
+                             batch.state.texture_format,
+                             static_cast<unsigned long long>(
+                                 batch.state.texture_generation),
+                             static_cast<unsigned long long>(
+                                 batch.state.texture_content_hash)];
+        sampled_texture = [self.uploadedTextures objectForKey:texture_key];
+        ge_cache_counters.record_texture(
+            sampled_texture != nil,
+            static_cast<std::uint64_t>(batch.texture_width) *
+                batch.texture_height * 4U);
         if (sampled_texture == nil) {
           MTLTextureDescriptor* descriptor = [MTLTextureDescriptor
               texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
@@ -709,11 +765,14 @@ refract::desktop::DialogFrame current_dialog_frame();
                mipmapLevel:0
                  withBytes:batch.texture->data()
                bytesPerRow:batch.texture_width * 4U];
-          [uploaded_textures setObject:sampled_texture forKey:texture_key];
+          if (self.uploadedTextures.count >= 2048U)
+            [self.uploadedTextures removeAllObjects];
+          [self.uploadedTextures setObject:sampled_texture forKey:texture_key];
         }
       }
       const auto needs_special_pipeline =
           batch.state.alpha_blend || batch.state.color_write_mask != 0x0fU;
+      if (!needs_special_pipeline) ge_cache_counters.record_pipeline(true);
       if (sampled_texture == nil) {
         [encoder setRenderPipelineState:
                      needs_special_pipeline
@@ -750,21 +809,20 @@ refract::desktop::DialogFrame current_dialog_frame();
       }
       const auto vertex_bytes =
           batch.vertices.size() * sizeof(refract::host::GeometryVertex);
-      id<MTLBuffer> vertex_buffer =
-          [self.device newBufferWithBytes:batch.vertices.data()
-                                  length:vertex_bytes
-                                 options:MTLResourceStorageModeShared];
-      if (vertex_buffer == nil) {
-        NSLog(@"psprism: failed to allocate %zu-byte GE vertex buffer",
-              vertex_bytes);
+      frame_vertex_offset = (frame_vertex_offset + 255U) & ~std::size_t{255U};
+      if (frame_vertex_buffer == nil ||
+          frame_vertex_offset + vertex_bytes > frame_vertex_buffer.length) {
+        NSLog(@"psprism: GE vertex upload buffer exhausted (%zu bytes)",
+              required_vertex_bytes);
         continue;
       }
-      // Explicitly retain transient buffers through GPU completion.  Large
-      // PSP batches cannot use setVertexBytes, and releasing their backing
-      // buffers after encoding lets later allocations overwrite vertices
-      // before Metal consumes them.
-      [uploaded_vertex_buffers addObject:vertex_buffer];
-      [encoder setVertexBuffer:vertex_buffer offset:0 atIndex:0];
+      std::memcpy(static_cast<std::uint8_t*>(frame_vertex_buffer.contents) +
+                      frame_vertex_offset,
+                  batch.vertices.data(), vertex_bytes);
+      [encoder setVertexBuffer:frame_vertex_buffer
+                        offset:frame_vertex_offset
+                       atIndex:0];
+      frame_vertex_offset += vertex_bytes;
       [encoder setVertexBytes:geometry_texture_scale
                        length:sizeof(geometry_texture_scale)
                       atIndex:1];
@@ -851,8 +909,11 @@ refract::desktop::DialogFrame current_dialog_frame();
   [display_encoder endEncoding];
   [commands presentDrawable:drawable];
   [commands addCompletedHandler:^(id<MTLCommandBuffer> buffer) {
-    static_cast<void>(uploaded_textures.count);
-    static_cast<void>(uploaded_vertex_buffers.count);
+    if (frame_vertex_buffer != nil) {
+      std::lock_guard lock(vertex_buffer_pool_mutex);
+      if (vertex_buffer_pool.count < 8U)
+        [vertex_buffer_pool addObject:frame_vertex_buffer];
+    }
     if (buffer.error != nil)
       NSLog(@"psprism: Metal command buffer error: %@", buffer.error);
   }];
@@ -1263,6 +1324,24 @@ void present_ge_frame() {
         std::make_move_iterator(pending_geometry_batches.end()));
     pending_geometry_batches.clear();
   }
+  const auto frame = ge_presented_frames.fetch_add(1U,
+                                                    std::memory_order_relaxed);
+  if (verbose_logging.load(std::memory_order_relaxed) && frame != 0U &&
+      frame % 120U == 0U) {
+    const auto metrics = ge_cache_counters.snapshot();
+    std::fprintf(
+        stderr,
+        "[psprism:ge-cache] texture=%llu/%llu upload=%llu "
+        "pipeline=%llu/%llu vertex=%llu/%llu upload=%llu\n",
+        static_cast<unsigned long long>(metrics.texture_hits),
+        static_cast<unsigned long long>(metrics.texture_misses),
+        static_cast<unsigned long long>(metrics.texture_upload_bytes),
+        static_cast<unsigned long long>(metrics.pipeline_hits),
+        static_cast<unsigned long long>(metrics.pipeline_misses),
+        static_cast<unsigned long long>(metrics.vertex_buffer_reuses),
+        static_cast<unsigned long long>(metrics.vertex_buffer_allocations),
+        static_cast<unsigned long long>(metrics.vertex_upload_bytes));
+  }
   if (has_geometry)
     dispatch_async(dispatch_get_main_queue(), ^{ [metal_view setNeedsDisplay:YES]; });
 }
@@ -1321,6 +1400,10 @@ void submit_ge_primitive(std::uint32_t type,
          texture_height, graphics_state});
   }
 }
+
+ge::CacheMetrics ge_cache_metrics() { return ge_cache_counters.snapshot(); }
+
+void reset_ge_cache_metrics() { ge_cache_counters.reset(); }
 
 ControllerState controller_state() {
   ControllerState result;

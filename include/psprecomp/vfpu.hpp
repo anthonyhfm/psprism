@@ -11,6 +11,38 @@
 
 namespace psprecomp {
 
+enum class VfpuStaticOperation : std::uint8_t {
+    none,
+    add,
+    subtract,
+    multiply,
+    dot,
+    move,
+};
+
+inline constexpr VfpuStaticOperation
+vfpu_static_operation(std::uint32_t instruction) {
+    const auto op = instruction >> 26U;
+    const auto type = (instruction >> 23U) & 7U;
+    if (op == 0x18U && type == 0U) {
+        return VfpuStaticOperation::add;
+    }
+    if (op == 0x18U && type == 1U) {
+        return VfpuStaticOperation::subtract;
+    }
+    if (op == 0x19U && type == 0U) {
+        return VfpuStaticOperation::multiply;
+    }
+    if (op == 0x19U && type == 1U) {
+        return VfpuStaticOperation::dot;
+    }
+    if (op == 0x34U && ((instruction >> 21U) & 31U) == 0U &&
+        ((instruction >> 16U) & 31U) == 0U) {
+        return VfpuStaticOperation::move;
+    }
+    return VfpuStaticOperation::none;
+}
+
 inline constexpr bool vfpu_opcode_supported(std::uint32_t instruction) {
     const auto op = instruction >> 26U;
     const auto sub3 = (instruction >> 23U) & 7U;
@@ -171,6 +203,45 @@ inline void vfpu_eat_prefixes(State& state) {
     state.vfpu_ctrl[0] = 0xe4U;
     state.vfpu_ctrl[1] = 0xe4U;
     state.vfpu_ctrl[2] = 0;
+}
+
+inline bool vfpu_prefixes_identity(const State& state) {
+    return state.vfpu_ctrl[0] == 0xe4U && state.vfpu_ctrl[1] == 0xe4U &&
+           state.vfpu_ctrl[2] == 0U;
+}
+
+template <VfpuStaticOperation Operation, int Size>
+inline void execute_vfpu_prefix_free(State& state, std::uint32_t vd,
+                                     std::uint32_t vs, std::uint32_t vt) {
+    static_assert(Size >= 1 && Size <= 4);
+    static_assert(Operation != VfpuStaticOperation::none);
+    float source[4]{};
+    float target[4]{};
+    float result[4]{};
+    vfpu_read_vector(state, vs, Size, source);
+    if constexpr (Operation != VfpuStaticOperation::move) {
+        vfpu_read_vector(state, vt, Size, target);
+    }
+    if constexpr (Operation == VfpuStaticOperation::dot) {
+        for (int lane = 0; lane < Size; ++lane) {
+            result[0] += source[lane] * target[lane];
+        }
+        vfpu_write_vector(state, vd, 1, result);
+    } else {
+        for (int lane = 0; lane < Size; ++lane) {
+            if constexpr (Operation == VfpuStaticOperation::add) {
+                result[lane] = source[lane] + target[lane];
+            } else if constexpr (Operation == VfpuStaticOperation::subtract) {
+                result[lane] = source[lane] - target[lane];
+            } else if constexpr (Operation == VfpuStaticOperation::multiply) {
+                result[lane] = source[lane] * target[lane];
+            } else if constexpr (Operation == VfpuStaticOperation::move) {
+                result[lane] = source[lane];
+            }
+        }
+        vfpu_write_vector(state, vd, Size, result);
+    }
+    vfpu_eat_prefixes(state);
 }
 
 inline void vfpu_read_matrix(const State& state, std::uint32_t reg, int side,

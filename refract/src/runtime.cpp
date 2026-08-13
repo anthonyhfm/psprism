@@ -166,6 +166,7 @@ struct DecodedTexture {
   std::uint32_t buffer_width{};
   std::uint32_t format{};
   std::uint32_t mipmap_level{};
+  std::uint64_t content_hash{};
 };
 
 using TextureKey = std::array<std::uint32_t, 12>;
@@ -401,6 +402,7 @@ DecodedTexture decode_texture(
           static_cast<std::uint8_t>(color >> 24U);
     }
   }
+  result.content_hash = ge::content_hash(*result.pixels);
   return result;
 }
 

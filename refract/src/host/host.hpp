@@ -1,5 +1,7 @@
 #pragma once
 
+#include "ge/ge_cache.hpp"
+
 #include <cstddef>
 #include <cstdint>
 #include <atomic>
@@ -9,6 +11,23 @@
 #include <vector>
 
 namespace refract::host {
+
+constexpr std::uint32_t audio_master_clock_sample_rate = 44100U;
+
+struct AudioTelemetry {
+  std::uint64_t submitted_frames{};
+  std::uint64_t consumed_frames{};
+  std::uint64_t queued_frames{};
+  std::uint64_t peak_queued_frames{};
+  std::uint64_t callback_count{};
+  std::uint64_t underrun_callbacks{};
+  std::uint64_t underrun_frames{};
+  std::uint64_t overrun_submissions{};
+  std::uint64_t dropped_frames{};
+  std::uint64_t rejected_submissions{};
+  std::uint64_t callback_lock_contentions{};
+  std::uint64_t device_resets{};
+};
 
 constexpr std::uint64_t audio_callback_timeout_microseconds(
     std::uint32_t frame_count, std::uint32_t sample_rate) {
@@ -32,14 +51,26 @@ bool submit_audio(const std::int16_t* interleaved_stereo,
                   std::uint32_t sample_rate = 44100U);
 using AudioQueuedFramesCallback = std::uint32_t (*)(std::uint32_t);
 using AudioResetChannelCallback = void (*)(std::uint32_t);
+using AudioTelemetryCallback = AudioTelemetry (*)();
+using AudioClockFramesCallback = std::uint64_t (*)();
 
 inline std::atomic<AudioQueuedFramesCallback> audio_queued_frames_callback{};
 inline std::atomic<AudioResetChannelCallback> audio_reset_channel_callback{};
+inline std::atomic<AudioTelemetryCallback> audio_telemetry_callback{};
+inline std::atomic<AudioClockFramesCallback> audio_clock_frames_callback{};
 
 inline void set_audio_queue_callbacks(AudioQueuedFramesCallback queued,
                                       AudioResetChannelCallback reset) {
   audio_queued_frames_callback.store(queued, std::memory_order_release);
   audio_reset_channel_callback.store(reset, std::memory_order_release);
+}
+
+inline void set_audio_telemetry_callback(AudioTelemetryCallback telemetry) {
+  audio_telemetry_callback.store(telemetry, std::memory_order_release);
+}
+
+inline void set_audio_clock_frames_callback(AudioClockFramesCallback clock) {
+  audio_clock_frames_callback.store(clock, std::memory_order_release);
 }
 
 inline std::uint32_t queued_audio_frames(std::uint32_t channel) {
@@ -52,6 +83,23 @@ inline void reset_audio_channel(std::uint32_t channel) {
   const auto callback =
       audio_reset_channel_callback.load(std::memory_order_acquire);
   if (callback != nullptr) callback(channel);
+}
+
+inline AudioTelemetry audio_telemetry() {
+  const auto callback =
+      audio_telemetry_callback.load(std::memory_order_acquire);
+  return callback == nullptr ? AudioTelemetry{} : callback();
+}
+
+inline std::uint64_t audio_clock_frames() {
+  const auto callback =
+      audio_clock_frames_callback.load(std::memory_order_acquire);
+  return callback == nullptr ? audio_telemetry().consumed_frames : callback();
+}
+
+inline std::uint64_t audio_clock_microseconds() {
+  return audio_clock_frames() * 1000000ULL /
+         audio_master_clock_sample_rate;
 }
 
 struct ControllerState {
@@ -137,6 +185,7 @@ struct GeometryState {
   std::uint32_t texture_max_mipmap_level{};
   std::int32_t texture_lod_bias{};
   std::uint64_t texture_generation{};
+  std::uint64_t texture_content_hash{};
   bool through_coordinates{};
   bool cull_face{};
   bool front_face_clockwise{true};
@@ -207,5 +256,7 @@ void present_dialog(DialogModel model);
 std::optional<DialogResult> poll_dialog_result(std::uint64_t id);
 void dismiss_dialog(std::uint64_t id);
 bool dialog_visible();
+::refract::ge::CacheMetrics ge_cache_metrics();
+void reset_ge_cache_metrics();
 
 } // namespace refract::host

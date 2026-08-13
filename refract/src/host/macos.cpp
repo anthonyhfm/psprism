@@ -85,6 +85,7 @@ bool configure_audio_queue(AudioOutput& output) {
     AudioQueueDispose(output.queue, true);
     output.queue = nullptr;
     output.buffers.fill(nullptr);
+    output.engine.device_reset();
   }
 
   AudioStreamBasicDescription format{};
@@ -139,6 +140,14 @@ void backend_reset_audio_channel(std::uint32_t channel) {
   audio_output().engine.reset_channel(channel);
 }
 
+AudioTelemetry backend_audio_telemetry() {
+  return audio_output().engine.telemetry();
+}
+
+std::uint64_t backend_audio_clock_frames() {
+  return audio_output().engine.clock_frames();
+}
+
 } // namespace
 
 bool submit_audio(const std::int16_t* interleaved_stereo,
@@ -151,6 +160,8 @@ bool submit_audio(const std::int16_t* interleaved_stereo,
   auto& output = audio_output();
   set_audio_queue_callbacks(backend_queued_audio_frames,
                             backend_reset_audio_channel);
+  set_audio_telemetry_callback(backend_audio_telemetry);
+  set_audio_clock_frames_callback(backend_audio_clock_frames);
   if (!configure_audio_queue(output)) return false;
   const auto timeout = std::chrono::microseconds(
       audio_callback_timeout_microseconds(frame_count, sample_rate));

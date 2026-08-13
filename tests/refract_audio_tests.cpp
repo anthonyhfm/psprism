@@ -24,6 +24,7 @@ std::uint32_t submitted_channel{};
 bool submitted_blocking{};
 bool submit_succeeds{true};
 std::array<std::uint32_t, 9> fake_queued_frames{};
+refract::host::AudioTelemetry fake_audio_telemetry{};
 
 std::int16_t read_sample(const std::vector<std::uint8_t>& memory,
                          std::size_t offset) {
@@ -60,6 +61,13 @@ int main() {
         if (channel < fake_queued_frames.size())
           fake_queued_frames[channel] = 0U;
       });
+  refract::host::set_audio_telemetry_callback(
+      [] { return fake_audio_telemetry; });
+  refract::host::set_audio_clock_frames_callback(
+      [] { return fake_audio_telemetry.consumed_frames; });
+  fake_audio_telemetry.consumed_frames = 44100U;
+  CHECK(refract::host::audio_clock_frames() == 44100U);
+  CHECK(refract::host::audio_clock_microseconds() == 1000000U);
   CHECK(refract::host::audio_callback_timeout_microseconds(512U, 44100U) ==
         100000U);
   CHECK(refract::host::audio_callback_timeout_microseconds(2048U, 44100U) ==
@@ -102,6 +110,73 @@ int main() {
     CHECK(mixed[3] == 700);
     CHECK(engine.queued_frames(0U) == 0U);
     CHECK(engine.queued_frames(1U) == 0U);
+    const auto telemetry = engine.telemetry();
+    CHECK(telemetry.submitted_frames == 6U);
+    CHECK(telemetry.consumed_frames == 4U);
+    CHECK(telemetry.queued_frames == 0U);
+    CHECK(telemetry.peak_queued_frames == 4U);
+    CHECK(telemetry.callback_count == 2U);
+    CHECK(telemetry.overrun_submissions == 1U);
+    CHECK(telemetry.dropped_frames == 4U);
+    CHECK(telemetry.underrun_callbacks == 0U);
+  }
+
+  {
+    refract::host::AudioEngine engine;
+    constexpr std::array<std::uint32_t, 4> callback_sizes{64U, 128U, 257U,
+                                                          512U};
+    constexpr std::uint32_t submitted_per_iteration = 961U;
+    std::array<std::int16_t, submitted_per_iteration * 2U> source{};
+    source.fill(123);
+    std::array<std::int16_t, 512U * 2U> output{};
+    constexpr std::uint32_t iterations = 200U;
+    for (std::uint32_t iteration = 0U; iteration < iterations; ++iteration) {
+      CHECK(engine.submit(source.data(), submitted_per_iteration, 0U, false,
+                          std::chrono::microseconds(0)) ==
+            refract::host::AudioEngine::SubmitResult::submitted);
+      for (const auto callback_size : callback_sizes)
+        CHECK(engine.consume(output.data(), callback_size) == callback_size);
+    }
+    auto telemetry = engine.telemetry();
+    CHECK(telemetry.submitted_frames ==
+          static_cast<std::uint64_t>(submitted_per_iteration) * iterations);
+    CHECK(telemetry.consumed_frames == telemetry.submitted_frames);
+    CHECK(telemetry.callback_count == callback_sizes.size() * iterations);
+    CHECK(telemetry.underrun_callbacks == 0U);
+    CHECK(telemetry.queued_frames == 0U);
+    CHECK(telemetry.peak_queued_frames == submitted_per_iteration);
+
+    CHECK(engine.consume(output.data(), 257U) == 0U);
+    telemetry = engine.telemetry();
+    CHECK(telemetry.underrun_callbacks == 1U);
+    CHECK(telemetry.underrun_frames == 257U);
+
+    CHECK(engine.submit(source.data(), 100U, 0U, false,
+                        std::chrono::microseconds(0)) ==
+          refract::host::AudioEngine::SubmitResult::submitted);
+    CHECK(engine.submit(source.data(), 100U, 0U, false,
+                        std::chrono::microseconds(0)) ==
+          refract::host::AudioEngine::SubmitResult::busy);
+    CHECK(engine.submit(source.data(), 100U, 0U, true,
+                        std::chrono::microseconds(0)) ==
+          refract::host::AudioEngine::SubmitResult::timeout);
+    const auto clock_before_reset = engine.telemetry().consumed_frames;
+    engine.device_reset();
+    telemetry = engine.telemetry();
+    CHECK(telemetry.consumed_frames == clock_before_reset);
+    CHECK(telemetry.queued_frames == 0U);
+    CHECK(telemetry.overrun_submissions == 2U);
+    CHECK(telemetry.dropped_frames == 300U);
+    CHECK(telemetry.device_resets == 1U);
+
+    CHECK(engine.submit(source.data(), 100U, 0U, false,
+                        std::chrono::microseconds(0)) ==
+          refract::host::AudioEngine::SubmitResult::submitted);
+    CHECK(engine.submit(source.data(), 100U, 1U, false,
+                        std::chrono::microseconds(0)) ==
+          refract::host::AudioEngine::SubmitResult::submitted);
+    CHECK(engine.consume(output.data(), 100U) == 100U);
+    CHECK(engine.telemetry().consumed_frames == clock_before_reset + 100U);
   }
 
   std::array<std::uint8_t, 16> vag_block{};

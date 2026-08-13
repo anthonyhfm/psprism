@@ -3,6 +3,7 @@
 
 #include "host/host.hpp"
 #include "ge/ge_command.hpp"
+#include "ge/ge_cache.hpp"
 #include "ge/ge_draw_packet.hpp"
 #include "ge/ge_scheduler.hpp"
 #include "ge/ge_state.hpp"
@@ -145,6 +146,18 @@ int ge_component_tests() {
   CHECK(refract::ge::command_metadata(0xc5U).name == "CLUTFORMAT");
   CHECK(refract::ge::command_metadata(0xeaU).flow ==
         refract::ge::CommandFlow::transfer);
+  refract::ge::CacheMetricsAccumulator metrics;
+  metrics.record_texture(false, 64U);
+  metrics.record_texture(true);
+  metrics.record_pipeline(false);
+  metrics.record_pipeline(true);
+  metrics.record_vertex_buffer(false, 128U);
+  metrics.record_vertex_buffer(true, 256U);
+  const refract::ge::CacheMetrics expected_metrics{
+      1U, 1U, 64U, 1U, 1U, 1U, 1U, 384U};
+  CHECK(metrics.snapshot() == expected_metrics);
+  metrics.reset();
+  CHECK(metrics.snapshot() == refract::ge::CacheMetrics{});
   const auto float_xyz = refract::ge::VertexDecoder::layout(0x180U);
   CHECK(float_xyz.position_offset == 0U);
   CHECK(float_xyz.stride == 12U);

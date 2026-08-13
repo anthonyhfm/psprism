@@ -1,11 +1,16 @@
 #pragma once
 
+#include "host.hpp"
+
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <mutex>
+#include <utility>
 
 namespace refract::host {
 
@@ -24,7 +29,7 @@ class AudioEngine {
     timeout,
   };
 
-  AudioEngine() = default;
+  AudioEngine();
   AudioEngine(const AudioEngine&) = delete;
   AudioEngine& operator=(const AudioEngine&) = delete;
 
@@ -35,7 +40,14 @@ class AudioEngine {
   std::uint32_t consume(std::int16_t* interleaved_stereo,
                         std::uint32_t frame_count) noexcept;
   [[nodiscard]] std::uint32_t queued_frames(std::uint32_t channel) const;
+  [[nodiscard]] AudioTelemetry telemetry() const noexcept;
+  [[nodiscard]] std::uint64_t clock_frames() const noexcept {
+    return consumed_frames_.load(std::memory_order_relaxed);
+  }
   void reset_channel(std::uint32_t channel);
+  // A host-device reset discards queued data while preserving the monotonic
+  // master clock and cumulative telemetry.
+  void device_reset();
   void reset();
 
  private:
@@ -47,7 +59,21 @@ class AudioEngine {
     std::size_t queued_frames{};
   };
 
-  std::array<Channel, channel_count> channels_{};
+  std::unique_ptr<std::array<Channel, channel_count>> channels_;
+  std::atomic<std::uint64_t> submitted_frames_{};
+  std::atomic<std::uint64_t> consumed_frames_{};
+  std::atomic<std::uint64_t> queued_frames_{};
+  std::atomic<std::uint64_t> peak_queued_frames_{};
+  std::atomic<std::uint64_t> callback_count_{};
+  std::atomic<std::uint64_t> underrun_callbacks_{};
+  std::atomic<std::uint64_t> underrun_frames_{};
+  std::atomic<std::uint64_t> overrun_submissions_{};
+  std::atomic<std::uint64_t> dropped_frames_{};
+  std::atomic<std::uint64_t> rejected_submissions_{};
+  std::atomic<std::uint64_t> callback_lock_contentions_{};
+  std::atomic<std::uint64_t> device_resets_{};
 };
+
+static_assert(noexcept(std::declval<AudioEngine&>().consume(nullptr, 0U)));
 
 } // namespace refract::host

@@ -10,6 +10,15 @@
 
 namespace refract::ge {
 
+inline std::uint64_t content_hash(std::span<const std::uint8_t> bytes) {
+  std::uint64_t hash = 0xcbf29ce484222325ULL;
+  for (const auto byte : bytes) {
+    hash ^= byte;
+    hash *= 0x100000001b3ULL;
+  }
+  return hash;
+}
+
 struct DrawPacket {
   std::uint32_t primitive_type{};
   std::vector<host::GeometryVertex> vertices;
@@ -66,6 +75,8 @@ inline std::uint64_t draw_packet_hash(const DrawPacket& packet) {
   add_u32(static_cast<std::uint32_t>(state.texture_lod_bias));
   add_u32(static_cast<std::uint32_t>(state.texture_generation));
   add_u32(static_cast<std::uint32_t>(state.texture_generation >> 32U));
+  add_u32(static_cast<std::uint32_t>(state.texture_content_hash));
+  add_u32(static_cast<std::uint32_t>(state.texture_content_hash >> 32U));
   add_u32(state.through_coordinates);
   add_u32(state.cull_face);
   add_u32(state.front_face_clockwise);
