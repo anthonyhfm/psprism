@@ -66,6 +66,13 @@ make macos-run   # build and execute the native Release app
 make clean       # remove compiler products
 ```
 
+The native macOS build discovers FFmpeg from the system and common Homebrew
+prefixes. Install it with `brew install ffmpeg`; the generated project links
+`avcodec`, `avformat`, `avutil` and `swscale` for PSMF/H.264 cutscenes. CMake
+fails during configuration when `REFRACT_USE_FFMPEG=ON` and those development
+libraries are unavailable, instead of producing a build with silently broken
+video. Use `-DREFRACT_USE_FFMPEG=OFF` only when cutscene decoding is not needed.
+
 For ISO exports, the PSP targets create a lightweight run tree under
 `.psprecomp/run`. Game assets are symlinked from `disc/`, while the generated
 PRX and `PARAM.SFO` are copied into place. This avoids duplicating the full

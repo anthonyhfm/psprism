@@ -11,17 +11,25 @@ The format is line-oriented. Addresses accept the usual C-style `0x` prefix.
 Blank lines and lines beginning with `#` are ignored.
 
 ```text
-# psprecomp-ghidra-map-v1
+# psprecomp-ghidra-map-v2
 entry 0x00000000
-function 0x00000000 module_start
-function 0x00000120 update_scene
+function_range 0x00000000 0x00000120 module_start
+function_range 0x00000120 0x00000400 update_scene
+block 0x00000180
+gp 0x00000120 0x08900000
+t9 0x00000120 0x00000120
 overlay 0x00000120
 exclude 0x00000400 0x00000440
 ```
 
 - `entry ADDRESS` sets the initial Guest PC.
-- `function ADDRESS [NAME]` records a discovered function start and optional
-  symbol used for PSP import resolution.
+- `function_range BEGIN END [NAME]` records a half-open function range and
+  optional symbol used for PSP import resolution. Version-1
+  `function ADDRESS [NAME]` records remain accepted for backward compatibility.
+- `block ADDRESS` records a valid control-flow entry. Indirect dispatch can use
+  these entries without treating every aligned word as a block start.
+- `gp FUNCTION_ADDRESS VALUE` and `t9 FUNCTION_ADDRESS VALUE` preserve
+  entry-register facts discovered by analysis.
 - `overlay ADDRESS` selects a mapped function for the hybrid PSP build. Its
   `func_ADDRESS.cpp` body is compiled back to Allegrex and detours only that
   Guest entry point; unselected functions continue executing from the original

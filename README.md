@@ -76,15 +76,15 @@ For native execution on host platforms, `psprism` implements native host bridges
 |---|---|:---:|---|
 | `sceDisplay` | Display & VBlank | ✅ | Framebuffer presentation, refresh timing, frame counters |
 | `sceCtrl` | Controller & Input | ✅ | Native gamepads, analog stick input, keyboard fallback |
-| `sceGe` | Graphics Engine | 🟡 | Geometry pipelines, textures, CLUT, depth, blending, color tests |
+| `sceGe` | Graphics Engine | 🟡 | Scheduled display lists, replay traces, complete PSP texture/CLUT formats, depth targets, blending and color tests |
 | `sceKernel` | Threading & Sync | 🟡 | Threads, guest stacks, semaphores, event flags, memory pools |
 | `sceIo` | Filesystem & I/O | 🟡 | Disc ISO reading, virtual MemoryStick paths, sync/async operations |
 | `sceUtility` | OS Utilities | 🟡 | On-screen keyboard (OSK), message dialogs, savedata UI |
 | `sceUmd` | UMD Drive | 🟡 | Disc state detection, drive events, media checks |
 | `sceRtc` | Real-Time Clock | 🟡 | Microsecond tick conversion, system timers |
 | `scePower` / `sceImpose` | System State | 🟡 | Battery state, volume settings, regional configuration stubs |
-| `sceAudio` / `sceSas` / `sceAtrac` | Audio Subsystem | 🟡 | Native PCM output, SAS VAG/PCM mixing and streamed ATRAC3/ATRAC3+ decoding; advanced effects remain incomplete |
-| `sceMpeg` | Video / PMF Pipeline | 🟡 | MPEG lifecycle, ringbuffers and transition handling; full AVC video decoding remains incomplete |
+| `sceAudio` / `sceSas` / `sceAtrac` | Audio Subsystem | 🟡 | Central native mixer, queued blocking output, VAG/PCM SAS mixing with ADSR, and sample-accurate streamed ATRAC3/ATRAC3+ decoding; advanced effects remain incomplete |
+| `sceMpeg` | Video / PMF Pipeline | 🟡 | PSMF/PES demux, ringbuffers, FFmpeg-backed H.264 decode, ATRAC3+ audio and PSP framebuffer conversion; seeking and per-title edge cases remain incomplete |
 
 ---
 
@@ -116,6 +116,17 @@ make psp
 make macos
 make macos-run
 ```
+
+Native PMF cutscenes use the system FFmpeg libraries (`avcodec`, `avformat`,
+`avutil` and `swscale`). On macOS, install them before configuring a generated
+project:
+
+```bash
+brew install ffmpeg
+```
+
+Set `-DREFRACT_USE_FFMPEG=OFF` only for a build that intentionally omits native
+H.264 cutscene decoding.
 
 ---
 
