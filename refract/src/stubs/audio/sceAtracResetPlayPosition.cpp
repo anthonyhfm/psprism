@@ -9,19 +9,10 @@ void sceAtracResetPlayPosition(Implementation& implementation, psprecomp::State&
     return;
   }
   std::lock_guard lock(decoder->decoder_mutex);
-  const auto frame = decoder->track.samples_per_frame() == 0U
-                         ? 0U
-                         : state.gpr[5] / decoder->track.samples_per_frame();
-  const auto offset = static_cast<std::uint64_t>(decoder->track.data_offset) +
-                      static_cast<std::uint64_t>(frame) *
-                          decoder->track.block_align;
-  if (offset >= decoder->encoded.size()) {
+  if (!decoder->seek(state.gpr[5])) {
     state.gpr[2] = atrac_state::bad_data;
     return;
   }
-  decoder->rewind();
-  decoder->data_cursor = static_cast<std::uint32_t>(offset);
-  decoder->decoded_samples = state.gpr[5];
   state.gpr[2] = 0U;
 #else
   (void)implementation;

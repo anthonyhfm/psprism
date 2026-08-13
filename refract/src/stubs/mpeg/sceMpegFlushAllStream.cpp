@@ -7,6 +7,9 @@ void sceMpegFlushAllStream(Implementation& implementation, psprecomp::State& sta
     ringbuffer->packets_write_position = 0;
     ringbuffer->packets_available = 0;
   }
+  if (auto engine = mpeg_state::engine_from_mpeg(state.gpr[4])) {
+    engine->flush();
+  }
   state.gpr[2] = 0U;
 #else
   (void)implementation;

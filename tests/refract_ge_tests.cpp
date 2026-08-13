@@ -2,6 +2,10 @@
 #include <refract/refract.hpp>
 
 #include "host/host.hpp"
+#include "ge/ge_command.hpp"
+#include "ge/ge_scheduler.hpp"
+#include "ge/ge_state.hpp"
+#include "ge/ge_vertex_decoder.hpp"
 
 #include <algorithm>
 #include <array>
@@ -116,6 +120,65 @@ void enqueue(psprecomp::State& state, const DisplayList& list,
   refract::pspsdk::sceGeListEnQueue(state);
 }
 
+int ge_component_tests() {
+  CHECK(refract::ge::command_metadata(0x04U).flow ==
+        refract::ge::CommandFlow::draw);
+  CHECK(refract::ge::command_metadata(0x0aU).name == "CALL");
+  const auto float_xyz = refract::ge::VertexDecoder::layout(0x180U);
+  CHECK(float_xyz.position_offset == 0U);
+  CHECK(float_xyz.stride == 12U);
+  const auto weighted =
+      refract::ge::VertexDecoder::layout(0x00800180U | (2U << 9U));
+  CHECK(weighted.weight_count == 1U);
+  CHECK(weighted.position_offset % 4U == 0U);
+
+  refract::ge::Scheduler scheduler;
+  const auto tail = scheduler.enqueue(0x1000U, 0x1010U, 3U, false);
+  const auto head = scheduler.enqueue(0x2000U, 0U, 4U, true);
+  CHECK(scheduler.status(tail) == refract::ge::ListStatus::queued);
+  CHECK(scheduler.draw_status() == refract::ge::ListStatus::queued);
+  scheduler.begin(head);
+  CHECK(scheduler.status(head) == refract::ge::ListStatus::drawing);
+  scheduler.stall(head, 0x2008U, 0x2008U);
+  CHECK(scheduler.status(head) == refract::ge::ListStatus::stalled);
+  CHECK(scheduler.break_lists(0U) == head);
+  CHECK(scheduler.status(head) == refract::ge::ListStatus::paused);
+  CHECK(scheduler.continue_lists() == head);
+  scheduler.finish(head, 0x2010U, refract::ge::ListState::completed);
+  CHECK(scheduler.status(head) == refract::ge::ListStatus::completed);
+
+  refract::ge::Trace trace;
+  trace.set_enabled(true);
+  trace.record(7U, 0x08801000U, command(0x04U, 3U));
+  trace.record(7U, 0x08801004U, command(0x0cU, 0U));
+  const auto bytes = trace.serialize();
+  refract::ge::Trace decoded;
+  CHECK(refract::ge::Trace::deserialize(bytes, decoded));
+  CHECK(decoded.records().size() == 2U);
+  CHECK(decoded.records()[0] == trace.records()[0]);
+  auto corrupt = bytes;
+  corrupt[0] ^= 1U;
+  CHECK(!refract::ge::Trace::deserialize(corrupt, decoded));
+
+  refract::ge::State source;
+  source.commands[0xd5U] = command(0xd5U, 0x12345U);
+  source.world_matrix[3] = 42.5F;
+  source.vertex_address = 0x08801234U;
+  source.address_translation_width = 0x400U;
+  std::array<std::uint32_t, refract::ge::context_word_count> context{};
+  source.save(context);
+  refract::ge::State restored;
+  restored.restore(context);
+  CHECK(restored.commands == source.commands);
+  CHECK(restored.world_matrix == source.world_matrix);
+  CHECK(restored.vertex_address == source.vertex_address);
+  CHECK(restored.address_translation_width == 0x400U);
+  source.commands[0x3bU] = command(0x3bU, 0x654321U);
+  CHECK(source.read_command(0x3bU) == command(0x3bU, 0U));
+  CHECK(source.read_command(256U) == 0U);
+  return 0;
+}
+
 } // namespace
 
 namespace refract::host {
@@ -186,6 +249,7 @@ bool dialog_visible() { return false; }
 } // namespace refract::host
 
 int main() {
+  CHECK(ge_component_tests() == 0);
   constexpr std::uint32_t memory_base = 0x08800000U;
   constexpr std::uint32_t list_address = memory_base + 0x1000U;
   constexpr std::uint32_t vertex_address = memory_base + 0x2000U;
@@ -290,6 +354,13 @@ int main() {
   CHECK(present_count == 0U);
   CHECK(pending_primitives.size() == 1U);
   CHECK(presented_primitives.empty());
+  state.gpr[4] = list_id;
+  state.gpr[5] = 1U;
+  refract::pspsdk::sceGeListSync(state);
+  CHECK(state.gpr[2] == 3U); // PSP_GE_LIST_STALL_REACHED.
+  state.gpr[4] = 0x04U;
+  refract::pspsdk::sceGeGetCmd(state);
+  CHECK(state.gpr[2] == command(0x04U, 1U));
 
   state.gpr[4] = list_id;
   state.gpr[5] = 0U;
@@ -300,6 +371,33 @@ int main() {
   CHECK(present_count == 1U);
   CHECK(pending_primitives.empty());
   CHECK(presented_primitives.size() == 2U);
+  state.gpr[4] = list_id;
+  state.gpr[5] = 1U;
+  refract::pspsdk::sceGeListSync(state);
+  CHECK(state.gpr[2] == 0U);
+  state.gpr[4] = 1U;
+  refract::pspsdk::sceGeDrawSync(state);
+  CHECK(state.gpr[2] == 0U);
+
+  constexpr std::uint32_t ge_context_address = memory_base + 0x8000U;
+  state.gpr[4] = 0x400U;
+  refract::pspsdk::sceGeEdramSetAddrTranslation(state);
+  CHECK(state.gpr[2] == 0U);
+  state.gpr[4] = ge_context_address;
+  refract::pspsdk::sceGeSaveContext(state);
+  CHECK(state.gpr[2] == 0U);
+  state.gpr[4] = 0x800U;
+  refract::pspsdk::sceGeEdramSetAddrTranslation(state);
+  CHECK(state.gpr[2] == 0x400U);
+  state.gpr[4] = ge_context_address;
+  refract::pspsdk::sceGeRestoreContext(state);
+  CHECK(state.gpr[2] == 0U);
+  state.gpr[4] = 0U;
+  refract::pspsdk::sceGeEdramSetAddrTranslation(state);
+  CHECK(state.gpr[2] == 0x400U);
+  state.gpr[4] = 0x300U;
+  refract::pspsdk::sceGeEdramSetAddrTranslation(state);
+  CHECK(state.gpr[2] != 0U);
   for (const auto& primitive : presented_primitives) {
     CHECK(primitive.vertex_count == 1U);
     CHECK(!primitive.has_texture);

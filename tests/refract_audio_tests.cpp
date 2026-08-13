@@ -1,11 +1,13 @@
 #include <psprecomp/runtime.hpp>
 
 #include "host/host.hpp"
+#include "host/audio_engine.hpp"
 #include "stubs/audio/audio_state.hpp"
 #include "stubs/audio/sas_state.hpp"
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <vector>
@@ -20,6 +22,8 @@ namespace {
 std::vector<std::int16_t> submitted_audio;
 std::uint32_t submitted_channel{};
 bool submitted_blocking{};
+bool submit_succeeds{true};
+std::array<std::uint32_t, 9> fake_queued_frames{};
 
 std::int16_t read_sample(const std::vector<std::uint8_t>& memory,
                          std::size_t offset) {
@@ -37,7 +41,8 @@ bool submit_audio(const std::int16_t* samples, std::uint32_t frame_count,
   submitted_audio.assign(samples, samples + frame_count * 2U);
   submitted_channel = channel;
   submitted_blocking = blocking;
-  return true;
+  if (submit_succeeds) fake_queued_frames[channel] = frame_count;
+  return submit_succeeds;
 }
 
 void sleep_microseconds(std::uint32_t) {}
@@ -45,6 +50,16 @@ void sleep_microseconds(std::uint32_t) {}
 } // namespace refract::host
 
 int main() {
+  refract::host::set_audio_queue_callbacks(
+      [](std::uint32_t channel) {
+        return channel < fake_queued_frames.size()
+                   ? fake_queued_frames[channel]
+                   : 0U;
+      },
+      [](std::uint32_t channel) {
+        if (channel < fake_queued_frames.size())
+          fake_queued_frames[channel] = 0U;
+      });
   CHECK(refract::host::audio_callback_timeout_microseconds(512U, 44100U) ==
         100000U);
   CHECK(refract::host::audio_callback_timeout_microseconds(2048U, 44100U) ==
@@ -60,6 +75,34 @@ int main() {
   CHECK(audio_state::scale_sample(-16384, audio_state::maximum_volume / 2U) ==
         -8192);
   CHECK(audio_state::scale_sample(32767, 0U) == 0);
+
+  {
+    refract::host::AudioEngine engine;
+    const std::array<std::int16_t, 8> first{100, 200, 300, 400,
+                                            500, 600, 700, 800};
+    CHECK(engine.submit(first.data(), 4U, 0U, false,
+                        std::chrono::microseconds(0)) ==
+          refract::host::AudioEngine::SubmitResult::submitted);
+    CHECK(engine.queued_frames(0U) == 4U);
+    CHECK(engine.submit(first.data(), 4U, 0U, false,
+                        std::chrono::microseconds(0)) ==
+          refract::host::AudioEngine::SubmitResult::busy);
+    std::array<std::int16_t, 4> mixed{};
+    CHECK(engine.consume(mixed.data(), 2U) == 2U);
+    CHECK((mixed == std::array<std::int16_t, 4>{100, 200, 300, 400}));
+    CHECK(engine.queued_frames(0U) == 2U);
+    const std::array<std::int16_t, 4> second{32767, -32768, 100, -100};
+    CHECK(engine.submit(second.data(), 2U, 1U, false,
+                        std::chrono::microseconds(0)) ==
+          refract::host::AudioEngine::SubmitResult::submitted);
+    CHECK(engine.consume(mixed.data(), 2U) == 2U);
+    CHECK(mixed[0] == 32767);
+    CHECK(mixed[1] == -32168);
+    CHECK(mixed[2] == 800);
+    CHECK(mixed[3] == 700);
+    CHECK(engine.queued_frames(0U) == 0U);
+    CHECK(engine.queued_frames(1U) == 0U);
+  }
 
   std::array<std::uint8_t, 16> vag_block{};
   vag_block[1] = 1U;
@@ -106,6 +149,12 @@ int main() {
   CHECK(submitted_audio[1] == -8192);
   CHECK(submitted_channel == 0U);
   CHECK(!submitted_blocking);
+  CHECK(audio_state::rest_length(0U) == 1U);
+  submit_succeeds = false;
+  CHECK(audio_state::output(state, 0U, audio_state::maximum_volume,
+                            audio_state::maximum_volume, pcm_address, false) ==
+        audio_state::channel_busy);
+  submit_succeeds = true;
   CHECK(audio_state::output(state, 8U, audio_state::maximum_volume,
                             audio_state::maximum_volume, pcm_address, false) ==
         audio_state::invalid_channel);
@@ -126,6 +175,20 @@ int main() {
                             false) == 2U);
   CHECK((submitted_audio ==
          std::vector<std::int16_t>{1000, 500, -2000, -1000}));
+
+  CHECK(audio_state::reserve_output2(16U) == audio_state::invalid_size);
+  CHECK(audio_state::reserve_output2(64U) == 0U);
+  CHECK(audio_state::reserve_output2(64U) == audio_state::already_reserved);
+  CHECK(audio_state::output_output2(state, audio_state::maximum_volume,
+                                    pcm_address, true) == 64U);
+  CHECK(submitted_channel == audio_state::output2_channel);
+  CHECK(submitted_blocking);
+  CHECK(audio_state::output2_rest_length() == 64U);
+  CHECK(audio_state::release_output2() == audio_state::already_reserved);
+  fake_queued_frames[audio_state::output2_channel] = 0U;
+  CHECK(audio_state::change_output2_length(32U) == 0U);
+  CHECK(audio_state::release_output2() == 0U);
+  CHECK(audio_state::output2_rest_length() == audio_state::not_reserved);
 
   sas_state::reset_for_tests();
   CHECK(sas_state::initialize(state, core_address, 64U, 32U, 0U, 44100U) ==
@@ -210,5 +273,49 @@ int main() {
   CHECK(sas_state::set_pause(core_address, 1U << 2U, false) == 0U);
   CHECK(sas_state::key_off(core_address, 2) == 0U);
   CHECK((sas_state::end_flags(core_address) & (1U << 2U)) != 0U);
+
+  const std::array<std::int16_t, 3> ramp_pcm{0, 1000, 2000};
+  std::memcpy(memory.data() + pcm_voice_address - memory_base, ramp_pcm.data(),
+              sizeof(ramp_pcm));
+  sas_state::reset_for_tests();
+  CHECK(sas_state::initialize(state, core_address, 64U, 32U, 0U, 44100U) ==
+        0U);
+  CHECK(sas_state::set_voice_pcm(core_address, 4, state, pcm_voice_address,
+                                 static_cast<std::int32_t>(ramp_pcm.size()),
+                                 -1) == 0U);
+  CHECK(sas_state::set_pitch(core_address, 4, 0x0800U) == 0U);
+  CHECK(sas_state::key_on(core_address, 4) == 0U);
+  CHECK(sas_state::mix(state, core_address, output_address, false) == 0U);
+  CHECK(read_sample(memory, output_offset) == 0);
+  CHECK(read_sample(memory, output_offset + 4U) == 500);
+  CHECK(read_sample(memory, output_offset + 8U) == 1000);
+
+  const std::array<std::int16_t, 128> envelope_pcm = [] {
+    std::array<std::int16_t, 128> result{};
+    result.fill(1000);
+    return result;
+  }();
+  std::memcpy(memory.data() + pcm_voice_address - memory_base,
+              envelope_pcm.data(), sizeof(envelope_pcm));
+  sas_state::reset_for_tests();
+  CHECK(sas_state::initialize(state, core_address, 64U, 32U, 0U, 44100U) ==
+        0U);
+  CHECK(sas_state::set_voice_pcm(core_address, 5, state, pcm_voice_address,
+                                 static_cast<std::int32_t>(envelope_pcm.size()),
+                                 -1) == 0U);
+  CHECK(sas_state::set_adsr_rates(
+            core_address, 5, 0xfU,
+            std::array<std::uint32_t, 4>{sas_state::max_envelope_height, 0U,
+                                         0U,
+                                         sas_state::max_envelope_height / 2U}) ==
+        0U);
+  CHECK(sas_state::key_on(core_address, 5) == 0U);
+  CHECK(sas_state::mix(state, core_address, output_address, false) == 0U);
+  CHECK(read_sample(memory, output_offset) == 1000);
+  CHECK(sas_state::key_off(core_address, 5) == 0U);
+  CHECK(sas_state::mix(state, core_address, output_address, false) == 0U);
+  CHECK(read_sample(memory, output_offset) == 500);
+  CHECK(read_sample(memory, output_offset + 4U) == 0);
+  CHECK((sas_state::end_flags(core_address) & (1U << 5U)) != 0U);
   return 0;
 }

@@ -1,13 +1,16 @@
 void sceMpegRingbufferAvailableSize(Implementation& implementation, psprecomp::State& state) {
 #if !defined(__PSP__)
   (void)implementation;
-  const auto* ringbuffer =
+  auto* ringbuffer =
       mpeg_state::guest_pointer<mpeg_state::Ringbuffer>(state, state.gpr[4]);
   if (ringbuffer == nullptr || ringbuffer->packets < 0 ||
       ringbuffer->packets_available < 0 ||
       ringbuffer->packets_available > ringbuffer->packets) {
     state.gpr[2] = 0xffffffffU;
     return;
+  }
+  if (const auto engine = mpeg_state::engine_from_mpeg(ringbuffer->mpeg)) {
+    mpeg_state::update_ringbuffer_usage(*ringbuffer, *engine);
   }
   state.gpr[2] = static_cast<std::uint32_t>(
       ringbuffer->packets - ringbuffer->packets_available);

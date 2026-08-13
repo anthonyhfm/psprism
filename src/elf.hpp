@@ -69,10 +69,26 @@ struct FunctionSymbol {
     std::string name;
 };
 
+struct FunctionRange {
+    std::uint32_t begin{};
+    std::uint32_t end{};
+    std::string name;
+};
+
+struct RegisterMetadata {
+    std::uint32_t address{};
+    std::uint32_t value{};
+};
+
 struct CodeMap {
+    std::uint32_t version{1U};
     std::uint32_t entry{};
     std::vector<std::uint32_t> function_starts;
+    std::vector<FunctionRange> function_ranges;
     std::vector<FunctionSymbol> function_symbols;
+    std::vector<std::uint32_t> block_entries;
+    std::vector<RegisterMetadata> gp_values;
+    std::vector<RegisterMetadata> t9_values;
     // Functions selected for the PSP hybrid overlay path. Their translated
     // func_*.cpp bodies are compiled for Allegrex and detour only these entry
     // points; every other function continues to execute from the Guest image.
@@ -81,6 +97,8 @@ struct CodeMap {
 
     [[nodiscard]] bool contains(std::uint32_t address) const;
     [[nodiscard]] const std::string* symbol_at(std::uint32_t address) const;
+    [[nodiscard]] const FunctionRange* function_containing(
+        std::uint32_t address) const;
 };
 
 ElfImage load_elf(const std::filesystem::path& path);

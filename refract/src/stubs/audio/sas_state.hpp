@@ -39,6 +39,15 @@ constexpr std::uint32_t not_initialized = 0x80420100U;
 constexpr std::size_t core_size = 3616U;
 constexpr std::uint32_t max_voices = 32U;
 constexpr std::uint32_t max_volume = 0x1000U;
+constexpr std::uint32_t max_envelope_height = 0x40000000U;
+
+enum class EnvelopePhase {
+  off,
+  attack,
+  decay,
+  sustain,
+  release,
+};
 
 struct Voice {
   bool configured{};
@@ -51,8 +60,17 @@ struct Voice {
   std::uint32_t envelope_height{};
   std::int32_t left_volume{static_cast<std::int32_t>(max_volume)};
   std::int32_t right_volume{static_cast<std::int32_t>(max_volume)};
+  std::int32_t effect_left_volume{};
+  std::int32_t effect_right_volume{};
   std::uint64_t position{};
   std::size_t loop_start{};
+  bool envelope_configured{};
+  EnvelopePhase envelope_phase{EnvelopePhase::off};
+  std::uint32_t attack_rate{};
+  std::uint32_t decay_rate{};
+  std::uint32_t sustain_rate{};
+  std::uint32_t release_rate{};
+  std::uint32_t sustain_level{max_envelope_height};
   std::vector<std::int16_t> samples;
 };
 
@@ -60,6 +78,7 @@ struct Core {
   std::uint32_t grain{};
   std::uint32_t output_mode{};
   std::array<Voice, max_voices> voices{};
+  std::array<std::int64_t, 2048U * 4U> mix_buffer{};
 };
 
 inline std::mutex& mutex() {
@@ -85,6 +104,50 @@ inline std::int16_t clamp_sample(std::int64_t sample) {
   return static_cast<std::int16_t>(std::clamp<std::int64_t>(
       sample, std::numeric_limits<std::int16_t>::min(),
       std::numeric_limits<std::int16_t>::max()));
+}
+
+inline void advance_envelope(Voice& voice) {
+  if (!voice.envelope_configured) {
+    voice.envelope_height = max_envelope_height;
+    return;
+  }
+  const auto subtract = [](std::uint32_t value, std::uint32_t amount) {
+    return amount >= value ? 0U : value - amount;
+  };
+  switch (voice.envelope_phase) {
+  case EnvelopePhase::attack:
+    voice.envelope_height = static_cast<std::uint32_t>(std::min<std::uint64_t>(
+        max_envelope_height,
+        static_cast<std::uint64_t>(voice.envelope_height) +
+            voice.attack_rate));
+    if (voice.envelope_height >= max_envelope_height)
+      voice.envelope_phase = EnvelopePhase::decay;
+    break;
+  case EnvelopePhase::decay:
+    voice.envelope_height =
+        subtract(voice.envelope_height, voice.decay_rate);
+    if (voice.envelope_height <= voice.sustain_level) {
+      voice.envelope_height = voice.sustain_level;
+      voice.envelope_phase = EnvelopePhase::sustain;
+    }
+    break;
+  case EnvelopePhase::sustain:
+    voice.envelope_height =
+        subtract(voice.envelope_height, voice.sustain_rate);
+    break;
+  case EnvelopePhase::release:
+    voice.envelope_height =
+        subtract(voice.envelope_height, voice.release_rate);
+    if (voice.envelope_height == 0U) {
+      voice.envelope_phase = EnvelopePhase::off;
+      voice.playing = false;
+      voice.remaining_samples = 0U;
+    }
+    break;
+  case EnvelopePhase::off:
+    voice.envelope_height = 0U;
+    break;
+  }
 }
 
 inline std::vector<std::int16_t> decode_vag(const std::uint8_t* source,
@@ -176,7 +239,8 @@ inline std::uint32_t mix(psprecomp::State& state, std::uint32_t core_address,
   const auto bytes = sample_total * sizeof(std::int16_t);
   auto* output = psprecomp::mapped_address(state, output_address, bytes);
   if (output == nullptr) return invalid_parameter;
-  std::vector<std::int64_t> mixed(sample_total);
+  auto* mixed = core->mix_buffer.data();
+  std::fill_n(mixed, sample_total, 0);
   if (preserve) {
     for (std::size_t index = 0; index < sample_total; ++index) {
       std::int16_t sample{};
@@ -199,13 +263,39 @@ inline std::uint32_t mix(psprecomp::State& state, std::uint32_t core_address,
         sample_index = std::min(voice.loop_start, voice.samples.size() - 1U);
         voice.position = static_cast<std::uint64_t>(sample_index) << 12U;
       }
-      const auto sample = voice.samples[sample_index];
+      const auto next_index = sample_index + 1U < voice.samples.size()
+                                  ? sample_index + 1U
+                                  : (voice.loop ? std::min(
+                                                     voice.loop_start,
+                                                     voice.samples.size() - 1U)
+                                                : sample_index);
+      const auto fraction = static_cast<std::uint32_t>(voice.position & 0xfffU);
+      const auto first_sample =
+          static_cast<std::int32_t>(voice.samples[sample_index]);
+      const auto second_sample =
+          static_cast<std::int32_t>(voice.samples[next_index]);
+      const auto interpolated =
+          first_sample + ((second_sample - first_sample) *
+                          static_cast<std::int32_t>(fraction) >>
+                          12U);
+      advance_envelope(voice);
+      const auto sample = static_cast<std::int32_t>(
+          static_cast<std::int64_t>(interpolated) * voice.envelope_height /
+          max_envelope_height);
       mixed[frame * channels] +=
           static_cast<std::int32_t>(sample) * voice.left_volume /
           static_cast<std::int32_t>(max_volume);
       mixed[frame * channels + 1U] +=
           static_cast<std::int32_t>(sample) * voice.right_volume /
           static_cast<std::int32_t>(max_volume);
+      if (channels == 4U) {
+        mixed[frame * channels + 2U] +=
+            sample * voice.effect_left_volume /
+            static_cast<std::int32_t>(max_volume);
+        mixed[frame * channels + 3U] +=
+            sample * voice.effect_right_volume /
+            static_cast<std::int32_t>(max_volume);
+      }
       voice.position += voice.pitch;
     }
     const auto position = static_cast<std::size_t>(voice.position >> 12U);
@@ -313,7 +403,11 @@ inline std::uint32_t key_on(std::uint32_t core_address,
     voice.position = 0U;
     voice.remaining_samples = voice.samples.size();
     voice.playing = true;
-    voice.envelope_height = 0x40000000U;
+    voice.envelope_height =
+        voice.envelope_configured ? 0U : max_envelope_height;
+    voice.envelope_phase = voice.envelope_configured
+                               ? EnvelopePhase::attack
+                               : EnvelopePhase::sustain;
     return 0U;
   });
 }
@@ -322,8 +416,13 @@ inline std::uint32_t key_off(std::uint32_t core_address,
                              std::int32_t voice_index) {
   return update_voice(core_address, voice_index, [](Voice& voice) {
     if (voice.paused || !voice.playing) return voice_paused;
-    voice.playing = false;
-    voice.envelope_height = 0U;
+    if (voice.envelope_configured && voice.release_rate != 0U) {
+      voice.envelope_phase = EnvelopePhase::release;
+    } else {
+      voice.playing = false;
+      voice.envelope_height = 0U;
+      voice.envelope_phase = EnvelopePhase::off;
+    }
     return 0U;
   });
 }
@@ -355,6 +454,32 @@ inline std::uint32_t set_volume(std::uint32_t core_address,
   return update_voice(core_address, voice_index, [&](Voice& voice) {
     voice.left_volume = left;
     voice.right_volume = right;
+    voice.effect_left_volume = effect_left;
+    voice.effect_right_volume = effect_right;
+    return 0U;
+  });
+}
+
+inline std::uint32_t set_adsr_rates(std::uint32_t core_address,
+                                    std::int32_t voice_index,
+                                    std::uint32_t mask,
+                                    const std::array<std::uint32_t, 4>& rates) {
+  return update_voice(core_address, voice_index, [&](Voice& voice) {
+    if ((mask & 1U) != 0U) voice.attack_rate = rates[0];
+    if ((mask & 2U) != 0U) voice.decay_rate = rates[1];
+    if ((mask & 4U) != 0U) voice.sustain_rate = rates[2];
+    if ((mask & 8U) != 0U) voice.release_rate = rates[3];
+    voice.envelope_configured = true;
+    return 0U;
+  });
+}
+
+inline std::uint32_t set_sustain_level(std::uint32_t core_address,
+                                       std::int32_t voice_index,
+                                       std::uint32_t level) {
+  return update_voice(core_address, voice_index, [&](Voice& voice) {
+    voice.sustain_level = level;
+    voice.envelope_configured = true;
     return 0U;
   });
 }

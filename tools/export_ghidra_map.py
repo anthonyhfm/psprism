@@ -16,6 +16,49 @@ def get_json(server: str, path: str, **params: object) -> object:
         return json.load(response)
 
 
+def address_value(value: object) -> int:
+    """Accept the hex strings used by Ghidra MCP and ordinary JSON numbers."""
+    if isinstance(value, int):
+        return value
+    text = str(value).strip()
+    if ":" in text:
+        text = text.rsplit(":", 1)[1]
+    return int(text, 16 if not text.lower().startswith("0x") else 0)
+
+
+def function_end(function: dict[str, object], begin: int) -> int | None:
+    """Read enhanced-function response variants without depending on one MCP build."""
+    for key in ("bodyEnd", "endAddress", "end"):
+        if function.get(key) not in (None, ""):
+            end = address_value(function[key]) + 1
+            return (end + 3) & ~3
+    for key in ("bodySize", "size", "length"):
+        if function.get(key) not in (None, ""):
+            size = int(str(function[key]), 0)
+            return (begin + size + 3) & ~3
+    return None
+
+
+def nested_addresses(value: object) -> set[int]:
+    result: set[int] = set()
+    if isinstance(value, list):
+        for item in value:
+            result.update(nested_addresses(item))
+    elif isinstance(value, dict):
+        for key in ("address", "start", "entry", "target"):
+            if key in value:
+                try:
+                    result.add(address_value(value[key]))
+                except (TypeError, ValueError):
+                    pass
+    else:
+        try:
+            result.add(address_value(value))
+        except (TypeError, ValueError):
+            pass
+    return result
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--server", default="http://127.0.0.1:8089")
@@ -59,19 +102,45 @@ def main() -> None:
         f"{args.server.rstrip('/')}/get_entry_points?"
         + urllib.parse.urlencode({"program": args.program})
     ).read().decode("utf-8")
-    entry_address = entry_text.split("@", 1)[1].split("[", 1)[0].strip()
+    entry_address = address_value(
+        entry_text.split("@", 1)[1].split("[", 1)[0].strip()
+    )
 
     lines = [
-        "# psprecomp-ghidra-map-v1",
+        "# psprecomp-ghidra-map-v2",
         f"# program {args.program}",
-        f"entry 0x{entry_address}",
+        "version 2",
+        f"entry 0x{entry_address:08x}",
     ]
+    block_entries: set[int] = set()
     for function in functions:
         if not isinstance(function, dict) or function.get("isExternal"):
             continue
-        lines.append(
-            f"function 0x{function['address']} {function.get('name', '')}".rstrip()
-        )
+        begin = address_value(function["address"])
+        name = str(function.get("name", ""))
+        end = function_end(function, begin)
+        if end is not None and end > begin:
+            lines.append(
+                f"function_range 0x{begin:08x} 0x{end:08x} {name}".rstrip()
+            )
+        else:
+            lines.append(f"function 0x{begin:08x} {name}".rstrip())
+        # Allegrex PIC calls conventionally enter with t9 equal to the
+        # function address.  Enhanced MCP builds may additionally expose a
+        # recovered gp value.
+        lines.append(f"t9 0x{begin:08x} 0x{begin:08x}")
+        for key in ("gpValue", "gp"):
+            if function.get(key) not in (None, ""):
+                lines.append(
+                    f"gp 0x{begin:08x} 0x{address_value(function[key]):08x}"
+                )
+                break
+        block_entries.add(begin)
+        for key in ("basicBlocks", "blockEntries", "indirectTargets"):
+            block_entries.update(nested_addresses(function.get(key, [])))
+
+    for address in sorted(block_entries):
+        lines.append(f"block 0x{address:08x}")
 
     excluded = 0
     orphaned = 0
@@ -86,7 +155,7 @@ def main() -> None:
         lines.append(f"exclude 0x{begin:08x} 0x{end:08x}")
         excluded += 1
 
-    lines.insert(2, f"# functions {len(functions)}")
+    lines.insert(2, f"# functions {len(functions)} blocks {len(block_entries)}")
     lines.insert(3, f"# excluded_gaps {excluded} orphaned_code_gaps {orphaned}")
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text("\n".join(lines) + "\n", encoding="utf-8")

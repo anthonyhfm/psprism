@@ -2,6 +2,11 @@
 #include <refract/psp_sdk_stubs.hpp>
 
 #include "host/host.hpp"
+#include "ge/ge_backend.hpp"
+#include "ge/ge_interpreter.hpp"
+#include "ge/ge_scheduler.hpp"
+#include "ge/ge_state.hpp"
+#include "ge/ge_vertex_decoder.hpp"
 #include "../third_party/at3_standalone/at3_decoders.h"
 #include "stubs/io/devctl_state.hpp"
 #include "stubs/io/io_state.hpp"
@@ -104,78 +109,6 @@ int host_open_flags(std::uint32_t flags) {
     result |= O_CREAT;
   if ((flags & 0x0400U) != 0)
     result |= O_TRUNC;
-  return result;
-}
-
-struct VertexLayout {
-  std::size_t stride{};
-  std::size_t weight_offset{};
-  std::size_t texture_offset{};
-  std::size_t color_offset{};
-  std::size_t normal_offset{};
-  std::size_t position_offset{};
-  std::uint32_t texture_type{};
-  std::uint32_t color_type{};
-  std::uint32_t normal_type{};
-  std::uint32_t position_type{};
-  std::uint32_t weight_type{};
-  std::uint32_t weight_count{};
-};
-
-std::size_t component_size(std::uint32_t type) {
-  return type == 1U ? 1U : type == 2U ? 2U : type == 3U ? 4U : 0U;
-}
-
-std::size_t align_offset(std::size_t value, std::size_t alignment) {
-  return alignment == 0 ? value : (value + alignment - 1U) & ~(alignment - 1U);
-}
-
-VertexLayout vertex_layout(std::uint32_t type) {
-  VertexLayout result;
-  result.texture_type = type & 3U;
-  result.color_type = (type >> 2U) & 7U;
-  result.normal_type = (type >> 5U) & 3U;
-  result.position_type = (type >> 7U) & 3U;
-  result.weight_type = (type >> 9U) & 3U;
-  result.weight_count = ((type >> 14U) & 7U) + 1U;
-  const auto weight_size = component_size(result.weight_type);
-  std::size_t offset{};
-  std::size_t maximum_alignment{1U};
-  if (weight_size != 0) {
-    maximum_alignment = std::max(maximum_alignment, weight_size);
-    offset = align_offset(offset, weight_size);
-    result.weight_offset = offset;
-    offset += weight_size * result.weight_count;
-  }
-  const auto texture_size = component_size(result.texture_type);
-  if (texture_size != 0) {
-    maximum_alignment = std::max(maximum_alignment, texture_size);
-    offset = align_offset(offset, texture_size);
-    result.texture_offset = offset;
-    offset += texture_size * 2U;
-  }
-  const std::size_t color_size = result.color_type == 7U   ? 4U
-                                 : result.color_type >= 4U ? 2U
-                                                           : 0U;
-  if (color_size != 0) {
-    maximum_alignment = std::max(maximum_alignment, color_size);
-    offset = align_offset(offset, color_size);
-    result.color_offset = offset;
-    offset += color_size;
-  }
-  const auto normal_size = component_size(result.normal_type);
-  if (normal_size != 0) {
-    maximum_alignment = std::max(maximum_alignment, normal_size);
-    offset = align_offset(offset, normal_size);
-    result.normal_offset = offset;
-    offset += normal_size * 3U;
-  }
-  const auto position_size = component_size(result.position_type);
-  maximum_alignment = std::max(maximum_alignment, position_size);
-  offset = align_offset(offset, position_size);
-  result.position_offset = offset;
-  offset += position_size * 3U;
-  result.stride = align_offset(offset, maximum_alignment);
   return result;
 }
 
@@ -673,39 +606,9 @@ struct Runtime::Implementation {
     std::uint32_t finish_argument{};
   };
 
-  struct GeList {
-    struct CallFrame {
-      std::uint32_t return_address{};
-      std::uint32_t offset_address{};
-    };
-
-    std::uint32_t program_counter{};
-    std::uint32_t stall_address{};
-    std::uint32_t callback_id{};
-    std::vector<CallFrame> call_stack;
-    bool ended{};
-  };
-
   struct Module {
     std::filesystem::path path;
     bool started{};
-  };
-
-  struct GraphicsState {
-    std::mutex mutex;
-    std::array<std::uint32_t, 256> commands{};
-    std::uint32_t vertex_address{};
-    std::uint32_t index_address{};
-    std::uint32_t offset_address{};
-    std::array<float, 12> world_matrix{};
-    std::array<float, 12> view_matrix{};
-    std::array<float, 16> projection_matrix{};
-    std::array<float, 96> bone_matrices{};
-    std::array<std::uint8_t, 1024> clut{};
-    std::uint32_t world_matrix_index{};
-    std::uint32_t view_matrix_index{};
-    std::uint32_t projection_matrix_index{};
-    std::uint32_t bone_matrix_index{};
   };
 
   std::uint8_t* memory{};
@@ -745,7 +648,7 @@ struct Runtime::Implementation {
   std::unordered_map<int, std::shared_ptr<VariablePool>> variable_pools;
   std::unordered_map<int, Callback> callbacks;
   std::unordered_map<int, GeCallback> ge_callbacks;
-  std::unordered_map<int, GeList> ge_lists;
+  ge::Scheduler ge_scheduler;
   std::unordered_map<int, Module> modules;
   int next_file{3};
   int next_uid{0x100};
@@ -758,7 +661,9 @@ struct Runtime::Implementation {
   std::atomic<std::uint32_t> submitted_ge_lists{};
   std::uint64_t start_monotonic_microseconds{};
   std::uint64_t start_unix_seconds{};
-  GraphicsState graphics;
+  ge::State graphics;
+  std::unique_ptr<ge::RenderBackend> ge_backend =
+      std::make_unique<ge::HostRenderBackend>();
   std::atomic<std::uint32_t> savedata_status{};
   std::uint32_t savedata_parameters{};
   bool savedata_operation_complete{};
@@ -1088,6 +993,11 @@ void Runtime::configure(std::uint8_t* memory, std::size_t size,
   implementation_->scratchpad.assign(16U * 1024U, 0);
   implementation_->video_memory.assign(2U * 1024U * 1024U, 0);
   implementation_->volatile_memory.assign(4U * 1024U * 1024U, 0);
+  {
+    std::lock_guard graphics_lock(implementation_->graphics.mutex);
+    implementation_->graphics.reset();
+    implementation_->ge_scheduler.reset();
+  }
   implementation_->start_monotonic_microseconds =
       host::monotonic_microseconds();
   implementation_->start_unix_seconds = host::unix_seconds();

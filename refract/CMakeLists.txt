@@ -3,6 +3,7 @@ cmake_minimum_required(VERSION 3.20)
 enable_language(OBJCXX)
 
 option(REFRACT_DESKTOP_DIALOGS "Build Qt system dialogs for desktop targets" ON)
+option(REFRACT_USE_FFMPEG "Enable FFmpeg-backed PSMF/H.264 decoding" ON)
 
 set(REFRACT_ATRAC_SOURCES
   third_party/at3_standalone/atrac.cpp
@@ -24,8 +25,10 @@ set(REFRACT_SOURCES
   src/runtime.cpp
   src/utility_data.cpp
   src/psp_sdk_bridge.cpp
+  src/host/audio_engine.cpp
   src/host/macos.cpp
   src/host/macos_frontend.mm
+  src/stubs/mpeg/media_engine.cpp
 )
 
 if(REFRACT_DESKTOP_DIALOGS)
@@ -52,6 +55,21 @@ target_link_libraries(refract PUBLIC
   "-framework MetalKit"
 )
 target_link_libraries(refract PRIVATE refract_atrac)
+if(REFRACT_USE_FFMPEG)
+  set(_REFRACT_FFMPEG_HINTS
+    /opt/homebrew/opt/ffmpeg
+    /usr/local/opt/ffmpeg)
+  find_path(REFRACT_FFMPEG_INCLUDE_DIR libavcodec/avcodec.h
+    HINTS ${_REFRACT_FFMPEG_HINTS} PATH_SUFFIXES include REQUIRED)
+  foreach(_library avcodec avformat avutil swscale)
+    string(TOUPPER "${_library}" _library_upper)
+    find_library(REFRACT_${_library_upper}_LIBRARY NAMES ${_library}
+      HINTS ${_REFRACT_FFMPEG_HINTS} PATH_SUFFIXES lib REQUIRED)
+    target_link_libraries(refract PRIVATE ${REFRACT_${_library_upper}_LIBRARY})
+  endforeach()
+  target_include_directories(refract PRIVATE ${REFRACT_FFMPEG_INCLUDE_DIR})
+  target_compile_definitions(refract PRIVATE REFRACT_HAS_FFMPEG=1)
+endif()
 if(REFRACT_DESKTOP_DIALOGS)
   target_compile_definitions(refract PRIVATE REFRACT_HAS_DESKTOP_DIALOGS=1)
   get_filename_component(REFRACT_QT_PREFIX "${Qt6_DIR}/../../.." ABSOLUTE)

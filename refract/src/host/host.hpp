@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <atomic>
 #include <memory>
 #include <optional>
 #include <string>
@@ -29,6 +30,29 @@ bool submit_audio(const std::int16_t* interleaved_stereo,
                   std::uint32_t channel,
                   bool blocking,
                   std::uint32_t sample_rate = 44100U);
+using AudioQueuedFramesCallback = std::uint32_t (*)(std::uint32_t);
+using AudioResetChannelCallback = void (*)(std::uint32_t);
+
+inline std::atomic<AudioQueuedFramesCallback> audio_queued_frames_callback{};
+inline std::atomic<AudioResetChannelCallback> audio_reset_channel_callback{};
+
+inline void set_audio_queue_callbacks(AudioQueuedFramesCallback queued,
+                                      AudioResetChannelCallback reset) {
+  audio_queued_frames_callback.store(queued, std::memory_order_release);
+  audio_reset_channel_callback.store(reset, std::memory_order_release);
+}
+
+inline std::uint32_t queued_audio_frames(std::uint32_t channel) {
+  const auto callback =
+      audio_queued_frames_callback.load(std::memory_order_acquire);
+  return callback == nullptr ? 0U : callback(channel);
+}
+
+inline void reset_audio_channel(std::uint32_t channel) {
+  const auto callback =
+      audio_reset_channel_callback.load(std::memory_order_acquire);
+  if (callback != nullptr) callback(channel);
+}
 
 struct ControllerState {
   std::uint32_t buttons{};

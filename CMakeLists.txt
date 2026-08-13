@@ -1,6 +1,25 @@
 cmake_minimum_required(VERSION 3.20)
 project(psprism VERSION 0.1.0 LANGUAGES CXX)
 
+option(PSPRECOMP_BUILD_BENCHMARKS "Build deterministic CPU microbenchmarks" OFF)
+option(REFRACT_USE_FFMPEG "Enable FFmpeg-backed PSMF/H.264 decoding" ON)
+
+if(REFRACT_USE_FFMPEG)
+    set(REFRACT_FFMPEG_HINTS
+        /opt/homebrew/opt/ffmpeg
+        /usr/local/opt/ffmpeg)
+    find_path(REFRACT_FFMPEG_INCLUDE_DIR libavcodec/avcodec.h
+        HINTS ${REFRACT_FFMPEG_HINTS} PATH_SUFFIXES include REQUIRED)
+    foreach(REFRACT_FFMPEG_COMPONENT avcodec avformat avutil swscale)
+        string(TOUPPER "${REFRACT_FFMPEG_COMPONENT}" REFRACT_FFMPEG_COMPONENT_UPPER)
+        find_library(REFRACT_${REFRACT_FFMPEG_COMPONENT_UPPER}_LIBRARY
+            NAMES ${REFRACT_FFMPEG_COMPONENT}
+            HINTS ${REFRACT_FFMPEG_HINTS} PATH_SUFFIXES lib REQUIRED)
+        list(APPEND REFRACT_FFMPEG_LIBRARIES
+            ${REFRACT_${REFRACT_FFMPEG_COMPONENT_UPPER}_LIBRARY})
+    endforeach()
+endif()
+
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -21,6 +40,12 @@ target_compile_definitions(psprism PRIVATE
 target_include_directories(psprism PRIVATE src include)
 target_compile_options(psprism PRIVATE -Wall -Wextra -Wpedantic -Werror)
 target_link_libraries(psprism PRIVATE ${CMAKE_DL_LIBS})
+
+if(PSPRECOMP_BUILD_BENCHMARKS)
+    add_executable(cpu_benchmarks tests/cpu_benchmarks.cpp)
+    target_include_directories(cpu_benchmarks PRIVATE include)
+    target_compile_options(cpu_benchmarks PRIVATE -Wall -Wextra -Wpedantic -Werror)
+endif()
 
 include(CTest)
 if(BUILD_TESTING)
@@ -54,6 +79,15 @@ if(BUILD_TESTING)
     target_compile_options(elf_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
     add_test(NAME elf_tests COMMAND elf_tests)
 
+    add_executable(emitter_tests
+        tests/emitter_tests.cpp
+        src/emitter.cpp
+        src/elf.cpp
+        src/nids.cpp)
+    target_include_directories(emitter_tests PRIVATE src include)
+    target_compile_options(emitter_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+    add_test(NAME emitter_tests COMMAND emitter_tests)
+
     add_executable(refract_utility_tests
         tests/refract_utility_tests.cpp
         refract/src/utility_data.cpp)
@@ -64,7 +98,9 @@ if(BUILD_TESTING)
         -Wall -Wextra -Wpedantic -Werror)
     add_test(NAME refract_utility_tests COMMAND refract_utility_tests)
 
-    add_executable(refract_audio_tests tests/refract_audio_tests.cpp)
+    add_executable(refract_audio_tests
+        tests/refract_audio_tests.cpp
+        refract/src/host/audio_engine.cpp)
     target_include_directories(refract_audio_tests PRIVATE
         include
         refract/src)
@@ -84,7 +120,8 @@ if(BUILD_TESTING)
     add_executable(refract_ge_tests
         tests/refract_ge_tests.cpp
         refract/src/runtime.cpp
-        refract/src/utility_data.cpp)
+        refract/src/utility_data.cpp
+        refract/src/stubs/mpeg/media_engine.cpp)
     target_include_directories(refract_ge_tests PRIVATE
         include
         refract/include
@@ -93,7 +130,33 @@ if(BUILD_TESTING)
     target_compile_options(refract_ge_tests PRIVATE
         -Wall -Wextra -Wpedantic)
     target_link_libraries(refract_ge_tests PRIVATE refract_atrac_test)
+    if(REFRACT_USE_FFMPEG)
+        target_include_directories(refract_ge_tests PRIVATE
+            ${REFRACT_FFMPEG_INCLUDE_DIR})
+        target_compile_definitions(refract_ge_tests PRIVATE
+            REFRACT_HAS_FFMPEG=1)
+        target_link_libraries(refract_ge_tests PRIVATE
+            ${REFRACT_FFMPEG_LIBRARIES})
+    endif()
     add_test(NAME refract_ge_tests COMMAND refract_ge_tests)
+
+    add_executable(refract_mpeg_tests
+        tests/refract_mpeg_tests.cpp
+        refract/src/stubs/mpeg/media_engine.cpp)
+    target_include_directories(refract_mpeg_tests PRIVATE
+        include
+        refract/src)
+    target_compile_options(refract_mpeg_tests PRIVATE
+        -Wall -Wextra -Wpedantic -Werror)
+    if(REFRACT_USE_FFMPEG)
+        target_include_directories(refract_mpeg_tests PRIVATE
+            ${REFRACT_FFMPEG_INCLUDE_DIR})
+        target_compile_definitions(refract_mpeg_tests PRIVATE
+            REFRACT_HAS_FFMPEG=1)
+        target_link_libraries(refract_mpeg_tests PRIVATE
+            ${REFRACT_FFMPEG_LIBRARIES})
+    endif()
+    add_test(NAME refract_mpeg_tests COMMAND refract_mpeg_tests)
 
     if(APPLE)
         enable_language(OBJCXX)

@@ -13,9 +13,15 @@ void execute_ge_list(Implementation& implementation, psprecomp::State& state,
   {
     std::lock_guard graphics_lock(implementation.graphics.mutex);
     auto& graphics = implementation.graphics;
-    host::begin_ge_frame();
+    implementation.ge_backend->begin_frame();
     std::array<std::uint32_t, 256> commands{};
-    auto& list = implementation.ge_lists.at(list_id);
+    auto* queued_list = implementation.ge_scheduler.find(list_id);
+    if (queued_list == nullptr) {
+      implementation.ge_backend->end_frame();
+      return;
+    }
+    implementation.ge_scheduler.begin(list_id);
+    auto& list = *queued_list;
     auto call_stack = std::move(list.call_stack);
     call_stack.reserve(64U);
     std::unordered_map<TextureKey, DecodedTexture, TextureKeyHash>
@@ -32,25 +38,33 @@ void execute_ge_list(Implementation& implementation, psprecomp::State& state,
     std::uint32_t invalid_vertices{};
     std::uint32_t last_render_target{};
     bool ended{};
+    bool stalled{};
+    bool failed{};
     // CALLed display-list fragments count toward this guard as well. Large
     // games can legitimately execute well beyond 64K words before END.
     constexpr std::uint32_t max_ge_command_words = 1U << 20U;
     for (; words < max_ge_command_words; ++words) {
       if (stall_address != 0U &&
           psprecomp::canonical_address(program_counter) ==
-              psprecomp::canonical_address(stall_address))
+              psprecomp::canonical_address(stall_address)) {
+        stalled = true;
         break;
+      }
       const auto* pointer =
           psprecomp::mapped_address(state, program_counter, 4U);
-      if (pointer == nullptr)
+      if (pointer == nullptr) {
+        failed = true;
         break;
+      }
       std::uint32_t instruction{};
       std::memcpy(&instruction, pointer, sizeof(instruction));
-      const auto command = instruction >> 24U;
-      const auto argument = instruction & 0x00ffffffU;
+      const auto decoded = ge::Interpreter::accept(
+          graphics, static_cast<std::uint32_t>(list_id), program_counter,
+          instruction);
+      const auto command = decoded.opcode;
+      const auto argument = decoded.argument;
       const auto next = program_counter + 4U;
       ++commands[command];
-      graphics.commands[command] = instruction;
       const auto relative_address = [&](std::uint32_t value) {
         const auto base = (graphics.commands[0x10U] & 0x000f0000U) << 8U;
         return (graphics.offset_address + (base | value)) & 0x0fffffffU;
@@ -141,7 +155,7 @@ void execute_ge_list(Implementation& implementation, psprecomp::State& state,
               (graphics.commands[0xdbU] >> 8U) & 0xffU,
               (graphics.commands[0xdbU] >> 16U) & 0xffU);
         }
-        const auto layout = vertex_layout(vertex_type);
+        const auto layout = ge::VertexDecoder::layout(vertex_type);
         const auto index_type = (vertex_type >> 11U) & 3U;
         const auto framebuffer_stride =
             graphics.commands[0x9dU] & 0x7fcU;
@@ -166,7 +180,7 @@ void execute_ge_list(Implementation& implementation, psprecomp::State& state,
             std::clamp(std::max(scissor_bottom, minimum_target_height), 1U,
                        1024U);
         if (layout.stride != 0 && primitive_type <= 6U) {
-          const auto index_size = component_size(index_type);
+          const auto index_size = ge::component_size(index_type);
           const auto index_byte_count =
               static_cast<std::size_t>(vertex_count) * index_size;
           vertex_indices.resize(vertex_count);
@@ -721,10 +735,10 @@ void execute_ge_list(Implementation& implementation, psprecomp::State& state,
                 submitted_type = 3U;
                 render_state.cull_face = false;
               }
-              host::submit_ge_primitive(submitted_type, std::move(vertices),
-                                        std::move(texture.pixels),
-                                        texture.width, texture.height,
-                                        render_state);
+              implementation.ge_backend->submit(
+                  submitted_type, std::move(vertices),
+                  std::move(texture.pixels), texture.width, texture.height,
+                  render_state);
               ++submitted_primitives;
             } else {
               ++invalid_vertices;
@@ -742,7 +756,25 @@ void execute_ge_list(Implementation& implementation, psprecomp::State& state,
           ++invalid_layouts;
         }
         ++primitives;
+      } else if (command == 0x07U) {
+        const auto count = argument & 0xffffU;
+        list.bounding_box_visible = count != 0U;
+        if (count != 0U) {
+          const auto vertex_type = graphics.commands[0x12U] & 0x00ffffffU;
+          const auto layout = ge::VertexDecoder::layout(vertex_type);
+          const auto index_type = (vertex_type >> 11U) & 3U;
+          if (index_type == 0U)
+            graphics.vertex_address += static_cast<std::uint32_t>(
+                static_cast<std::size_t>(count) * layout.stride);
+          else
+            graphics.index_address += static_cast<std::uint32_t>(
+                static_cast<std::size_t>(count) *
+                ge::component_size(index_type));
+        }
       } else if (command == 0x08U) {
+        program_counter = relative_address(argument & 0x00fffffcU);
+        continue;
+      } else if (command == 0x09U && !list.bounding_box_visible) {
         program_counter = relative_address(argument & 0x00fffffcU);
         continue;
       } else if (command == 0x0aU) {
@@ -783,6 +815,8 @@ void execute_ge_list(Implementation& implementation, psprecomp::State& state,
         }
       } else if (command == 0x13U) {
         graphics.offset_address = argument << 8U;
+      } else if (command == 0x14U) {
+        graphics.offset_address = program_counter;
       } else if (command == 0xeaU) {
         // A GE block transfer can modify a texture without changing any
         // texture-state command, so cached decodes are no longer valid.
@@ -828,6 +862,7 @@ void execute_ge_list(Implementation& implementation, psprecomp::State& state,
       }
       program_counter = next;
     }
+    if (!ended && !stalled) failed = true;
     if (implementation.verbose && submission < 8U) {
       std::fprintf(stderr,
                    "[psprism:ge] list=%u address=%08x stall=%08x words=%u "
@@ -849,10 +884,18 @@ void execute_ge_list(Implementation& implementation, psprecomp::State& state,
     list.program_counter = program_counter;
     list.stall_address = stall_address;
     list.call_stack = std::move(call_stack);
-    list.ended = ended;
-    host::end_ge_frame();
     if (ended)
-      host::present_ge_frame();
+      implementation.ge_scheduler.finish(list_id, program_counter,
+                                         ge::ListState::completed);
+    else if (failed)
+      implementation.ge_scheduler.finish(list_id, program_counter,
+                                         ge::ListState::error);
+    else if (stalled)
+      implementation.ge_scheduler.stall(list_id, program_counter,
+                                        stall_address);
+    implementation.ge_backend->end_frame();
+    if (ended)
+      implementation.ge_backend->present_frame();
   }
   for (const auto& callback : pending_callbacks) {
     dispatch_guest_callback(implementation, state, callback.entry,
@@ -864,13 +907,11 @@ void execute_ge_list(Implementation& implementation, psprecomp::State& state,
 
 void sceGeListEnQueue(Implementation& implementation, psprecomp::State& state) {
 #if !defined(__PSP__)
-  static std::atomic<std::uint32_t> next_list{1};
-  const auto list_id = static_cast<int>(next_list++);
+  int list_id{};
   {
     std::lock_guard graphics_lock(implementation.graphics.mutex);
-    implementation.ge_lists.emplace(
-        list_id, Implementation::GeList{state.gpr[4], state.gpr[5],
-                                        state.gpr[6], {}, false});
+    list_id = implementation.ge_scheduler.enqueue(
+        state.gpr[4], state.gpr[5], state.gpr[6], false);
   }
   execute_ge_list(implementation, state, list_id, state.gpr[4], state.gpr[5],
                   state.gpr[6]);

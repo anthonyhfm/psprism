@@ -19,6 +19,10 @@ void sceMpegCreate(Implementation& implementation, psprecomp::State& state) {
   values[1] = state.gpr[7];
   values[2] = ringbuffer->data_upper_bound;
   ringbuffer->mpeg = state.gpr[4];
+  const auto capacity = static_cast<std::size_t>(
+      std::max(ringbuffer->packets, 1)) * mpeg_state::ringbuffer_packet_size;
+  mpeg_state::create_media_engine(
+      psprecomp::canonical_address(state.gpr[4]), capacity);
   state.gpr[2] = 0U;
 #else
   (void)implementation;

@@ -184,6 +184,7 @@ struct Decoder {
     encoded.assign(source, source + size);
     data_cursor = track.data_offset;
     decoded_samples = 0U;
+    skip_samples = track.first_sample_offset;
     finished = false;
     internal_error = 0U;
 
@@ -208,9 +209,28 @@ struct Decoder {
   void rewind() {
     data_cursor = track.data_offset;
     decoded_samples = 0U;
+    skip_samples = track.first_sample_offset;
     finished = false;
     if (atrac3plus != nullptr) atrac3p_flush_buffers(atrac3plus);
     if (atrac3 != nullptr) atrac3_flush_buffers(atrac3);
+  }
+
+  bool seek(std::uint32_t sample) {
+    if (track.block_align == 0U || sample > track.end_sample) return false;
+    const auto absolute_sample =
+        static_cast<std::uint64_t>(track.first_sample_offset) + sample;
+    const auto frame = absolute_sample / track.samples_per_frame();
+    const auto offset = static_cast<std::uint64_t>(track.data_offset) +
+                        frame * track.block_align;
+    if (offset >= encoded.size()) return false;
+    if (atrac3plus != nullptr) atrac3p_flush_buffers(atrac3plus);
+    if (atrac3 != nullptr) atrac3_flush_buffers(atrac3);
+    data_cursor = static_cast<std::uint32_t>(offset);
+    decoded_samples = sample;
+    skip_samples =
+        static_cast<std::uint32_t>(absolute_sample % track.samples_per_frame());
+    finished = false;
+    return true;
   }
 
   std::uint32_t decode(std::int16_t* output, std::uint32_t& sample_count,
@@ -218,6 +238,17 @@ struct Decoder {
     sample_count = 0U;
     reached_end = false;
     if (encoded.empty() || track.block_align == 0U) return unset_data;
+    const auto end_exclusive = static_cast<std::uint64_t>(track.end_sample) + 1U;
+    if (decoded_samples >= end_exclusive) {
+      if (loop_count != 0) {
+        if (loop_count > 0) --loop_count;
+        rewind();
+      } else {
+        finished = true;
+        reached_end = true;
+        return all_data_decoded;
+      }
+    }
 
     const auto declared_end = static_cast<std::uint64_t>(track.data_offset) +
                               track.data_size;
@@ -261,39 +292,53 @@ struct Decoder {
       return bad_data;
     }
 
-    sample_count = static_cast<std::uint32_t>(decoded_count);
+    const auto skipped = std::min(skip_samples,
+                                  static_cast<std::uint32_t>(decoded_count));
+    skip_samples -= skipped;
+    const auto decoded_after_skip =
+        static_cast<std::uint32_t>(decoded_count) - skipped;
+    const auto remaining = static_cast<std::uint32_t>(
+        end_exclusive > decoded_samples
+            ? end_exclusive - decoded_samples
+            : 0U);
+    sample_count = std::min(decoded_after_skip, remaining);
     last_peak = 0.0F;
     if (output != nullptr) {
-      for (int index = 0; index < decoded_count; ++index) {
+      for (std::uint32_t index = 0; index < sample_count; ++index) {
         const auto clamp = [](float value) -> std::int16_t {
           if (!std::isfinite(value)) return 0;
           value = std::clamp(value, -1.0F, 1.0F);
           return static_cast<std::int16_t>(value * 32767.0F);
         };
-        const auto left_sample = left[static_cast<std::size_t>(index)];
+        const auto source_index = static_cast<std::size_t>(skipped + index);
+        const auto left_sample = left[source_index];
         const auto right_sample =
-            track.channels == 2U ? right[static_cast<std::size_t>(index)]
+            track.channels == 2U ? right[source_index]
                                  : left_sample;
         last_peak = std::max(
             last_peak, std::max(std::abs(left_sample), std::abs(right_sample)));
-        output[index * 2] = clamp(left_sample);
-        output[index * 2 + 1] = clamp(right_sample);
+        output[index * 2U] = clamp(left_sample);
+        output[index * 2U + 1U] = clamp(right_sample);
       }
     }
     decoded_samples += sample_count;
     ++decoded_frames;
-    reached_end = available_end >= declared_end &&
-                  static_cast<std::uint64_t>(data_cursor) +
-                          track.block_align >
-                      declared_end &&
-                  loop_count == 0;
+    reached_end = decoded_samples >= end_exclusive && loop_count == 0;
     finished = reached_end;
     return success;
   }
 
   [[nodiscard]] std::uint32_t next_samples() const {
     if (finished) return 0U;
-    return track.samples_per_frame();
+    const auto frame_samples = track.samples_per_frame() > skip_samples
+                                   ? track.samples_per_frame() - skip_samples
+                                   : 0U;
+    const auto end_exclusive = static_cast<std::uint64_t>(track.end_sample) + 1U;
+    const auto remaining = static_cast<std::uint32_t>(
+        end_exclusive > decoded_samples
+            ? end_exclusive - decoded_samples
+            : 0U);
+    return std::min(frame_samples, remaining);
   }
 
   [[nodiscard]] std::uint32_t remaining_frames() const {
@@ -361,6 +406,7 @@ struct Decoder {
   std::uint32_t pending_read_offset{};
   std::uint64_t decoded_samples{};
   std::uint64_t decoded_frames{};
+  std::uint32_t skip_samples{};
   int loop_count{};
   bool finished{};
   bool audible_reported{};

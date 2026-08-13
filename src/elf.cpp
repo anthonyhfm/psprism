@@ -427,6 +427,12 @@ CodeMap load_code_map(const std::filesystem::path& path) {
         };
         if (kind == "entry" && !first.empty()) {
             map.entry = parse_address(first);
+        } else if (kind == "version" && !first.empty()) {
+            map.version = parse_address(first);
+            if (map.version != 1U && map.version != 2U) {
+                throw std::runtime_error("unsupported code map version in line " +
+                                         std::to_string(line_number));
+            }
         } else if (kind == "function" && !first.empty()) {
             const auto address = parse_address(first);
             map.function_starts.push_back(address);
@@ -434,6 +440,29 @@ CodeMap load_code_map(const std::filesystem::path& path) {
             if (fields >> name) {
                 map.function_symbols.push_back({address, std::move(name)});
             }
+        } else if (kind == "function_range" && !first.empty() &&
+                   fields >> second) {
+            const auto begin = parse_address(first);
+            const auto end = parse_address(second);
+            if (begin >= end || (begin & 3U) != 0U || (end & 3U) != 0U) {
+                throw std::runtime_error("invalid function range in code map line " +
+                                         std::to_string(line_number));
+            }
+            std::string name;
+            fields >> name;
+            map.function_ranges.push_back({begin, end, name});
+            map.function_starts.push_back(begin);
+            if (!name.empty()) {
+                map.function_symbols.push_back({begin, std::move(name)});
+            }
+        } else if (kind == "block" && !first.empty()) {
+            map.block_entries.push_back(parse_address(first));
+        } else if ((kind == "gp" || kind == "t9") && !first.empty() &&
+                   fields >> second) {
+            RegisterMetadata metadata{parse_address(first),
+                                      parse_address(second)};
+            (kind == "gp" ? map.gp_values : map.t9_values)
+                .push_back(metadata);
         } else if (kind == "overlay" && !first.empty()) {
             map.overlay_starts.push_back(parse_address(first));
         } else if (kind == "exclude" && !first.empty() && fields >> second) {
@@ -454,6 +483,22 @@ CodeMap load_code_map(const std::filesystem::path& path) {
                                  path.string());
     }
     std::sort(map.function_starts.begin(), map.function_starts.end());
+    map.function_starts.erase(
+        std::unique(map.function_starts.begin(), map.function_starts.end()),
+        map.function_starts.end());
+    std::sort(map.function_ranges.begin(), map.function_ranges.end(),
+              [](const FunctionRange& left, const FunctionRange& right) {
+                  return left.begin < right.begin;
+              });
+    for (std::size_t i = 1; i < map.function_ranges.size(); ++i) {
+        if (map.function_ranges[i].begin < map.function_ranges[i - 1U].end) {
+            throw std::runtime_error("overlapping function ranges in code map");
+        }
+    }
+    std::sort(map.block_entries.begin(), map.block_entries.end());
+    map.block_entries.erase(
+        std::unique(map.block_entries.begin(), map.block_entries.end()),
+        map.block_entries.end());
     std::sort(map.overlay_starts.begin(), map.overlay_starts.end());
     map.overlay_starts.erase(
         std::unique(map.overlay_starts.begin(), map.overlay_starts.end()),
@@ -466,6 +511,17 @@ CodeMap load_code_map(const std::filesystem::path& path) {
               [](const AddressRange& left, const AddressRange& right) {
                   return left.begin < right.begin;
               });
+    std::vector<AddressRange> merged_exclusions;
+    for (const auto& range : map.excluded_ranges) {
+        if (!merged_exclusions.empty() &&
+            range.begin <= merged_exclusions.back().end) {
+            merged_exclusions.back().end =
+                std::max(merged_exclusions.back().end, range.end);
+        } else {
+            merged_exclusions.push_back(range);
+        }
+    }
+    map.excluded_ranges = std::move(merged_exclusions);
     return map;
 }
 
@@ -478,6 +534,19 @@ const std::string* CodeMap::symbol_at(std::uint32_t address) const {
     return found != function_symbols.end() && found->address == address
                ? &found->name
                : nullptr;
+}
+
+const FunctionRange* CodeMap::function_containing(std::uint32_t address) const {
+    const auto after = std::upper_bound(
+        function_ranges.begin(), function_ranges.end(), address,
+        [](std::uint32_t value, const FunctionRange& range) {
+            return value < range.begin;
+        });
+    if (after == function_ranges.begin()) {
+        return nullptr;
+    }
+    const auto& candidate = *std::prev(after);
+    return address < candidate.end ? &candidate : nullptr;
 }
 
 } // namespace psprecomp

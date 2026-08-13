@@ -64,6 +64,19 @@ int main() {
   CHECK(track.data_offset == 96U);
   CHECK(track.data_size == 416U);
 
+  auto offset_header = memory;
+  write_u32(offset_header, 84U, 100U);
+  atrac_state::Decoder offset_decoder(atrac_state::codec_atrac3plus);
+  CHECK(offset_decoder.set_data(offset_header.data(), offset_header.size(),
+                                memory_base));
+  CHECK(offset_decoder.skip_samples == 100U);
+  CHECK(offset_decoder.next_samples() == 1948U);
+  CHECK(offset_decoder.seek(200U));
+  CHECK(offset_decoder.decoded_samples == 200U);
+  CHECK(offset_decoder.skip_samples == 300U);
+  CHECK(offset_decoder.next_samples() == 1748U);
+  CHECK(!offset_decoder.seek(4097U));
+
   atrac_state::Decoder decoder(atrac_state::codec_atrac3plus);
   CHECK(decoder.set_data(memory.data(), memory.size(), memory_base));
   decoder.loop_count = -1;

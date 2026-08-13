@@ -1,5 +1,6 @@
 #pragma once
 
+#include <psprecomp/allegrex_decoder.hpp>
 #include <psprecomp/runtime.hpp>
 #include <psprecomp/vfpu.hpp>
 
@@ -20,12 +21,13 @@ inline bool interpret_allegrex(State& state, std::uint32_t current_pc) {
     if (state.stop_reason != StopReason::running) {
         return true;
     }
-    const auto op = instruction >> 26U;
-    const auto rs = (instruction >> 21U) & 31U;
-    const auto rt = (instruction >> 16U) & 31U;
-    const auto rd = (instruction >> 11U) & 31U;
-    const auto shift = (instruction >> 6U) & 31U;
-    const auto function = instruction & 63U;
+    const auto decoded = decode_allegrex(instruction);
+    const auto op = decoded.op;
+    const auto rs = decoded.rs;
+    const auto rt = decoded.rt;
+    const auto rd = decoded.rd;
+    const auto shift = decoded.shift;
+    const auto function = decoded.function;
     const auto immediate = instruction & 0xffffU;
     const auto signed_immediate = static_cast<std::int32_t>(
         static_cast<std::int16_t>(immediate));
@@ -52,17 +54,28 @@ inline bool interpret_allegrex(State& state, std::uint32_t current_pc) {
         state.fault_address = current_pc;
         state.fault_instruction = instruction;
     };
+    if (!decoded.valid()) {
+        fail();
+        return true;
+    }
 
     switch (op) {
     case 0x00:
         switch (function) {
         case 0x00: state.gpr[rd] = state.gpr[rt] << shift; break;
-        case 0x02: state.gpr[rd] = state.gpr[rt] >> shift; break;
+        case 0x02:
+            state.gpr[rd] = rs == 1U ? rotate_right(state.gpr[rt], shift)
+                                     : state.gpr[rt] >> shift;
+            break;
         case 0x03:
             state.gpr[rd] = arithmetic_shift_right(state.gpr[rt], shift);
             break;
         case 0x04: state.gpr[rd] = state.gpr[rt] << (state.gpr[rs] & 31U); break;
-        case 0x06: state.gpr[rd] = state.gpr[rt] >> (state.gpr[rs] & 31U); break;
+        case 0x06:
+            state.gpr[rd] = shift == 1U
+                                ? rotate_right(state.gpr[rt], state.gpr[rs])
+                                : state.gpr[rt] >> (state.gpr[rs] & 31U);
+            break;
         case 0x07:
             state.gpr[rd] = arithmetic_shift_right(state.gpr[rt],
                                                     state.gpr[rs]);
@@ -244,8 +257,12 @@ inline bool interpret_allegrex(State& state, std::uint32_t current_pc) {
         const auto fd = shift;
         if (fmt == 0x00) state.gpr[rt] = state.fpr[fs];
         else if (fmt == 0x04) state.fpr[fs] = state.gpr[rt];
-        else if (fmt == 0x02) state.gpr[rt] = state.fcr31;
-        else if (fmt == 0x06) state.fcr31 = state.gpr[rt];
+        else if (fmt == 0x02) {
+            state.gpr[rt] = fs == 0U ? 0x00003351U
+                                     : (fs == 31U ? state.fcr31 : 0U);
+        } else if (fmt == 0x06) {
+            if (fs == 31U) state.fcr31 = state.gpr[rt];
+        }
         else if (fmt == 0x08) {
             const auto cc = (instruction >> 18U) & 7U;
             const auto bit = cc == 0 ? 23U : 24U + cc;
@@ -271,6 +288,20 @@ inline bool interpret_allegrex(State& state, std::uint32_t current_pc) {
             case 0x0d:
                 state.fpr[fd] = static_cast<std::uint32_t>(
                     static_cast<std::int32_t>(std::trunc(left)));
+                break;
+            case 0x0e: state.fpr[fd] = rounded_word(left, 2U); break;
+            case 0x0f: state.fpr[fd] = rounded_word(left, 3U); break;
+            case 0x11: {
+                const auto cc = (rt >> 2U) & 7U;
+                const bool move_true = (rt & 1U) != 0U;
+                if (fpu_condition(state, cc) == move_true) {
+                    state.fpr[fd] = state.fpr[fs];
+                }
+                break;
+            }
+            case 0x20: state.fpr[fd] = state.fpr[fs]; break;
+            case 0x24:
+                state.fpr[fd] = rounded_word(left, state.fcr31 & 3U);
                 break;
             default:
                 if (function >= 0x30)
@@ -300,10 +331,7 @@ inline bool interpret_allegrex(State& state, std::uint32_t current_pc) {
     case 0x3d:
     case 0x3e:
     case 0x3f:
-        if (vfpu_opcode_supported(instruction))
-            execute_vfpu(state, instruction, current_pc);
-        else
-            fail();
+        execute_vfpu(state, instruction, current_pc);
         break;
     case 0x14: branch(state.gpr[rs] == state.gpr[rt], true); break;
     case 0x15: branch(state.gpr[rs] != state.gpr[rt], true); break;

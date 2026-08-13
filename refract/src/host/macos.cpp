@@ -1,4 +1,5 @@
 #include "host.hpp"
+#include "audio_engine.hpp"
 
 #if !defined(__APPLE__)
 #error "psprism currently ships only a macOS host backend"
@@ -9,6 +10,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <condition_variable>
 #include <cstring>
 #include <limits>
@@ -37,43 +39,56 @@ void sleep_microseconds(std::uint32_t duration) {
 
 namespace {
 
-struct AudioChannelOutput {
-  std::mutex mutex;
-  std::condition_variable available;
+constexpr std::uint32_t host_audio_sample_rate = 44100U;
+constexpr std::uint32_t host_audio_buffer_frames = 512U;
+constexpr std::size_t host_audio_buffer_count = 3U;
+
+struct AudioOutput {
+  ~AudioOutput() {
+    std::lock_guard lock(configuration_mutex);
+    if (queue != nullptr) {
+      AudioQueueStop(queue, true);
+      AudioQueueDispose(queue, true);
+    }
+  }
+
+  std::mutex configuration_mutex;
   AudioQueueRef queue{};
-  std::uint32_t sample_rate{};
-  std::size_t queued_buffers{};
-  bool callback_stalled{};
+  std::array<AudioQueueBufferRef, host_audio_buffer_count> buffers{};
+  AudioEngine engine;
+  std::atomic<bool> device_failed{};
 };
 
-std::array<AudioChannelOutput, 8>& audio_outputs() {
-  static std::array<AudioChannelOutput, 8> value;
+AudioOutput& audio_output() {
+  static AudioOutput value;
   return value;
 }
 
 void audio_buffer_finished(void* context, AudioQueueRef queue,
                            AudioQueueBufferRef buffer) {
-  AudioQueueFreeBuffer(queue, buffer);
-  auto& output = *static_cast<AudioChannelOutput*>(context);
-  {
-    std::lock_guard lock(output.mutex);
-    if (output.queued_buffers != 0U) --output.queued_buffers;
-    output.callback_stalled = false;
-  }
-  output.available.notify_one();
+  auto& output = *static_cast<AudioOutput*>(context);
+  auto* samples = static_cast<std::int16_t*>(buffer->mAudioData);
+  output.engine.consume(samples, host_audio_buffer_frames);
+  buffer->mAudioDataByteSize = host_audio_buffer_frames * 2U *
+                               sizeof(std::int16_t);
+  if (AudioQueueEnqueueBuffer(queue, buffer, 0U, nullptr) != noErr)
+    output.device_failed.store(true, std::memory_order_relaxed);
 }
 
-bool configure_audio_queue(AudioChannelOutput& output,
-                           std::uint32_t sample_rate) {
-  if (output.queue != nullptr && output.sample_rate == sample_rate) return true;
+bool configure_audio_queue(AudioOutput& output) {
+  std::lock_guard lock(output.configuration_mutex);
+  if (output.queue != nullptr &&
+      !output.device_failed.load(std::memory_order_relaxed))
+    return true;
   if (output.queue != nullptr) {
     AudioQueueStop(output.queue, true);
     AudioQueueDispose(output.queue, true);
     output.queue = nullptr;
+    output.buffers.fill(nullptr);
   }
 
   AudioStreamBasicDescription format{};
-  format.mSampleRate = sample_rate;
+  format.mSampleRate = host_audio_sample_rate;
   format.mFormatID = kAudioFormatLinearPCM;
   format.mFormatFlags = kLinearPCMFormatFlagIsSignedInteger |
                         kLinearPCMFormatFlagIsPacked |
@@ -88,13 +103,40 @@ bool configure_audio_queue(AudioChannelOutput& output,
     output.queue = nullptr;
     return false;
   }
+  constexpr auto byte_count = host_audio_buffer_frames * 2U *
+                              sizeof(std::int16_t);
+  for (auto& buffer : output.buffers) {
+    if (AudioQueueAllocateBuffer(output.queue, byte_count, &buffer) != noErr) {
+      AudioQueueDispose(output.queue, true);
+      output.queue = nullptr;
+      output.buffers.fill(nullptr);
+      return false;
+    }
+    std::memset(buffer->mAudioData, 0, byte_count);
+    buffer->mAudioDataByteSize = byte_count;
+    if (AudioQueueEnqueueBuffer(output.queue, buffer, 0U, nullptr) != noErr) {
+      AudioQueueDispose(output.queue, true);
+      output.queue = nullptr;
+      output.buffers.fill(nullptr);
+      return false;
+    }
+  }
+  output.device_failed.store(false, std::memory_order_relaxed);
   if (AudioQueueStart(output.queue, nullptr) != noErr) {
     AudioQueueDispose(output.queue, true);
     output.queue = nullptr;
+    output.buffers.fill(nullptr);
     return false;
   }
-  output.sample_rate = sample_rate;
   return true;
+}
+
+std::uint32_t backend_queued_audio_frames(std::uint32_t channel) {
+  return audio_output().engine.queued_frames(channel);
+}
+
+void backend_reset_audio_channel(std::uint32_t channel) {
+  audio_output().engine.reset_channel(channel);
 }
 
 } // namespace
@@ -103,52 +145,18 @@ bool submit_audio(const std::int16_t* interleaved_stereo,
                   std::uint32_t frame_count, std::uint32_t channel,
                   bool blocking, std::uint32_t sample_rate) {
   if (interleaved_stereo == nullptr || frame_count == 0U ||
-      sample_rate == 0U || channel >= audio_outputs().size())
+      sample_rate != host_audio_sample_rate ||
+      channel >= AudioEngine::channel_count)
     return false;
-  const auto byte_count = static_cast<std::size_t>(frame_count) * 2U *
-                          sizeof(std::int16_t);
-  if (byte_count > std::numeric_limits<UInt32>::max()) return false;
-
-  auto& output = audio_outputs()[channel];
-  std::unique_lock lock(output.mutex);
-  if (!configure_audio_queue(output, sample_rate)) return false;
-  constexpr std::size_t maximum_queued_buffers = 2U;
-  if (blocking) {
-    // AudioQueue normally calls audio_buffer_finished as soon as a queued
-    // buffer has played.  A suspended/reconfigured host device can, however,
-    // stop delivering callbacks.  PSP games frequently hold their own sound
-    // mutex while making a blocking output call, so waiting forever here can
-    // freeze the entire game rather than merely dropping audio.
-    if (output.callback_stalled) return false;
-    // Large, valid PSP buffers can represent close to a second of audio.  A
-    // cold AudioQueue has occasionally failed to consume those initial
-    // buffers, and scaling this timeout without a ceiling makes a game's
-    // producer thread advance only once every several seconds.  Bound that
-    // failure mode while retaining four buffer durations for normal chunks.
-    const auto callback_timeout = std::chrono::microseconds(
-        audio_callback_timeout_microseconds(frame_count, sample_rate));
-    if (!output.available.wait_for(lock, callback_timeout, [&output] {
-          return output.queued_buffers < maximum_queued_buffers;
-        })) {
-      output.callback_stalled = true;
-      return false;
-    }
-  } else if (output.queued_buffers >= maximum_queued_buffers) {
-    return false;
-  }
-  AudioQueueBufferRef buffer{};
-  if (AudioQueueAllocateBuffer(output.queue, static_cast<UInt32>(byte_count),
-                               &buffer) != noErr)
-    return false;
-  std::memcpy(buffer->mAudioData, interleaved_stereo, byte_count);
-  buffer->mAudioDataByteSize = static_cast<UInt32>(byte_count);
-  ++output.queued_buffers;
-  if (AudioQueueEnqueueBuffer(output.queue, buffer, 0U, nullptr) != noErr) {
-    --output.queued_buffers;
-    AudioQueueFreeBuffer(output.queue, buffer);
-    return false;
-  }
-  return true;
+  auto& output = audio_output();
+  set_audio_queue_callbacks(backend_queued_audio_frames,
+                            backend_reset_audio_channel);
+  if (!configure_audio_queue(output)) return false;
+  const auto timeout = std::chrono::microseconds(
+      audio_callback_timeout_microseconds(frame_count, sample_rate));
+  return output.engine.submit(interleaved_stereo, frame_count, channel,
+                              blocking, timeout) ==
+         AudioEngine::SubmitResult::submitted;
 }
 
 } // namespace refract::host

@@ -1,6 +1,7 @@
 #include "emitter.hpp"
 #include "nids.hpp"
 
+#include <psprecomp/allegrex_decoder.hpp>
 #include <psprecomp/vfpu.hpp>
 
 #include <algorithm>
@@ -224,19 +225,7 @@ std::string identifier(std::string_view value) {
 }
 
 bool starts_delayed_branch(std::uint32_t instruction) {
-    const auto op = instruction >> 26U;
-    if (op == 0) {
-        const auto function = instruction & 63U;
-        return function == 0x08U || function == 0x09U;
-    }
-    if (op == 0x01U || op == 0x02U || op == 0x03U ||
-        (op >= 0x04U && op <= 0x07U) || (op >= 0x14U && op <= 0x17U)) {
-        return true;
-    }
-    if (op == 0x11U || op == 0x12U) {
-        return ((instruction >> 21U) & 31U) == 0x08U;
-    }
-    return false;
+    return decode_allegrex(instruction).has_flag(instruction_delayed_branch);
 }
 
 bool needs_post_delay_entry(std::uint32_t instruction) {
@@ -374,6 +363,9 @@ std::set<std::uint32_t> potential_block_entries(const ElfImage& image,
     }
     if (code_map != nullptr) {
         for (const auto address : code_map->function_starts) {
+            add(address);
+        }
+        for (const auto address : code_map->block_entries) {
             add(address);
         }
     }
@@ -553,6 +545,10 @@ std::string jump_target(std::uint32_t pc, std::uint32_t instruction,
 }
 
 std::string opcode_group(std::uint32_t instruction) {
+    const auto decoded = decode_allegrex(instruction);
+    if (decoded.valid()) {
+        return std::string(decoded.name);
+    }
     const auto op = instruction >> 26U;
     std::ostringstream stream;
     stream << "op_" << std::hex << std::setfill('0') << std::setw(2) << op;
@@ -569,14 +565,19 @@ std::string opcode_group(std::uint32_t instruction) {
 std::string emit_instruction(std::uint32_t pc, std::uint32_t instruction,
                              bool relocated = true,
                              std::uint32_t preferred_base = 0) {
-    const auto op = instruction >> 26U;
-    const auto rs = (instruction >> 21U) & 31U;
-    const auto rt = (instruction >> 16U) & 31U;
-    const auto rd = (instruction >> 11U) & 31U;
-    const auto shift = (instruction >> 6U) & 31U;
-    const auto function = instruction & 63U;
+    const auto decoded = decode_allegrex(instruction);
+    const auto op = decoded.op;
+    const auto rs = decoded.rs;
+    const auto rt = decoded.rt;
+    const auto rd = decoded.rd;
+    const auto shift = decoded.shift;
+    const auto function = decoded.function;
     std::ostringstream out;
-    if (vfpu_opcode_supported(instruction)) {
+    if (!decoded.valid()) {
+        return "/* unsupported/reserved PSP word */ "
+               "state.stop_reason = StopReason::invalid_pc;";
+    }
+    if (decoded.lowering == InstructionLowering::runtime_fallback) {
         out << "execute_vfpu(state, " << hex(instruction)
             << ", state.memory_base + " << hex(pc) << ");";
         return out.str();
@@ -3326,13 +3327,13 @@ void emit_project(const ElfImage& image, const std::filesystem::path& directory,
 
 bool analyze_coverage(const ElfImage& image, const CodeMap* code_map,
                       std::ostream& output) {
-    (void)code_map;
     struct MissingGroup {
         std::size_t count{};
         std::uint32_t example_pc{};
         std::uint32_t example_instruction{};
     };
-    std::map<std::string, MissingGroup> missing;
+    std::map<std::string, MissingGroup> invalid;
+    std::map<std::string, MissingGroup> fallback;
     std::size_t translated = 0;
     std::size_t excluded = 0;
     for (const auto& section : image.executable_sections) {
@@ -3341,11 +3342,19 @@ bool analyze_coverage(const ElfImage& image, const CodeMap* code_map,
             const auto pc =
                 section.address + static_cast<std::uint32_t>(offset);
             const auto instruction = word_at(section, offset);
-            try {
-                (void)emit_instruction(pc, instruction);
+            if (code_map != nullptr && !code_map->contains(pc)) {
+                ++excluded;
+                continue;
+            }
+            const auto decoded = decode_allegrex(instruction);
+            if (decoded.lowering == InstructionLowering::native) {
                 ++translated;
-            } catch (const std::runtime_error&) {
-                auto& group = missing[opcode_group(instruction)];
+            } else {
+                auto& groups =
+                    decoded.lowering == InstructionLowering::runtime_fallback
+                        ? fallback
+                        : invalid;
+                auto& group = groups[opcode_group(instruction)];
                 if (group.count == 0) {
                     group.example_pc = pc;
                     group.example_instruction = instruction;
@@ -3356,15 +3365,24 @@ bool analyze_coverage(const ElfImage& image, const CodeMap* code_map,
     }
     output << "translated_words=" << translated << '\n'
            << "excluded_words=" << excluded << '\n';
-    std::size_t missing_total = 0;
-    for (const auto& [name, group] : missing) {
-        missing_total += group.count;
-        output << "unsupported " << name << " count=" << group.count
+    std::size_t fallback_total = 0;
+    for (const auto& [name, group] : fallback) {
+        fallback_total += group.count;
+        output << "fallback " << name << " count=" << group.count
                << " example_pc=" << hex(group.example_pc)
                << " instruction=" << hex(group.example_instruction) << '\n';
     }
-    output << "unsupported_words=" << missing_total << '\n';
-    return missing_total == 0;
+    output << "fallback_words=" << fallback_total << '\n';
+    std::size_t invalid_total = 0;
+    for (const auto& [name, group] : invalid) {
+        invalid_total += group.count;
+        output << "invalid " << name << " count=" << group.count
+               << " example_pc=" << hex(group.example_pc)
+               << " instruction=" << hex(group.example_instruction) << '\n';
+    }
+    output << "invalid_words=" << invalid_total << '\n'
+           << "unsupported_words=" << invalid_total << '\n';
+    return invalid_total == 0;
 }
 
 } // namespace psprecomp

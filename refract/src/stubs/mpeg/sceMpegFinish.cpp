@@ -1,6 +1,7 @@
 void sceMpegFinish(Implementation& implementation, psprecomp::State& state) {
 #if !defined(__PSP__)
   (void)implementation;
+  mpeg_state::reset_media_engines();
   state.gpr[2] = 0U;
 #else
   (void)implementation;

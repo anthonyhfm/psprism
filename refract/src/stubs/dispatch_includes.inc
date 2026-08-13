@@ -188,6 +188,7 @@
 #include "stubs/usb/sceUsbStop.cpp"
 #include "stubs/usb/sceUsbDeactivate.cpp"
 #include "stubs/mpeg/sceMpegAvcDecode.cpp"
+#include "stubs/mpeg/sceMpegAvcDecodeMode.cpp"
 #include "stubs/mpeg/sceMpegAvcDecodeFlush.cpp"
 #include "stubs/mpeg/sceMpegRingbufferDestruct.cpp"
 #include "stubs/mpeg/sceMpegInitAu.cpp"

@@ -1,4 +1,5 @@
 #include <psprecomp/overlay.hpp>
+#include <psprecomp/allegrex_decoder.hpp>
 #include <psprecomp/interpreter.hpp>
 #include <psprecomp/relocation.hpp>
 #include <psprecomp/runtime.hpp>
@@ -69,6 +70,35 @@ int main() {
     CHECK(psprecomp::interpret_allegrex(min_max_state, 0x3004U));
     CHECK(min_max_state.gpr[6] == static_cast<std::uint32_t>(-4));
 
+    std::array<std::uint8_t, 12> rotate_code{};
+    psprecomp::State rotate_state;
+    rotate_state.memory = rotate_code.data();
+    rotate_state.memory_size = rotate_code.size();
+    rotate_state.memory_base = 0x3800U;
+    rotate_state.pc = rotate_state.memory_base;
+    constexpr auto rotr_r5_r10_8 =
+        (1U << 21U) | (10U << 16U) | (5U << 11U) | (8U << 6U) | 0x02U;
+    constexpr auto rotrv_r6_r10_r11 =
+        (11U << 21U) | (10U << 16U) | (6U << 11U) | (1U << 6U) | 0x06U;
+    constexpr auto reserved_srl =
+        (2U << 21U) | (10U << 16U) | (7U << 11U) | (4U << 6U) | 0x02U;
+    static_assert(psprecomp::decode_allegrex(rotr_r5_r10_8).name == "rotr");
+    static_assert(psprecomp::decode_allegrex(rotrv_r6_r10_r11).name ==
+                  "rotrv");
+    static_assert(!psprecomp::decode_allegrex(reserved_srl).valid());
+    psprecomp::store32(rotate_state, 0x3800U, rotr_r5_r10_8);
+    psprecomp::store32(rotate_state, 0x3804U, rotrv_r6_r10_r11);
+    psprecomp::store32(rotate_state, 0x3808U, reserved_srl);
+    rotate_state.gpr[10] = 0x12345678U;
+    rotate_state.gpr[11] = 12U;
+    CHECK(psprecomp::interpret_allegrex(rotate_state, 0x3800U));
+    CHECK(rotate_state.gpr[5] == 0x78123456U);
+    CHECK(psprecomp::interpret_allegrex(rotate_state, 0x3804U));
+    CHECK(rotate_state.gpr[6] == 0x67812345U);
+    CHECK(psprecomp::interpret_allegrex(rotate_state, 0x3808U));
+    CHECK(rotate_state.stop_reason ==
+          psprecomp::StopReason::unsupported_instruction);
+
     std::array<std::uint8_t, 8> allegrex_break_code{};
     psprecomp::State break_state;
     break_state.memory = allegrex_break_code.data();
@@ -116,6 +146,8 @@ int main() {
 
     constexpr std::uint32_t vidt_q_r003 = 0xd00380a3U;
     CHECK(psprecomp::vfpu_opcode_supported(vidt_q_r003));
+    CHECK(psprecomp::decode_allegrex(vidt_q_r003).lowering ==
+          psprecomp::InstructionLowering::runtime_fallback);
     state.vfpu_ctrl[0] = 0xe4U;
     state.vfpu_ctrl[2] = 0U;
     psprecomp::execute_vfpu(state, vidt_q_r003, 0x1000U);

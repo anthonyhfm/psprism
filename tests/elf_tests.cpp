@@ -130,15 +130,32 @@ int main() {
   const auto map_path = path.string() + ".map";
   {
     std::ofstream stream(map_path);
-    stream << "entry 0x20\n"
-              "function 0x20 selected_function\n"
+    stream << "version 2\n"
+              "entry 0x20\n"
+              "function_range 0x20 0x30 selected_function\n"
               "function 0x40 unchanged_function\n"
+              "block 0x24\n"
+              "block 0x24\n"
+              "gp 0x20 0x1234\n"
+              "t9 0x20 0x20\n"
+              "exclude 0x80 0x90\n"
+              "exclude 0x88 0xa0\n"
               "overlay 0x20\n"
               "overlay 0x20\n";
   }
   const auto map = psprecomp::load_code_map(map_path);
   CHECK(map.entry == 0x20U);
+  CHECK(map.version == 2U);
   CHECK(map.function_starts.size() == 2U);
+  CHECK(map.function_ranges.size() == 1U);
+  CHECK(map.function_containing(0x2cU) == &map.function_ranges.front());
+  CHECK(map.function_containing(0x30U) == nullptr);
+  CHECK(map.block_entries.size() == 1U && map.block_entries.front() == 0x24U);
+  CHECK(map.gp_values.size() == 1U && map.gp_values.front().value == 0x1234U);
+  CHECK(map.t9_values.size() == 1U && map.t9_values.front().value == 0x20U);
+  CHECK(map.excluded_ranges.size() == 1U);
+  CHECK(!map.contains(0x98U));
+  CHECK(map.contains(0xa0U));
   CHECK(map.overlay_starts.size() == 1U);
   CHECK(map.overlay_starts.front() == 0x20U);
   std::filesystem::remove(map_path);
