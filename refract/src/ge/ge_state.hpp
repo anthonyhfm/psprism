@@ -23,11 +23,13 @@ struct State {
   std::array<float, 12> world_matrix{};
   std::array<float, 12> view_matrix{};
   std::array<float, 16> projection_matrix{};
+  std::array<float, 12> texture_matrix{};
   std::array<float, 96> bone_matrices{};
   std::array<std::uint8_t, 1024> clut{};
   std::uint32_t world_matrix_index{};
   std::uint32_t view_matrix_index{};
   std::uint32_t projection_matrix_index{};
+  std::uint32_t texture_matrix_index{};
   std::uint32_t bone_matrix_index{};
   std::uint32_t address_translation_width{};
   std::uint64_t texture_generation{};
@@ -41,11 +43,13 @@ struct State {
     world_matrix.fill(0.0F);
     view_matrix.fill(0.0F);
     projection_matrix.fill(0.0F);
+    texture_matrix.fill(0.0F);
     bone_matrices.fill(0.0F);
     clut.fill(0U);
     world_matrix_index = 0U;
     view_matrix_index = 0U;
     projection_matrix_index = 0U;
+    texture_matrix_index = 0U;
     bone_matrix_index = 0U;
     address_translation_width = 0U;
     texture_generation = 0U;
@@ -60,10 +64,12 @@ struct State {
     case 0x3bU:
     case 0x3dU:
     case 0x3fU: value &= 0xff000000U; break;
+    case 0x41U: value &= 0xff000000U; break;
     case 0x2aU: value &= 0xff00007fU; break;
     case 0x3aU:
     case 0x3cU:
     case 0x3eU: value &= 0xff00000fU; break;
+    case 0x40U: value &= 0xff00000fU; break;
     default: break;
     }
     return value;
@@ -79,6 +85,7 @@ struct State {
     store_floats(world_matrix);
     store_floats(view_matrix);
     store_floats(projection_matrix);
+    store_floats(texture_matrix);
     store_floats(bone_matrices);
     *cursor++ = vertex_address;
     *cursor++ = index_address;
@@ -86,6 +93,7 @@ struct State {
     *cursor++ = world_matrix_index;
     *cursor++ = view_matrix_index;
     *cursor++ = projection_matrix_index;
+    *cursor++ = texture_matrix_index;
     *cursor++ = bone_matrix_index;
     *cursor = address_translation_width;
   }
@@ -99,6 +107,7 @@ struct State {
     load_floats(world_matrix);
     load_floats(view_matrix);
     load_floats(projection_matrix);
+    load_floats(texture_matrix);
     load_floats(bone_matrices);
     vertex_address = *cursor++;
     index_address = *cursor++;
@@ -106,6 +115,7 @@ struct State {
     world_matrix_index = *cursor++;
     view_matrix_index = *cursor++;
     projection_matrix_index = *cursor++;
+    texture_matrix_index = *cursor++;
     bone_matrix_index = *cursor++;
     address_translation_width = *cursor;
     ++texture_generation;

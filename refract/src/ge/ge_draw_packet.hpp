@@ -83,6 +83,15 @@ inline std::uint64_t draw_packet_hash(const DrawPacket& packet) {
   add_u32(state.depth_test);
   add_u32(state.depth_write);
   add_u32(state.depth_function);
+  add_u32(state.stencil_test);
+  add_u32(state.stencil_function);
+  add_u32(state.stencil_reference);
+  add_u32(state.stencil_read_mask);
+  add_u32(state.stencil_write_mask);
+  add_u32(state.stencil_fail);
+  add_u32(state.stencil_depth_fail);
+  add_u32(state.stencil_depth_pass);
+  add_u32(state.clear_stencil);
   add_u32(state.alpha_blend);
   add_u32(state.color_write_mask);
   add_u32(state.blend_source);

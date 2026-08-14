@@ -92,6 +92,12 @@ void execute_ge_list(Implementation& implementation, psprecomp::State& state,
             graphics.projection_matrix.size())
           graphics.projection_matrix[graphics.projection_matrix_index++] =
               float24(argument);
+      } else if (command == 0x40U) {
+        graphics.texture_matrix_index = argument & 0xfU;
+      } else if (command == 0x41U) {
+        if (graphics.texture_matrix_index < graphics.texture_matrix.size())
+          graphics.texture_matrix[graphics.texture_matrix_index++] =
+              float24(argument);
       } else if (command == 0x2aU) {
         graphics.bone_matrix_index = argument & 0x7fU;
       } else if (command == 0x2bU) {
@@ -382,14 +388,14 @@ void execute_ge_list(Implementation& implementation, psprecomp::State& state,
                     output.position[2] = screen_z / 65535.0F * clip_w;
                   }
                 }
+                float model_normal[3]{0.0F, 0.0F, 1.0F};
                 float world_normal[3]{0.0F, 0.0F, 1.0F};
                 if (!through && layout.normal_type != 0U) {
                   const auto* normal = input + layout.normal_offset;
-                  float decoded_normal[3]{};
                   if (layout.normal_type == 1U) {
                     for (std::size_t component = 0; component < 3U;
                          ++component) {
-                      decoded_normal[component] =
+                      model_normal[component] =
                           static_cast<float>(
                               reinterpret_cast<const std::int8_t*>(normal)
                                   [component]) /
@@ -401,25 +407,24 @@ void execute_ge_list(Implementation& implementation, psprecomp::State& state,
                       std::int16_t value{};
                       std::memcpy(&value, normal + component * 2U,
                                   sizeof(value));
-                      decoded_normal[component] =
+                      model_normal[component] =
                           static_cast<float>(value) / 32768.0F;
                     }
                   } else {
-                    std::memcpy(decoded_normal, normal,
-                                sizeof(decoded_normal));
+                    std::memcpy(model_normal, normal, sizeof(model_normal));
                   }
                   if (layout.weight_type != 0U) {
                     float skinned_normal[3]{};
-                    transform_normal43(skin_matrix, decoded_normal,
+                    transform_normal43(skin_matrix, model_normal,
                                        skinned_normal);
                     std::copy(std::begin(skinned_normal),
-                              std::end(skinned_normal), decoded_normal);
+                              std::end(skinned_normal), model_normal);
                   }
                   if ((graphics.commands[0x51U] & 1U) != 0) {
-                    for (auto& component : decoded_normal)
+                    for (auto& component : model_normal)
                       component = -component;
                   }
-                  transform_normal43(graphics.world_matrix, decoded_normal,
+                  transform_normal43(graphics.world_matrix, model_normal,
                                      world_normal);
                   normalize3(world_normal);
                 }
@@ -544,41 +549,11 @@ void execute_ge_list(Implementation& implementation, psprecomp::State& state,
                     }
                   }
                 }
-                if (layout.texture_type != 0 && texture.width != 0 &&
-                    texture.height != 0) {
+                if (texture.width != 0 && texture.height != 0) {
                   float u{};
                   float v{};
-                  if (!through &&
-                      (graphics.commands[0xc0U] & 3U) == 2U) {
-                    const auto shade_coordinate = [&](std::uint32_t light) {
-                      float light_position[3]{};
-                      for (std::size_t component = 0; component < 3U;
-                           ++component) {
-                        light_position[component] = float24(
-                            graphics.commands[0x63U + light * 3U +
-                                              component]);
-                      }
-                      const auto length =
-                          std::sqrt(light_position[0] * light_position[0] +
-                                    light_position[1] * light_position[1] +
-                                    light_position[2] * light_position[2]);
-                      float factor = world_normal[2];
-                      if (length > 0.0F) {
-                        factor = (light_position[0] * world_normal[0] +
-                                  light_position[1] * world_normal[1] +
-                                  light_position[2] * world_normal[2]) /
-                                 length;
-                      }
-                      return (1.0F + factor) * 0.5F;
-                    };
-                    u = shade_coordinate(graphics.commands[0xc1U] & 3U) *
-                        float24(graphics.commands[0x48U]);
-                    v = shade_coordinate(
-                            (graphics.commands[0xc1U] >> 8U) & 3U) *
-                        float24(graphics.commands[0x49U]);
-                  } else {
-                    const auto* coordinates =
-                        input + layout.texture_offset;
+                  if (layout.texture_type != 0U) {
+                    const auto* coordinates = input + layout.texture_offset;
                     if (layout.texture_type == 1U) {
                       u = static_cast<float>(coordinates[0]);
                       v = static_cast<float>(coordinates[1]);
@@ -602,6 +577,65 @@ void execute_ge_list(Implementation& implementation, psprecomp::State& state,
                       std::memcpy(&u, coordinates, sizeof(u));
                       std::memcpy(&v, coordinates + 4U, sizeof(v));
                     }
+                  }
+                  const auto mapping_mode =
+                      through ? 0U : graphics.commands[0xc0U] & 3U;
+                  if (mapping_mode == 1U) {
+                    float source_coordinates[3]{};
+                    switch ((graphics.commands[0xc0U] >> 8U) & 3U) {
+                    case 0U:
+                      std::copy(std::begin(decoded), std::end(decoded),
+                                source_coordinates);
+                      break;
+                    case 1U:
+                      source_coordinates[0] = u;
+                      source_coordinates[1] = v;
+                      break;
+                    case 2U:
+                      std::copy(std::begin(model_normal),
+                                std::end(model_normal), source_coordinates);
+                      normalize3(source_coordinates);
+                      break;
+                    default:
+                      std::copy(std::begin(model_normal),
+                                std::end(model_normal), source_coordinates);
+                      break;
+                    }
+                    float projected[3]{};
+                    transform43(graphics.texture_matrix, source_coordinates,
+                                projected);
+                    output.texture[0] = projected[0];
+                    output.texture[1] = projected[1];
+                    output.texture[2] = projected[2];
+                  } else if (mapping_mode == 2U) {
+                    const auto shade_coordinate = [&](std::uint32_t light) {
+                      float light_position[3]{};
+                      for (std::size_t component = 0; component < 3U;
+                           ++component) {
+                        light_position[component] = float24(
+                            graphics.commands[0x63U + light * 3U +
+                                              component]);
+                      }
+                      const auto length =
+                          std::sqrt(light_position[0] * light_position[0] +
+                                    light_position[1] * light_position[1] +
+                                    light_position[2] * light_position[2]);
+                      float factor = world_normal[2];
+                      if (length > 0.0F) {
+                        factor = (light_position[0] * world_normal[0] +
+                                  light_position[1] * world_normal[1] +
+                                  light_position[2] * world_normal[2]) /
+                                 length;
+                      }
+                      return (1.0F + factor) * 0.5F;
+                    };
+                    output.texture[0] =
+                        shade_coordinate(graphics.commands[0xc1U] & 3U) *
+                        float24(graphics.commands[0x48U]);
+                    output.texture[1] = shade_coordinate(
+                            (graphics.commands[0xc1U] >> 8U) & 3U) *
+                        float24(graphics.commands[0x49U]);
+                  } else {
                     if (through) {
                       u /= static_cast<float>(texture.width);
                       v /= static_cast<float>(texture.height);
@@ -611,9 +645,9 @@ void execute_ge_list(Implementation& implementation, psprecomp::State& state,
                       v = v * float24(graphics.commands[0x49U]) +
                           float24(graphics.commands[0x4bU]);
                     }
+                    output.texture[0] = u;
+                    output.texture[1] = v;
                   }
-                  output.texture[0] = u;
-                  output.texture[1] = v;
                 }
               }
               host::GeometryState render_state;
@@ -667,10 +701,37 @@ void execute_ge_list(Implementation& implementation, psprecomp::State& state,
                       ? (graphics.commands[0xd3U] & 0x400U) != 0
                       : (graphics.commands[0xe7U] & 1U) == 0;
               render_state.depth_function = graphics.commands[0xdeU] & 7U;
+              render_state.stencil_test =
+                  !clear_mode && (graphics.commands[0x24U] & 1U) != 0;
+              render_state.stencil_function = graphics.commands[0xdcU] & 7U;
+              render_state.stencil_reference =
+                  (graphics.commands[0xdcU] >> 8U) & 0xffU;
+              render_state.stencil_read_mask =
+                  (graphics.commands[0xdcU] >> 16U) & 0xffU;
+              render_state.stencil_write_mask =
+                  (~graphics.commands[0xe9U]) & 0xffU;
+              render_state.stencil_fail = graphics.commands[0xddU] & 7U;
+              render_state.stencil_depth_fail =
+                  (graphics.commands[0xddU] >> 8U) & 7U;
+              render_state.stencil_depth_pass =
+                  (graphics.commands[0xddU] >> 16U) & 7U;
+              render_state.clear_stencil =
+                  clear_mode && (graphics.commands[0xd3U] & 0x200U) != 0;
+              if (render_state.clear_stencil) {
+                render_state.stencil_reference =
+                    vertices.empty()
+                        ? 0xffU
+                        : static_cast<std::uint32_t>(std::lround(
+                              std::clamp(vertices.back().color[3], 0.0F,
+                                         1.0F) *
+                              255.0F));
+              }
               render_state.alpha_blend =
                   !clear_mode && (graphics.commands[0x21U] & 1U) != 0;
+              render_state.color_write_mask = host::color_write_mask(
+                  graphics.commands[0xe8U], graphics.commands[0xe9U]);
               if (clear_mode) {
-                render_state.color_write_mask =
+                render_state.color_write_mask &=
                     host::clear_color_write_mask(graphics.commands[0xd3U]);
               }
               render_state.blend_source = graphics.commands[0xdfU] & 0xfU;

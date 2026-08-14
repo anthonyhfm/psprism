@@ -64,6 +64,32 @@ int main() {
   CHECK(render_target_geometry_scale(false, 256U, 512U) == 1.0F);
   CHECK(std::abs(render_target_geometry_scale(true, 256U, 512U) - 0.5F) <
         0.0001F);
+  CHECK(refract::host::color_write_mask(0U, 0U) == 0x0fU);
+  CHECK(refract::host::color_write_mask(0x00ffffffU, 0xffU) == 0U);
+  CHECK(refract::host::color_write_mask(0x0000ffU, 0U) == 0x0eU);
+  CHECK(psp_compare_function(6U) == MTLCompareFunctionGreater);
+  CHECK(psp_stencil_operation(2U) == MTLStencilOperationReplace);
+  CHECK(psp_stencil_operation(4U) == MTLStencilOperationIncrementClamp);
+
+  id<MTLDevice> test_device = MTLCreateSystemDefaultDevice();
+  CHECK(test_device != nil);
+  MTKView* test_view = [[MTKView alloc] initWithFrame:NSMakeRect(0, 0, 480, 272)
+                                               device:test_device];
+  test_view.colorPixelFormat = MTLPixelFormatBGRA8Unorm;
+  test_view.depthStencilPixelFormat = MTLPixelFormatDepth32Float_Stencil8;
+  PsprismRenderer* test_renderer =
+      [[PsprismRenderer alloc] initWithView:test_view];
+  CHECK(test_renderer != nil);
+  CHECK(test_renderer.geometryPipeline != nil);
+  CHECK(test_renderer.texturedGeometryPipeline != nil);
+  refract::host::GeometryState stencil_state;
+  stencil_state.depth_test = true;
+  stencil_state.depth_function = 5U;
+  stencil_state.stencil_test = true;
+  stencil_state.stencil_function = 2U;
+  stencil_state.stencil_reference = 0x5aU;
+  stencil_state.stencil_depth_pass = 2U;
+  CHECK([test_renderer depthStencilStateForGeometryState:stencil_state] != nil);
 
   refract::host::reset_ge_cache_metrics();
   CHECK(refract::host::ge_cache_metrics() == refract::ge::CacheMetrics{});

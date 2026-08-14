@@ -128,6 +128,27 @@ MTLBlendOperation psp_blend_operation(std::uint32_t equation) {
   }
 }
 
+MTLCompareFunction psp_compare_function(std::uint32_t function) {
+  constexpr MTLCompareFunction functions[] = {
+      MTLCompareFunctionNever,        MTLCompareFunctionAlways,
+      MTLCompareFunctionEqual,        MTLCompareFunctionNotEqual,
+      MTLCompareFunctionLess,         MTLCompareFunctionLessEqual,
+      MTLCompareFunctionGreater,      MTLCompareFunctionGreaterEqual,
+  };
+  return functions[std::min(function, 7U)];
+}
+
+MTLStencilOperation psp_stencil_operation(std::uint32_t operation) {
+  switch (operation) {
+    case 1U: return MTLStencilOperationZero;
+    case 2U: return MTLStencilOperationReplace;
+    case 3U: return MTLStencilOperationInvert;
+    case 4U: return MTLStencilOperationIncrementClamp;
+    case 5U: return MTLStencilOperationDecrementClamp;
+    default: return MTLStencilOperationKeep;
+  }
+}
+
 std::mutex geometry_mutex;
 std::vector<GeometryBatch> building_geometry_batches;
 std::vector<GeometryBatch> pending_geometry_batches;
@@ -219,6 +240,7 @@ refract::desktop::DialogFrame current_dialog_frame();
 @property(nonatomic, strong) id<MTLTexture> texture;
 @property(nonatomic, strong) id<MTLTexture> dialogTexture;
 @property(nonatomic, strong) NSArray<id<MTLDepthStencilState>>* depthStates;
+@property(nonatomic, strong) NSMutableDictionary<NSNumber*, id<MTLDepthStencilState>>* stencilStates;
 @property(nonatomic, strong) NSArray<id<MTLSamplerState>>* samplerStates;
 @property(nonatomic, strong) NSMutableDictionary<NSNumber*, id<MTLTexture>>* renderTargets;
 @property(nonatomic, strong) NSMutableDictionary<NSNumber*, id<MTLTexture>>* cpuFramebuffers;
@@ -235,6 +257,7 @@ refract::desktop::DialogFrame current_dialog_frame();
   self.renderTargets = [NSMutableDictionary dictionary];
   self.cpuFramebuffers = [NSMutableDictionary dictionary];
   self.depthTargets = [NSMutableDictionary dictionary];
+  self.stencilStates = [NSMutableDictionary dictionary];
   self.uploadedTextures = [NSMutableDictionary dictionary];
   {
     std::lock_guard lock(vertex_buffer_pool_mutex);
@@ -270,12 +293,12 @@ refract::desktop::DialogFrame current_dialog_frame();
     struct GeometryVertex {
       packed_float4 position;
       packed_float4 color;
-      packed_float2 texture;
+      packed_float3 texture;
     };
     struct GeometryOut {
       float4 position [[position]];
       float4 color;
-      float2 texture;
+      float3 texture;
     };
     struct FragmentState {
       uint color_test;
@@ -357,7 +380,8 @@ refract::desktop::DialogFrame current_dialog_frame();
       position.y = position.y * target_scale.y +
                    position.w * (1.0 - target_scale.y);
       return {position, vertices[id].color,
-              vertices[id].texture * texture_scale};
+              float3(vertices[id].texture.xy * texture_scale,
+                     vertices[id].texture.z)};
     }
     fragment float4 psprism_geometry_fragment(
         GeometryOut in [[stage_in]], constant FragmentState& state [[buffer(1)]]) {
@@ -367,8 +391,11 @@ refract::desktop::DialogFrame current_dialog_frame();
         GeometryOut in [[stage_in]], texture2d<float> image [[texture(0)]],
         sampler texture_sampler [[sampler(0)]],
         constant FragmentState& state [[buffer(1)]]) {
+      float q = in.texture.z >= 0.0
+                    ? max(in.texture.z, 0.000001)
+                    : min(in.texture.z, -0.000001);
       float4 color = psprism_texture_combine(
-          image.sample(texture_sampler, in.texture), in.color, state);
+          image.sample(texture_sampler, in.texture.xy / q), in.color, state);
       if (state.texture_color_double != 0)
         color.rgb *= 2.0;
       return psprism_fragment_tests(color, state);
@@ -391,6 +418,7 @@ refract::desktop::DialogFrame current_dialog_frame();
       [library newFunctionWithName:@"psprism_fragment"];
   descriptor.colorAttachments[0].pixelFormat = view.colorPixelFormat;
   descriptor.depthAttachmentPixelFormat = view.depthStencilPixelFormat;
+  descriptor.stencilAttachmentPixelFormat = view.depthStencilPixelFormat;
   self.pipeline = [self.device newRenderPipelineStateWithDescriptor:descriptor
                                                                error:&error];
   if (self.pipeline == nil) NSLog(@"psprism: Metal pipeline error: %@", error);
@@ -502,6 +530,60 @@ refract::desktop::DialogFrame current_dialog_frame();
   return self;
 }
 
+- (id<MTLDepthStencilState>)depthStencilStateForGeometryState:
+    (const refract::host::GeometryState&)state {
+  if (!state.stencil_test && !state.clear_stencil) {
+    const auto index = (state.depth_write ? 16U : 0U) +
+                       (state.depth_test ? 8U : 0U) +
+                       std::min(state.depth_function, 7U);
+    return self.depthStates[index];
+  }
+  std::uint64_t key = state.depth_write ? 1ULL : 0ULL;
+  key |= (state.depth_test ? 1ULL : 0ULL) << 1U;
+  key |= static_cast<std::uint64_t>(state.depth_function & 7U) << 2U;
+  key |= (state.clear_stencil ? 1ULL : 0ULL) << 5U;
+  key |= static_cast<std::uint64_t>(state.stencil_function & 7U) << 6U;
+  key |= static_cast<std::uint64_t>(state.stencil_fail & 7U) << 9U;
+  key |= static_cast<std::uint64_t>(state.stencil_depth_fail & 7U) << 12U;
+  key |= static_cast<std::uint64_t>(state.stencil_depth_pass & 7U) << 15U;
+  key |= static_cast<std::uint64_t>(state.stencil_read_mask & 0xffU) << 18U;
+  key |= static_cast<std::uint64_t>(state.stencil_write_mask & 0xffU) << 26U;
+  NSNumber* cache_key = @(key);
+  if (id<MTLDepthStencilState> cached = self.stencilStates[cache_key])
+    return cached;
+  MTLDepthStencilDescriptor* descriptor =
+      [[MTLDepthStencilDescriptor alloc] init];
+  descriptor.depthCompareFunction =
+      state.depth_test ? psp_compare_function(state.depth_function)
+                       : MTLCompareFunctionAlways;
+  descriptor.depthWriteEnabled = state.depth_write;
+  MTLStencilDescriptor* stencil = [[MTLStencilDescriptor alloc] init];
+  if (state.clear_stencil) {
+    stencil.stencilCompareFunction = MTLCompareFunctionAlways;
+    stencil.stencilFailureOperation = MTLStencilOperationReplace;
+    stencil.depthFailureOperation = MTLStencilOperationReplace;
+    stencil.depthStencilPassOperation = MTLStencilOperationReplace;
+    stencil.readMask = 0xffU;
+  } else {
+    stencil.stencilCompareFunction =
+        psp_compare_function(state.stencil_function);
+    stencil.stencilFailureOperation =
+        psp_stencil_operation(state.stencil_fail);
+    stencil.depthFailureOperation =
+        psp_stencil_operation(state.stencil_depth_fail);
+    stencil.depthStencilPassOperation =
+        psp_stencil_operation(state.stencil_depth_pass);
+    stencil.readMask = state.stencil_read_mask & 0xffU;
+  }
+  stencil.writeMask = state.stencil_write_mask & 0xffU;
+  descriptor.frontFaceStencil = stencil;
+  descriptor.backFaceStencil = stencil;
+  id<MTLDepthStencilState> result =
+      [self.device newDepthStencilStateWithDescriptor:descriptor];
+  self.stencilStates[cache_key] = result;
+  return result;
+}
+
 - (id<MTLRenderPipelineState>)blendPipelineForView:(MTKView*)view
                                            textured:(BOOL)textured
                                               state:(const refract::host::GeometryState&)state {
@@ -537,6 +619,7 @@ refract::desktop::DialogFrame current_dialog_frame();
                                    : @"psprism_geometry_fragment"];
   descriptor.colorAttachments[0].pixelFormat = view.colorPixelFormat;
   descriptor.depthAttachmentPixelFormat = view.depthStencilPixelFormat;
+  descriptor.stencilAttachmentPixelFormat = view.depthStencilPixelFormat;
   auto* attachment = descriptor.colorAttachments[0];
   attachment.writeMask =
       ((state.color_write_mask & 0x1U) != 0U ? MTLColorWriteMaskRed
@@ -678,6 +761,11 @@ refract::desktop::DialogFrame current_dialog_frame();
             created_depth ? MTLLoadActionClear : MTLLoadActionLoad;
         target_pass.depthAttachment.storeAction = MTLStoreActionStore;
         target_pass.depthAttachment.clearDepth = 1.0;
+        target_pass.stencilAttachment.texture = depth;
+        target_pass.stencilAttachment.loadAction =
+            created_depth ? MTLLoadActionClear : MTLLoadActionLoad;
+        target_pass.stencilAttachment.storeAction = MTLStoreActionStore;
+        target_pass.stencilAttachment.clearStencil = 0U;
         encoder = [commands renderCommandEncoderWithDescriptor:target_pass];
         const MTLViewport target_viewport{
             0.0, 0.0, static_cast<double>(target.width),
@@ -706,11 +794,11 @@ refract::desktop::DialogFrame current_dialog_frame();
       [encoder setFrontFacingWinding:batch.state.front_face_clockwise
                                          ? MTLWindingClockwise
                                          : MTLWindingCounterClockwise];
-      const auto depth_state =
-          (batch.state.depth_write ? 16U : 0U) +
-          (batch.state.depth_test ? 8U : 0U) +
-          std::min(batch.state.depth_function, 7U);
-      [encoder setDepthStencilState:self.depthStates[depth_state]];
+      [encoder setDepthStencilState:
+                   [self depthStencilStateForGeometryState:batch.state]];
+      if (batch.state.stencil_test || batch.state.clear_stencil)
+        [encoder setStencilReferenceValue:batch.state.stencil_reference &
+                                          0xffU];
       const FragmentState fragment_state{
           batch.state.color_test ? 1U : 0U,
           batch.state.color_function,
@@ -1117,7 +1205,8 @@ void initialize_frontend() {
     window.acceptsMouseMovedEvents = YES;
     metal_view = [[MTKView alloc] initWithFrame:frame device:device];
     metal_view.colorPixelFormat = MTLPixelFormatBGRA8Unorm;
-    metal_view.depthStencilPixelFormat = MTLPixelFormatDepth32Float;
+    metal_view.depthStencilPixelFormat =
+        MTLPixelFormatDepth32Float_Stencil8;
     metal_view.clearDepth = 1.0;
     metal_view.clearColor = MTLClearColorMake(0.02, 0.02, 0.025, 1.0);
     metal_view.paused = YES;

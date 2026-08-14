@@ -166,8 +166,12 @@ struct DialogResult {
 struct GeometryVertex {
   float position[4]{};
   float color[4]{1.0F, 1.0F, 1.0F, 1.0F};
-  float texture[2]{};
+  // STQ coordinates.  Q remains 1 for ordinary UV mapping and carries the
+  // projective divisor for GE texture-matrix mapping.
+  float texture[3]{0.0F, 0.0F, 1.0F};
 };
+
+static_assert(sizeof(GeometryVertex) == 11U * sizeof(float));
 
 struct GeometryState {
   std::uint32_t render_target_address{};
@@ -195,6 +199,15 @@ struct GeometryState {
   bool depth_test{};
   bool depth_write{};
   std::uint32_t depth_function{1};
+  bool stencil_test{};
+  std::uint32_t stencil_function{1};
+  std::uint32_t stencil_reference{};
+  std::uint32_t stencil_read_mask{0xffU};
+  std::uint32_t stencil_write_mask{0xffU};
+  std::uint32_t stencil_fail{};
+  std::uint32_t stencil_depth_fail{};
+  std::uint32_t stencil_depth_pass{};
+  bool clear_stencil{};
   bool alpha_blend{};
   std::uint8_t color_write_mask{0x0fU};
   std::uint32_t blend_source{};
@@ -231,6 +244,20 @@ constexpr std::uint8_t clear_color_write_mask(std::uint32_t clear_mode) {
   return static_cast<std::uint8_t>(
       ((clear_mode & 0x100U) != 0U ? red | green | blue : 0U) |
       ((clear_mode & 0x200U) != 0U ? alpha : 0U));
+}
+
+// MASKRGB/MASKALPHA use one bits to preserve destination bits.  Metal only
+// exposes channel-granular write masks; PSP software that fully masks a
+// channel (the common depth/stencil prepass case) can still be represented
+// exactly.  Partially masked channels remain enabled and are handled as the
+// least destructive fallback until framebuffer-fetch masking is available.
+constexpr std::uint8_t color_write_mask(std::uint32_t rgb_mask,
+                                        std::uint32_t alpha_mask) {
+  return static_cast<std::uint8_t>(
+      ((rgb_mask & 0x0000ffU) != 0x0000ffU ? 0x01U : 0U) |
+      ((rgb_mask & 0x00ff00U) != 0x00ff00U ? 0x02U : 0U) |
+      ((rgb_mask & 0xff0000U) != 0xff0000U ? 0x04U : 0U) |
+      ((alpha_mask & 0xffU) != 0xffU ? 0x08U : 0U));
 }
 
 constexpr bool texture_color_doubling_enabled(std::uint32_t texture_function) {

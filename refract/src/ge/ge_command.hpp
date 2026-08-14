@@ -32,6 +32,8 @@ enum class Command : std::uint8_t {
   view_matrix_data = 0x3d,
   projection_matrix_number = 0x3e,
   projection_matrix_data = 0x3f,
+  texture_matrix_number = 0x40,
+  texture_matrix_data = 0x41,
   framebuffer_address = 0x9c,
   framebuffer_width = 0x9d,
   depthbuffer_address = 0x9e,
@@ -51,6 +53,10 @@ enum class Command : std::uint8_t {
   texture_function = 0xc9,
   framebuffer_format = 0xd2,
   clear_mode = 0xd3,
+  stencil_test = 0xdc,
+  stencil_operation = 0xdd,
+  color_write_mask = 0xe8,
+  alpha_write_mask = 0xe9,
   transfer_start = 0xea,
 };
 
@@ -133,6 +139,12 @@ constexpr CommandMetadata command_metadata(std::uint8_t opcode) {
   case Command::projection_matrix_data:
     return {Command::projection_matrix_data, "PROJMATRIXDATA",
             CommandFlow::linear};
+  case Command::texture_matrix_number:
+    return {Command::texture_matrix_number, "TGENMATRIXNUMBER",
+            CommandFlow::linear};
+  case Command::texture_matrix_data:
+    return {Command::texture_matrix_data, "TGENMATRIXDATA",
+            CommandFlow::linear};
   case Command::framebuffer_address:
     return {Command::framebuffer_address, "FRAMEBUFPTR", CommandFlow::linear};
   case Command::framebuffer_width:
@@ -167,6 +179,14 @@ constexpr CommandMetadata command_metadata(std::uint8_t opcode) {
             CommandFlow::linear};
   case Command::clear_mode:
     return {Command::clear_mode, "CLEARMODE", CommandFlow::linear};
+  case Command::stencil_test:
+    return {Command::stencil_test, "STENCILTEST", CommandFlow::linear};
+  case Command::stencil_operation:
+    return {Command::stencil_operation, "STENCILOP", CommandFlow::linear};
+  case Command::color_write_mask:
+    return {Command::color_write_mask, "MASKRGB", CommandFlow::linear};
+  case Command::alpha_write_mask:
+    return {Command::alpha_write_mask, "MASKALPHA", CommandFlow::linear};
   case Command::transfer_start:
     return {Command::transfer_start, "TRANSFERSTART", CommandFlow::transfer};
   case Command::texture_address_0:

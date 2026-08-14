@@ -34,6 +34,7 @@ struct CapturedPrimitive {
   std::uint32_t type{};
   std::size_t vertex_count{};
   std::array<float, 4> first_position{};
+  std::array<float, 3> first_texture{};
   bool has_texture{};
   std::uint32_t texture_width{};
   std::uint32_t texture_height{};
@@ -203,6 +204,7 @@ int ge_component_tests() {
   refract::ge::State source;
   source.commands[0xd5U] = command(0xd5U, 0x12345U);
   source.world_matrix[3] = 42.5F;
+  source.texture_matrix[7] = 12.25F;
   source.vertex_address = 0x08801234U;
   source.address_translation_width = 0x400U;
   std::array<std::uint32_t, refract::ge::context_word_count> context{};
@@ -211,6 +213,7 @@ int ge_component_tests() {
   restored.restore(context);
   CHECK(restored.commands == source.commands);
   CHECK(restored.world_matrix == source.world_matrix);
+  CHECK(restored.texture_matrix == source.texture_matrix);
   CHECK(restored.vertex_address == source.vertex_address);
   CHECK(restored.address_translation_width == 0x400U);
   source.commands[0x3bU] = command(0x3bU, 0x654321U);
@@ -279,10 +282,15 @@ void submit_ge_primitive(std::uint32_t type,
                          std::uint32_t texture_height,
                          GeometryState state) {
   std::array<float, 4> first_position{};
-  if (!vertices.empty())
+  std::array<float, 3> first_texture{};
+  if (!vertices.empty()) {
     std::copy(std::begin(vertices.front().position),
               std::end(vertices.front().position), first_position.begin());
+    std::copy(std::begin(vertices.front().texture),
+              std::end(vertices.front().texture), first_texture.begin());
+  }
   building_primitives.push_back({type, vertices.size(), first_position,
+                                 first_texture,
                                  texture != nullptr,
                                  texture_width, texture_height,
                                  texture != nullptr ? *texture
@@ -504,6 +512,7 @@ int main() {
   CHECK(presented_primitives.size() == 1U);
   CHECK(presented_primitives[0].state.color_write_mask == 0x08U);
   CHECK(presented_primitives[0].state.depth_write);
+  CHECK(presented_primitives[0].state.clear_stencil);
 
   reset_capture();
   const auto color_depth_clear = write_display_list(
@@ -705,6 +714,63 @@ int main() {
   CHECK(presented_primitives[0].state.texture_mipmap_linear);
   CHECK(std::equal(mip_color.begin(), mip_color.end(),
                    presented_primitives[0].texture_pixels.begin()));
+
+  // Camera-projected textures use model-space STQ transformed by the GE's
+  // dedicated 3x4 texture matrix.  Treating this as ordinary UV mapping makes
+  // portal and low-detail geometry appear as flat solid-color polygons.
+  constexpr std::uint32_t projected_list_address = memory_base + 0xa000U;
+  constexpr std::uint32_t projected_setup_address = memory_base + 0xa200U;
+  const std::array<float, 12> texture_matrix{
+      2.0F, 0.0F, 0.0F, 0.0F, 3.0F, 0.0F,
+      0.0F, 0.0F, 4.0F, 0.25F, 0.5F, 0.75F};
+  auto setup_cursor = projected_setup_address;
+  store_word(memory, memory_base, setup_cursor, command(0x40U, 0U));
+  setup_cursor += 4U;
+  for (const auto value : texture_matrix) {
+    store_word(memory, memory_base, setup_cursor,
+               command(0x41U, std::bit_cast<std::uint32_t>(value) >> 8U));
+    setup_cursor += 4U;
+  }
+  store_word(memory, memory_base, setup_cursor, command(0xc0U, 1U));
+  setup_cursor += 4U;
+  store_word(memory, memory_base, setup_cursor, command(0x0cU, 0U));
+  enqueue(state, {projected_setup_address, 0U});
+  const auto projected = write_display_list(
+      memory, memory_base, projected_list_address, vertex_address,
+      texture_address, 0U, 1U);
+  store_word(memory, memory_base, projected_list_address + 2U * 4U,
+             command(0x12U, 0x180U));
+  reset_capture();
+  enqueue(state, projected);
+  CHECK(presented_primitives.size() == 1U);
+  CHECK(std::abs(presented_primitives[0].first_texture[0] - 20.25F) <
+        0.0001F);
+  CHECK(std::abs(presented_primitives[0].first_texture[1] - 60.5F) <
+        0.0001F);
+  CHECK(std::abs(presented_primitives[0].first_texture[2] - 2.75F) <
+        0.0001F);
+
+  // Daxter uses fully masked color draws to populate depth/stencil for
+  // camera-dependent occlusion.  These must remain invisible.
+  constexpr std::uint32_t masked_setup_address = memory_base + 0xa400U;
+  execute_command_list(
+      state, memory, memory_base, masked_setup_address,
+      {{0xc0U, 0U}, {0xe8U, 0x00ffffffU}, {0xe9U, 0xffU},
+       {0x24U, 1U}, {0xdcU, 6U | (0x5aU << 8U) | (0xf0U << 16U)},
+       {0xddU, 2U | (3U << 8U) | (4U << 16U)}});
+  reset_capture();
+  enqueue(state, normal);
+  CHECK(presented_primitives.size() == 1U);
+  const auto& masked = presented_primitives[0].state;
+  CHECK(masked.color_write_mask == 0U);
+  CHECK(masked.stencil_test);
+  CHECK(masked.stencil_function == 6U);
+  CHECK(masked.stencil_reference == 0x5aU);
+  CHECK(masked.stencil_read_mask == 0xf0U);
+  CHECK(masked.stencil_write_mask == 0U);
+  CHECK(masked.stencil_fail == 2U);
+  CHECK(masked.stencil_depth_fail == 3U);
+  CHECK(masked.stencil_depth_pass == 4U);
 
   constexpr std::uint32_t thread_name_address = memory_base + 0x700U;
   constexpr char thread_name[] = "gp-regression";
