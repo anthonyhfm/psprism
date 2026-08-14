@@ -23,8 +23,9 @@ int main() {
   CHECK(mpeg_state::avc_es_size == 2048U);
   CHECK(mpeg_state::atrac_es_size == 2112U);
   CHECK(mpeg_state::atrac_es_output_size == 8192U);
-  CHECK(mpeg_state::required_memory_size == 0x10000U);
+  CHECK(mpeg_state::required_memory_size == 0xb3dbU);
   CHECK(mpeg_state::ringbuffer_memory_size(8U) == 17216U);
+  CHECK(mpeg_state::ringbuffer_memory_size(UINT32_MAX) > UINT32_MAX);
   constexpr std::uint32_t mpeg_memory_base = 0x08800000U;
   constexpr std::uint32_t mpeg_address = mpeg_memory_base + 0x100U;
   constexpr std::uint32_t handle_address = mpeg_memory_base + 0x200U;

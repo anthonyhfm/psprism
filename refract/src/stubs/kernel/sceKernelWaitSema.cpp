@@ -17,13 +17,10 @@ void sceKernelWaitSema(Implementation& implementation, psprecomp::State& state) 
   }
   std::unique_lock lock(semaphore->mutex);
   static thread_local std::uint32_t logged_waits{};
-  static thread_local std::uint32_t last_wait_uid{};
   const auto log_wait = implementation.verbose &&
                         (logged_waits < 16U ||
-                         (logged_waits & 0xffffU) == 0U ||
-                         last_wait_uid != state.gpr[4]);
+                         (logged_waits & 0xffffU) == 0U);
   ++logged_waits;
-  last_wait_uid = state.gpr[4];
   if (log_wait) {
     std::fprintf(stderr,
                  "[psprism:sema] wait thread=%d uid=%u name=%s request=%d "

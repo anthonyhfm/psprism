@@ -49,6 +49,9 @@ bool submit_audio(const std::int16_t* interleaved_stereo,
                   std::uint32_t channel,
                   bool blocking,
                   std::uint32_t sample_rate = 44100U);
+// Stops the host device and releases any producer blocked on queued audio.
+// The runtime calls this before joining guest threads during application exit.
+void shutdown_audio();
 using AudioQueuedFramesCallback = std::uint32_t (*)(std::uint32_t);
 using AudioResetChannelCallback = void (*)(std::uint32_t);
 using AudioTelemetryCallback = AudioTelemetry (*)();

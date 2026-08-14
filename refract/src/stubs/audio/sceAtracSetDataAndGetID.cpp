@@ -10,6 +10,10 @@ void sceAtracSetDataAndGetID(Implementation& implementation, psprecomp::State& s
     return;
   }
   const auto id = atrac_state::create(track.codec_type);
+  if (id < 0) {
+    state.gpr[2] = static_cast<std::uint32_t>(id);
+    return;
+  }
   const auto result = atrac_state::set_data(state, id, state.gpr[4], state.gpr[5]);
   if (result != atrac_state::success) {
     atrac_state::release(id);

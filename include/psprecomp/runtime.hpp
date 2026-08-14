@@ -27,6 +27,7 @@ enum class StopReason : std::uint8_t {
 
 struct CpuProfileCounters {
     std::uint64_t dispatches{};
+    std::uint64_t import_dispatches{};
     std::uint64_t translated_blocks{};
     std::uint64_t interpreter_fallbacks{};
     std::uint64_t direct_cfg_edges{};
@@ -70,7 +71,10 @@ struct State {
     // Profiling is owned by the guest State, so independent guest threads do
     // not contend on process-global counters.  The disabled branch is the
     // only cost in normal builds.
-    bool cpu_profile_enabled{};
+    // A profiling build is opt-out per state.  This makes newly-created guest
+    // thread/callback states observable without process-global counters while
+    // normal builds still compile every counter update away.
+    bool cpu_profile_enabled{cpu_profiling_compiled};
     std::uint32_t dispatch_route_hint{0xffffffffU};
     CpuProfileCounters cpu_profile{};
 };
@@ -79,6 +83,14 @@ inline void note_cpu_dispatch(State& state) {
     if constexpr (cpu_profiling_compiled) {
         if (state.cpu_profile_enabled) {
             ++state.cpu_profile.dispatches;
+        }
+    }
+}
+
+inline void note_cpu_import_dispatch(State& state) {
+    if constexpr (cpu_profiling_compiled) {
+        if (state.cpu_profile_enabled) {
+            ++state.cpu_profile.import_dispatches;
         }
     }
 }

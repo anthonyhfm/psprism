@@ -36,6 +36,18 @@ struct VideoFrameInfo {
   bool produced{};
 };
 
+struct MediaQueueStats {
+  std::size_t capacity_bytes{};
+  std::size_t encoded_bytes{};
+  std::size_t video_staging_bytes{};
+  std::size_t audio_staging_bytes{};
+  std::size_t video_units{};
+  std::size_t audio_units{};
+  std::size_t other_units{};
+  bool pending_video{};
+  bool pending_audio{};
+};
+
 std::optional<PsmfHeader> parse_psmf_header(std::span<const std::uint8_t> data);
 
 class MediaEngine {
@@ -50,6 +62,9 @@ class MediaEngine {
   bool unregister_stream(std::uint32_t uid);
   std::optional<MediaAccessUnit> next_access_unit(std::uint32_t uid);
   std::optional<StreamKind> stream_kind(std::uint32_t uid) const;
+  MediaQueueStats queue_stats() const;
+  bool set_decode_mode(std::int32_t mode);
+  std::int32_t decode_mode() const;
   bool set_video_mode(std::uint32_t pixel_format);
   std::uint32_t video_pixel_format() const;
   VideoFrameInfo last_video_frame() const;

@@ -66,7 +66,11 @@ int main() {
     state.memory = memory.data();
     state.memory_size = memory.size();
     state.memory_base = 0x1000;
+    CHECK(state.cpu_profile_enabled == psprecomp::cpu_profiling_compiled);
     state.cpu_profile_enabled = true;
+
+    psprecomp::note_cpu_import_dispatch(state);
+    CHECK(state.cpu_profile.import_dispatches == 1U);
 
     psprecomp::store32(state, 0x1004, 0x89abcdefU);
     CHECK(state.stop_reason == psprecomp::StopReason::running);

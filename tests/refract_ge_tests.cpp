@@ -240,6 +240,8 @@ bool submit_audio(const std::int16_t*, std::uint32_t, std::uint32_t, bool,
                   std::uint32_t) {
   return true;
 }
+
+void shutdown_audio() {}
 void initialize_frontend() {}
 void set_verbose_logging(bool) {}
 void run_event_loop() {}
@@ -304,7 +306,7 @@ int main() {
   constexpr std::uint32_t list_address = memory_base + 0x1000U;
   constexpr std::uint32_t vertex_address = memory_base + 0x2000U;
   constexpr std::uint32_t texture_address = memory_base + 0x3000U;
-  std::vector<std::uint8_t> memory(0x10000U);
+  std::vector<std::uint8_t> memory(0x30000U);
   const std::array<float, 6> vertices{10.0F, 20.0F, 0.5F,
                                       30.0F, 40.0F, 0.5F};
   std::memcpy(memory.data() + vertex_address - memory_base, vertices.data(),
@@ -319,6 +321,7 @@ int main() {
   configuration.guest_executor = [](psprecomp::State& guest_state) {
     observed_thread_gp.store(guest_state.gpr[28]);
     observed_thread_pc.store(guest_state.pc);
+    guest_state.gpr[2] = 1U;
     guest_state.stop_reason = psprecomp::StopReason::returned;
   };
   refract::Runtime::instance().configure(memory.data(), memory.size(),
@@ -329,6 +332,38 @@ int main() {
   state.memory_size = memory.size();
   state.memory_base = memory_base;
   refract::Runtime::instance().prepare_state(state);
+
+  constexpr std::uint32_t ringbuffer_address = memory_base + 0x800U;
+  constexpr std::uint32_t ringbuffer_data = memory_base + 0xa000U;
+  constexpr std::uint32_t ringbuffer_callback = memory_base + 0x6000U;
+  constexpr std::uint32_t ringbuffer_gp = 0x08987640U;
+  constexpr std::uint32_t mpeg_address = memory_base + 0x9000U;
+  constexpr std::uint32_t mpeg_memory = memory_base + 0x10000U;
+  state.gpr[4] = ringbuffer_address;
+  state.gpr[5] = 2U;
+  state.gpr[6] = ringbuffer_data;
+  state.gpr[7] = 2U * (2048U + 104U);
+  state.gpr[8] = ringbuffer_callback;
+  state.gpr[9] = 0x12345678U;
+  state.gpr[28] = ringbuffer_gp;
+  refract::pspsdk::sceMpegRingbufferConstruct(state);
+  CHECK(state.gpr[2] == 0U);
+  state.gpr[4] = mpeg_address;
+  state.gpr[5] = mpeg_memory;
+  state.gpr[6] = 0x10000U;
+  state.gpr[7] = ringbuffer_address;
+  refract::pspsdk::sceMpegCreate(state);
+  CHECK(state.gpr[2] == 0U);
+  observed_thread_gp.store(0U);
+  observed_thread_pc.store(0U);
+  state.gpr[4] = ringbuffer_address;
+  state.gpr[5] = 1U;
+  state.gpr[6] = 1U;
+  state.gpr[28] = 0x08001234U;
+  refract::pspsdk::sceMpegRingbufferPut(state);
+  CHECK(state.gpr[2] == 1U);
+  CHECK(observed_thread_gp.load() == ringbuffer_gp);
+  CHECK(observed_thread_pc.load() == ringbuffer_callback);
 
   constexpr std::uint32_t event_name_address = memory_base + 0x5000U;
   constexpr std::uint32_t event_status_address = memory_base + 0x5100U;

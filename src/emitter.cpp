@@ -2134,6 +2134,7 @@ void emit_project(const ElfImage& image, const std::filesystem::path& directory,
                   "  switch (current_pc - state.memory_base) {\n";
         for (const auto& import : platform_imports) {
             stream << "  case " << hex(import.source->stub_address) << ": ";
+            stream << "note_cpu_import_dispatch(state); ";
             if (import.symbol == "sceKernelCreateThread") {
                 // Route thread creation through create_guest_thread so the
                 // new thread's real native entry point is our own
@@ -2186,17 +2187,19 @@ void emit_project(const ElfImage& image, const std::filesystem::path& directory,
                "fallback=%u\\n\", "
                "static_cast<std::uint32_t>(p.translated_blocks), "
                "static_cast<std::uint32_t>(p.interpreter_fallbacks));\n"
-               "  platform::log(\"[psprecomp-profile] direct=%u "
-               "reads=%u\\n\", "
-               "static_cast<std::uint32_t>(p.direct_cfg_edges), "
-               "static_cast<std::uint32_t>(p.memory_reads));\n"
-               "  platform::log(\"[psprecomp-profile] writes=%u "
-               "faults=%u\\n\", "
-               "static_cast<std::uint32_t>(p.memory_writes), "
-               "static_cast<std::uint32_t>(p.memory_faults));\n"
-               "  platform::log(\"[psprecomp-profile] vfpu_static=%u "
-               "vfpu_fallback=%u\\n\", "
-               "static_cast<std::uint32_t>(p.vfpu_static_lowerings), "
+               "  platform::log(\"[psprecomp-profile] imports=%u "
+               "direct=%u\\n\", "
+               "static_cast<std::uint32_t>(p.import_dispatches), "
+               "static_cast<std::uint32_t>(p.direct_cfg_edges));\n"
+               "  platform::log(\"[psprecomp-profile] reads=%u "
+               "writes=%u\\n\", "
+               "static_cast<std::uint32_t>(p.memory_reads), "
+               "static_cast<std::uint32_t>(p.memory_writes));\n"
+               "  platform::log(\"[psprecomp-profile] faults=%u "
+               "vfpu_static=%u\\n\", "
+               "static_cast<std::uint32_t>(p.memory_faults), "
+               "static_cast<std::uint32_t>(p.vfpu_static_lowerings));\n"
+               "  platform::log(\"[psprecomp-profile] vfpu_fallback=%u\\n\", "
                "static_cast<std::uint32_t>(p.vfpu_helper_fallbacks));\n"
                "}\n"
                "} // namespace\n"
@@ -2227,13 +2230,28 @@ void emit_project(const ElfImage& image, const std::filesystem::path& directory,
                        << "(State&, std::uint32_t);\n";
             }
         }
-        stream
-            << "bool dispatch_block(State& state, std::uint32_t current_pc) {\n"
-               "  if (!state.branch_pending && "
-               "platform::dispatch_import(state, current_pc)) "
-               "return true;\n";
+        stream << "bool dispatch_block(State& state, std::uint32_t current_pc) "
+                  "{\n";
+        if (!platform_imports.empty() || function_mode) {
+            stream << "  const auto dispatch_offset = current_pc - "
+                      "state.memory_base;\n";
+        }
+        if (!platform_imports.empty()) {
+            const auto [first_import, last_import] = std::minmax_element(
+                platform_imports.begin(), platform_imports.end(),
+                [](const PlatformImport& left, const PlatformImport& right) {
+                    return left.source->stub_address <
+                           right.source->stub_address;
+                });
+            stream << "  if (!state.branch_pending && dispatch_offset >= "
+                   << hex(first_import->source->stub_address)
+                   << " && dispatch_offset <= "
+                   << hex(last_import->source->stub_address)
+                   << " && platform::dispatch_import(state, current_pc)) "
+                      "return true;\n";
+        }
         if (function_mode) {
-            stream << "  const auto offset = current_pc - state.memory_base;\n"
+            stream << "  const auto offset = dispatch_offset;\n"
                       "  constexpr std::size_t route_count = "
                       "sizeof(function_routes) / sizeof(function_routes[0]);\n"
                       "  const auto hint = "
@@ -2293,8 +2311,12 @@ void emit_project(const ElfImage& image, const std::filesystem::path& directory,
                "#endif\n"
                "    if (!translated && !interpret_allegrex(state, "
                "current_pc)) {\n"
-               "      state.stop_reason = StopReason::invalid_pc;\n"
-               "      state.fault_address = current_pc; return;\n"
+               "      if (state.stop_reason == StopReason::running) {\n"
+               "        state.stop_reason = StopReason::invalid_pc;\n"
+               "        state.fault_address = current_pc;\n"
+               "        state.fault_pc = current_pc;\n"
+               "      }\n"
+               "      return;\n"
                "    }\n"
                "    if (state.stop_reason != StopReason::running) { return; }\n"
                "  }\n"
@@ -2650,6 +2672,7 @@ void emit_project(const ElfImage& image, const std::filesystem::path& directory,
                "  switch (current_pc - state.memory_base) {\n";
         for (const auto& import : platform_imports) {
             stream << "  case " << hex(import.source->stub_address) << ": ";
+            stream << "note_cpu_import_dispatch(state); ";
             if (!import.symbol.empty() && is_psp_sdk_stub(import.symbol)) {
                 stream << "refract::pspsdk::" << import.symbol
                        << "(state);";

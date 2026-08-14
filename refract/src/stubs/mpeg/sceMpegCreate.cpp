@@ -4,12 +4,19 @@ void sceMpegCreate(Implementation& implementation, psprecomp::State& state) {
   auto* mpeg = mpeg_state::guest_pointer<std::uint32_t>(state, state.gpr[4]);
   auto* ringbuffer =
       mpeg_state::guest_pointer<mpeg_state::Ringbuffer>(state, state.gpr[7]);
-  const auto handle_address = state.gpr[5] + 0x30U;
+  const auto unaligned_handle = static_cast<std::uint64_t>(state.gpr[5]) +
+                                0x3fU;
+  if (state.gpr[6] < mpeg_state::required_memory_size ||
+      unaligned_handle > UINT32_MAX) {
+    state.gpr[2] = mpeg_state::insufficient_memory;
+    return;
+  }
+  const auto handle_address =
+      static_cast<std::uint32_t>(unaligned_handle) & ~0x3fU;
   auto* handle = reinterpret_cast<std::uint8_t*>(
       psprecomp::mapped_address(state, handle_address, 24U));
-  if (mpeg == nullptr || ringbuffer == nullptr || handle == nullptr ||
-      state.gpr[6] < mpeg_state::required_memory_size) {
-    state.gpr[2] = 0xffffffffU;
+  if (mpeg == nullptr || ringbuffer == nullptr || handle == nullptr) {
+    state.gpr[2] = mpeg_state::invalid_address;
     return;
   }
   *mpeg = handle_address;

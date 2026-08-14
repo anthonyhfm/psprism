@@ -23,8 +23,7 @@ namespace mpeg_state {
 namespace {
 
 constexpr std::array<std::uint8_t, 4> psmf_magic{'P', 'S', 'M', 'F'};
-constexpr std::size_t maximum_access_units = 64U;
-
+constexpr std::size_t maximum_access_units_per_kind = 64U;
 std::uint16_t read_be16(const std::uint8_t* value) {
   return static_cast<std::uint16_t>(value[0]) << 8U |
          static_cast<std::uint16_t>(value[1]);
@@ -134,6 +133,11 @@ struct MediaEngine::Implementation {
     std::uint32_t channel{};
   };
 
+  struct AudioStaging {
+    std::vector<std::uint8_t> bytes;
+    std::int64_t next_pts{-1};
+  };
+
   explicit Implementation(std::size_t requested_capacity)
       : capacity(std::max<std::size_t>(requested_capacity, 2048U)) {}
 
@@ -148,31 +152,127 @@ struct MediaEngine::Implementation {
 #endif
   }
 
-  void queue_packet(std::size_t begin, std::size_t end, std::uint8_t code) {
+  std::size_t unit_count(StreamKind kind) const {
+    return static_cast<std::size_t>(std::count_if(
+        units.begin(), units.end(), [kind](const auto& candidate) {
+          return candidate.first == kind;
+        }));
+  }
+
+  static std::uint8_t normalized_audio_channel(std::uint8_t channel) {
+    return channel >= 0x90U && channel <= 0x9fU
+               ? static_cast<std::uint8_t>(channel & 0x0fU)
+               : channel;
+  }
+
+  bool audio_channel_registered(std::uint8_t channel) const {
+    const auto normalized = normalized_audio_channel(channel);
+    return std::any_of(streams.begin(), streams.end(), [&](const auto& item) {
+      return item.second.kind == StreamKind::audio &&
+             item.second.channel == normalized;
+    });
+  }
+
+  std::size_t audio_staging_size() const {
+    std::size_t result{};
+    for (const auto& staging : audio_staging)
+      result += staging.second.bytes.size();
+    return result;
+  }
+
+  static std::optional<std::size_t> find_video_aud(
+      std::span<const std::uint8_t> bytes, std::size_t start = 0U) {
+    for (auto index = start; index + 3U < bytes.size(); ++index) {
+      if (bytes[index] != 0U || bytes[index + 1U] != 0U) continue;
+      if (bytes[index + 2U] == 1U &&
+          (bytes[index + 3U] & 0x1fU) == 9U)
+        return index;
+      if (index + 4U < bytes.size() && bytes[index + 2U] == 0U &&
+          bytes[index + 3U] == 1U &&
+          (bytes[index + 4U] & 0x1fU) == 9U)
+        return index;
+    }
+    return std::nullopt;
+  }
+
+  void extract_video_access_units() {
+    auto first = find_video_aud(video_bytes);
+    if (!first) {
+      if (video_bytes.size() > 4U) {
+        video_bytes.erase(video_bytes.begin(), video_bytes.end() - 4);
+      }
+      return;
+    }
+    if (*first != 0U) {
+      video_bytes.erase(video_bytes.begin(),
+                        video_bytes.begin() +
+                            static_cast<std::ptrdiff_t>(*first));
+    }
+    while (unit_count(StreamKind::video) <
+           maximum_access_units_per_kind) {
+      const auto next = find_video_aud(video_bytes, 4U);
+      if (!next) return;
+      MediaAccessUnit unit;
+      unit.bytes.assign(video_bytes.begin(),
+                        video_bytes.begin() +
+                            static_cast<std::ptrdiff_t>(*next));
+      unit.pts = video_next_pts;
+      unit.dts = video_next_pts;
+      unit.source_bytes = static_cast<std::uint32_t>(unit.bytes.size());
+      units.push_back({StreamKind::video, std::move(unit)});
+      if (video_next_pts >= 0) video_next_pts += 3003;
+      video_bytes.erase(video_bytes.begin(),
+                        video_bytes.begin() +
+                            static_cast<std::ptrdiff_t>(*next));
+    }
+  }
+
+  bool queue_packet(std::size_t begin, std::size_t end, std::uint8_t code) {
     const bool video = code >= 0xe0U && code <= 0xefU;
     const bool audio = code == 0xbdU;
-    if ((!video && !audio) || end <= begin || units.size() >= maximum_access_units)
-      return;
+    if ((!video && !audio) || end <= begin) return true;
+    if (video && unit_count(StreamKind::video) >=
+                     maximum_access_units_per_kind) {
+      return false;
+    }
     const auto packet = std::span<const std::uint8_t>(encoded).subspan(
         begin, end - begin);
     const auto header = parse_pes_header(packet, audio);
-    if (!header || header->payload_offset >= packet.size()) return;
+    if (!header || header->payload_offset >= packet.size()) return true;
     const auto payload = packet.subspan(header->payload_offset);
     if (audio) {
-      if (audio_bytes.empty() && header->pts >= 0) audio_next_pts = header->pts;
-      audio_bytes.insert(audio_bytes.end(), payload.begin(), payload.end());
-      extract_audio_frames(header->channel);
-      return;
+      const auto channel = normalized_audio_channel(header->channel);
+      if (!audio_channel_registered(channel)) return true;
+      auto& staging = audio_staging[channel];
+      if (staging.bytes.empty() && header->pts >= 0)
+        staging.next_pts = header->pts;
+      staging.bytes.insert(staging.bytes.end(), payload.begin(), payload.end());
+      extract_audio_frames(channel);
+      return true;
     }
-    MediaAccessUnit unit;
-    unit.bytes.assign(payload.begin(), payload.end());
-    unit.pts = header->pts;
-    unit.dts = header->dts;
-    unit.source_bytes = static_cast<std::uint32_t>(packet.size());
-    units.push_back({StreamKind::video, std::move(unit)});
+    const auto aud = find_video_aud(payload);
+    if (video_bytes.empty() && !aud) {
+      // Some homebrew feeds one complete frame per PES without Annex-B AUDs.
+      // Preserve that behavior while PSMF streams take the framed path below.
+      MediaAccessUnit unit;
+      unit.bytes.assign(payload.begin(), payload.end());
+      unit.pts = header->pts;
+      unit.dts = header->dts;
+      unit.source_bytes = static_cast<std::uint32_t>(packet.size());
+      units.push_back({StreamKind::video, std::move(unit)});
+      return true;
+    }
+    if (video_next_pts < 0 && header->pts >= 0) video_next_pts = header->pts;
+    video_bytes.insert(video_bytes.end(), payload.begin(), payload.end());
+    extract_video_access_units();
+    return true;
   }
 
   void extract_audio_frames(std::uint8_t channel) {
+    auto found_staging = audio_staging.find(channel);
+    if (found_staging == audio_staging.end()) return;
+    auto& staging = found_staging->second;
+    auto& audio_bytes = staging.bytes;
     constexpr std::array<std::uint8_t, 2> audio_header{0x0fU, 0xd0U};
     for (;;) {
       const auto header = std::search(audio_bytes.begin(), audio_bytes.end(),
@@ -196,23 +296,30 @@ struct MediaEngine::Implementation {
         continue;
       }
       if (audio_bytes.size() < frame_size) return;
+      if (unit_count(StreamKind::audio) >=
+          maximum_access_units_per_kind) {
+        return;
+      }
       MediaAccessUnit unit;
       unit.bytes.assign(audio_bytes.begin() + 8, audio_bytes.begin() +
                                                       static_cast<std::ptrdiff_t>(frame_size));
-      unit.pts = audio_next_pts;
-      unit.dts = audio_next_pts;
+      unit.pts = staging.next_pts;
+      unit.dts = staging.next_pts;
       unit.source_bytes = static_cast<std::uint32_t>(frame_size);
-      unit.channel = channel;
+      unit.channel = normalized_audio_channel(channel);
       unit.channels = code1 == 0x24U ? 1U : 2U;
       units.push_back({StreamKind::audio, std::move(unit)});
-      if (audio_next_pts >= 0) audio_next_pts += 4180;
+      if (staging.next_pts >= 0) staging.next_pts += 4180;
       audio_bytes.erase(audio_bytes.begin(),
                         audio_bytes.begin() + static_cast<std::ptrdiff_t>(frame_size));
-      if (units.size() >= maximum_access_units) return;
     }
   }
 
   void demux() {
+    extract_video_access_units();
+    for (auto& staging : audio_staging) {
+      if (!staging.second.bytes.empty()) extract_audio_frames(staging.first);
+    }
     std::size_t cursor{};
     std::size_t consumed{};
     while (cursor + 6U <= encoded.size()) {
@@ -241,14 +348,14 @@ struct MediaEngine::Implementation {
           ++next;
         }
         if (next + 3U >= encoded.size()) break;
-        queue_packet(cursor, next, code);
+        if (!queue_packet(cursor, next, code)) break;
         cursor = next;
         consumed = cursor;
         continue;
       }
       const auto end = cursor + 6U + payload_size;
       if (end > encoded.size()) break;
-      queue_packet(cursor, end, code);
+      if (!queue_packet(cursor, end, code)) break;
       cursor = end;
       consumed = cursor;
     }
@@ -266,9 +373,8 @@ struct MediaEngine::Implementation {
     codec = avcodec_alloc_context3(decoder);
     packet = av_packet_alloc();
     frame = av_frame_alloc();
-    parser = av_parser_init(AV_CODEC_ID_H264);
     if (codec == nullptr || packet == nullptr || frame == nullptr ||
-        parser == nullptr || avcodec_open2(codec, decoder, nullptr) < 0) {
+        avcodec_open2(codec, decoder, nullptr) < 0) {
       return false;
     }
     return true;
@@ -280,17 +386,19 @@ struct MediaEngine::Implementation {
   mutable std::mutex mutex;
   std::size_t capacity{};
   std::vector<std::uint8_t> encoded;
-  std::vector<std::uint8_t> audio_bytes;
+  std::vector<std::uint8_t> video_bytes;
+  std::unordered_map<std::uint8_t, AudioStaging> audio_staging;
   std::deque<std::pair<StreamKind, MediaAccessUnit>> units;
   std::unordered_map<std::uint32_t, Stream> streams;
   std::uint32_t next_stream{1U};
   std::size_t queued_payload_bytes{};
   std::uint32_t frame_number{};
+  std::int32_t decode_mode{};
   std::uint32_t pixel_format{3U};
   VideoFrameInfo last_frame{};
   std::optional<MediaAccessUnit> pending_video;
   std::optional<MediaAccessUnit> pending_audio;
-  std::int64_t audio_next_pts{-1};
+  std::int64_t video_next_pts{-1};
   ATRAC3PContext* audio_decoder{};
   std::size_t audio_block_align{};
   std::uint8_t audio_channels{};
@@ -301,6 +409,7 @@ struct MediaEngine::Implementation {
   AVFrame* frame{};
   SwsContext* scaler{};
   std::vector<std::uint8_t> rgba_scratch;
+  std::vector<std::uint8_t> padded_video_packet;
 #endif
 };
 
@@ -316,7 +425,8 @@ bool MediaEngine::append_packets(std::span<const std::uint8_t> bytes) {
   std::size_t queued{};
   for (const auto& item : impl.units) queued += item.second.source_bytes;
   if (bytes.size() > impl.capacity ||
-      impl.encoded.size() + impl.audio_bytes.size() + queued >
+      impl.encoded.size() + impl.video_bytes.size() +
+              impl.audio_staging_size() + queued >
           impl.capacity - bytes.size()) {
     return false;
   }
@@ -351,12 +461,52 @@ std::optional<StreamKind> MediaEngine::stream_kind(std::uint32_t uid) const {
                                     : std::optional(found->second.kind);
 }
 
+MediaQueueStats MediaEngine::queue_stats() const {
+  const auto& impl = *implementation_;
+  std::lock_guard lock(impl.mutex);
+  MediaQueueStats result;
+  result.capacity_bytes = impl.capacity;
+  result.encoded_bytes = impl.encoded.size();
+  result.video_staging_bytes = impl.video_bytes.size();
+  result.audio_staging_bytes = impl.audio_staging_size();
+  result.pending_video = impl.pending_video.has_value();
+  result.pending_audio = impl.pending_audio.has_value();
+  for (const auto& item : impl.units) {
+    switch (item.first) {
+      case StreamKind::video:
+        ++result.video_units;
+        break;
+      case StreamKind::audio:
+        ++result.audio_units;
+        break;
+      case StreamKind::other:
+        ++result.other_units;
+        break;
+    }
+  }
+  return result;
+}
+
 bool MediaEngine::set_video_mode(std::uint32_t pixel_format) {
   if (pixel_format > 3U) return false;
   auto& impl = *implementation_;
   std::lock_guard lock(impl.mutex);
   impl.pixel_format = pixel_format;
   return true;
+}
+
+bool MediaEngine::set_decode_mode(std::int32_t mode) {
+  if (mode < -1 || mode > 2) return false;
+  auto& impl = *implementation_;
+  std::lock_guard lock(impl.mutex);
+  impl.decode_mode = mode;
+  return true;
+}
+
+std::int32_t MediaEngine::decode_mode() const {
+  const auto& impl = *implementation_;
+  std::lock_guard lock(impl.mutex);
+  return impl.decode_mode;
 }
 
 std::uint32_t MediaEngine::video_pixel_format() const {
@@ -381,9 +531,7 @@ std::optional<MediaAccessUnit> MediaEngine::next_access_unit(
       impl.units.begin(), impl.units.end(), [&](const auto& candidate) {
         return candidate.first == stream->second.kind &&
                (candidate.first != StreamKind::audio ||
-                stream->second.channel == 0U ||
-                candidate.second.channel == 0U ||
-                (candidate.second.channel & 0x0fU) == stream->second.channel);
+                candidate.second.channel == stream->second.channel);
       });
   if (found == impl.units.end()) return std::nullopt;
   auto result = std::move(found->second);
@@ -393,6 +541,7 @@ std::optional<MediaAccessUnit> MediaEngine::next_access_unit(
   } else if (stream->second.kind == StreamKind::audio) {
     impl.pending_audio = result;
   }
+  impl.demux();
   return result;
 }
 
@@ -430,12 +579,21 @@ bool copy_video_frame(AVFrame* frame, SwsContext*& scaler,
   if (width == 0U || height == 0U || frame_stride < width) return false;
   const auto bytes_per_pixel = pixel_format == 3U ? 4U : 2U;
   if (height > output.size() / frame_stride / bytes_per_pixel) return false;
-  rgba.resize(static_cast<std::size_t>(width) * height * 4U);
   scaler = sws_getCachedContext(
       scaler, frame->width, frame->height,
       static_cast<AVPixelFormat>(frame->format), frame->width, frame->height,
       AV_PIX_FMT_RGBA, SWS_BILINEAR, nullptr, nullptr, nullptr);
   if (scaler == nullptr) return false;
+  if (pixel_format == 3U) {
+    std::uint8_t* destination[]{output.data()};
+    const int destination_stride[]{static_cast<int>(frame_stride * 4U)};
+    sws_scale(scaler, frame->data, frame->linesize, 0, frame->height,
+              destination, destination_stride);
+    info = {width, height, ++frame_number, true};
+    last_frame = info;
+    return true;
+  }
+  rgba.resize(static_cast<std::size_t>(width) * height * 4U);
   std::uint8_t* destination[]{rgba.data()};
   const int destination_stride[]{frame->width * 4};
   sws_scale(scaler, frame->data, frame->linesize, 0, frame->height,
@@ -481,33 +639,30 @@ bool MediaEngine::decode_video(const MediaAccessUnit& access_unit,
   info = {};
 #if defined(REFRACT_HAS_FFMPEG)
   if (!impl.ensure_decoder()) return false;
-  const std::uint8_t* input = access_unit.bytes.data();
-  auto remaining = static_cast<int>(std::min<std::size_t>(
-      access_unit.bytes.size(), static_cast<std::size_t>(std::numeric_limits<int>::max())));
-  while (remaining > 0) {
-    std::uint8_t* parsed{};
-    int parsed_size{};
-    const auto consumed = av_parser_parse2(
-        impl.parser, impl.codec, &parsed, &parsed_size, input, remaining,
-        access_unit.pts, access_unit.dts, 0);
-    if (consumed < 0) return false;
-    input += consumed;
-    remaining -= consumed;
-    if (parsed_size == 0) {
-      if (consumed == 0) break;
-      continue;
-    }
-    impl.packet->data = parsed;
-    impl.packet->size = parsed_size;
-    impl.packet->pts = access_unit.pts;
-    impl.packet->dts = access_unit.dts;
-    if (avcodec_send_packet(impl.codec, impl.packet) < 0) return false;
-    if (avcodec_receive_frame(impl.codec, impl.frame) != 0) continue;
-    return copy_video_frame(impl.frame, impl.scaler, impl.rgba_scratch, output,
-                            frame_stride, pixel_format, impl.frame_number,
-                            impl.last_frame, info);
-  }
-  return true;
+  if (access_unit.bytes.empty() ||
+      access_unit.bytes.size() >
+          static_cast<std::size_t>(std::numeric_limits<int>::max()))
+    return false;
+  impl.padded_video_packet.assign(
+      access_unit.bytes.size() + AV_INPUT_BUFFER_PADDING_SIZE, 0U);
+  std::copy(access_unit.bytes.begin(), access_unit.bytes.end(),
+            impl.padded_video_packet.begin());
+  av_packet_unref(impl.packet);
+  impl.packet->data = impl.padded_video_packet.data();
+  impl.packet->size = static_cast<int>(access_unit.bytes.size());
+  impl.packet->pts = access_unit.pts;
+  impl.packet->dts = access_unit.dts;
+  const auto send_result = avcodec_send_packet(impl.codec, impl.packet);
+  impl.packet->data = nullptr;
+  impl.packet->size = 0;
+  if (send_result < 0) return false;
+  const auto receive_result = avcodec_receive_frame(impl.codec, impl.frame);
+  if (receive_result == AVERROR(EAGAIN) || receive_result == AVERROR_EOF)
+    return true;
+  if (receive_result < 0) return false;
+  return copy_video_frame(impl.frame, impl.scaler, impl.rgba_scratch, output,
+                          frame_stride, pixel_format, impl.frame_number,
+                          impl.last_frame, info);
 #else
   static_cast<void>(access_unit);
   static_cast<void>(output);
@@ -618,11 +773,12 @@ void MediaEngine::flush() {
   auto& impl = *implementation_;
   std::lock_guard lock(impl.mutex);
   impl.encoded.clear();
-  impl.audio_bytes.clear();
+  impl.video_bytes.clear();
+  impl.audio_staging.clear();
   impl.units.clear();
   impl.pending_video.reset();
   impl.pending_audio.reset();
-  impl.audio_next_pts = -1;
+  impl.video_next_pts = -1;
   if (impl.audio_decoder != nullptr) atrac3p_flush_buffers(impl.audio_decoder);
   impl.frame_number = 0U;
   impl.last_frame = {};
@@ -634,7 +790,8 @@ void MediaEngine::flush() {
 std::size_t MediaEngine::buffered_bytes() const {
   const auto& impl = *implementation_;
   std::lock_guard lock(impl.mutex);
-  std::size_t result = impl.encoded.size() + impl.audio_bytes.size();
+  std::size_t result = impl.encoded.size() + impl.video_bytes.size() +
+                       impl.audio_staging_size();
   for (const auto& item : impl.units) result += item.second.source_bytes;
   return result;
 }

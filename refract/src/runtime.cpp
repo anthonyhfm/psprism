@@ -31,6 +31,7 @@
 #include <fstream>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <unistd.h>
@@ -803,6 +804,8 @@ using Implementation = Runtime::Implementation;
 void request_guest_exit(Implementation& implementation) {
   implementation.exit_requested = true;
   implementation.exit_changed.notify_all();
+  implementation.guest_execution_changed.notify_all();
+  host::shutdown_audio();
   std::lock_guard lock(implementation.objects_mutex);
   for (const auto& [uid, semaphore] : implementation.semaphores) {
     static_cast<void>(uid);
@@ -830,12 +833,19 @@ void request_guest_exit(Implementation& implementation) {
   }
 }
 
-void acquire_guest_execution(Implementation& implementation) {
+bool acquire_guest_execution(Implementation& implementation) {
   std::unique_lock lock(implementation.guest_execution_mutex);
   const auto ticket = implementation.next_guest_ticket++;
-  implementation.guest_execution_changed.wait(
-      lock, [&] { return ticket == implementation.serving_guest_ticket; });
+  implementation.guest_execution_changed.wait(lock, [&] {
+    return ticket == implementation.serving_guest_ticket ||
+           implementation.exit_requested.load(std::memory_order_relaxed);
+  });
+  if (implementation.exit_requested.load(std::memory_order_relaxed)) {
+    guest_execution_locked = false;
+    return false;
+  }
   guest_execution_locked = true;
+  return true;
 }
 
 void release_guest_execution(Implementation& implementation) {
@@ -849,17 +859,21 @@ void release_guest_execution(Implementation& implementation) {
 
 struct GuestExecutionLock {
   explicit GuestExecutionLock(Implementation& implementation)
-      : implementation_(implementation) {
-    acquire_guest_execution(implementation_);
+      : implementation_(implementation), locked_(
+            acquire_guest_execution(implementation_)) {}
+
+  ~GuestExecutionLock() {
+    if (locked_) release_guest_execution(implementation_);
   }
 
-  ~GuestExecutionLock() { release_guest_execution(implementation_); }
+  [[nodiscard]] bool locked() const { return locked_; }
 
   GuestExecutionLock(const GuestExecutionLock&) = delete;
   GuestExecutionLock& operator=(const GuestExecutionLock&) = delete;
 
 private:
   Implementation& implementation_;
+  bool locked_{};
 };
 
 struct GuestExecutionPause {
@@ -871,9 +885,7 @@ struct GuestExecutionPause {
   }
 
   ~GuestExecutionPause() {
-    if (paused_) {
-      acquire_guest_execution(implementation_);
-    }
+    if (paused_) static_cast<void>(acquire_guest_execution(implementation_));
   }
 
   GuestExecutionPause(const GuestExecutionPause&) = delete;
@@ -886,6 +898,10 @@ private:
 
 void execute_guest(Implementation& implementation, psprecomp::State& state) {
   GuestExecutionLock execution_lock(implementation);
+  if (!execution_lock.locked()) {
+    state.stop_reason = psprecomp::StopReason::returned;
+    return;
+  }
   implementation.configuration.guest_executor(state);
 }
 
@@ -911,7 +927,9 @@ bool dispatch_guest_callback(Implementation& implementation,
                              std::uint32_t first_argument,
                              std::uint32_t second_argument,
                              std::uint32_t third_argument = 0U,
-                             std::uint32_t* result = nullptr) {
+                             std::uint32_t* result = nullptr,
+                             std::optional<std::uint32_t> gp_override =
+                                 std::nullopt) {
   if (entry == 0U || !implementation.configuration.guest_executor)
     return false;
   constexpr std::uint32_t callback_stack_size = 0x4000U;
@@ -924,7 +942,7 @@ bool dispatch_guest_callback(Implementation& implementation,
     return false;
   auto callback_state = state;
   callback_state.pc = entry;
-  const auto guest_gp = callback_state.gpr[28];
+  const auto guest_gp = gp_override.value_or(callback_state.gpr[28]);
   std::fill_n(callback_state.gpr, 32U, 0U);
   callback_state.gpr[4] = first_argument;
   callback_state.gpr[5] = second_argument;

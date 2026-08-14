@@ -8,6 +8,10 @@ void sceAtracDecodeData(Implementation& implementation, psprecomp::State& state)
     state.gpr[2] = atrac_state::invalid_id;
     return;
   }
+  if ((state.gpr[5] & 1U) != 0U) {
+    state.gpr[2] = atrac_state::not_4byte_alignment;
+    return;
+  }
   std::int16_t* samples = nullptr;
   if (state.gpr[5] != 0U) {
     const auto maximum_bytes = static_cast<std::size_t>(4096U * 2U) *

@@ -76,4 +76,32 @@ int main() {
           std::string::npos);
     CHECK(generated.find("note_vfpu_helper_fallback(state)") !=
           std::string::npos);
+
+    const auto project = std::filesystem::temp_directory_path() /
+                         ("psprism-dispatch-emitter-" +
+                          std::to_string(std::chrono::steady_clock::now()
+                                             .time_since_epoch()
+                                             .count()));
+    image.imports.push_back(
+        {"sceUtility", 0x2ad8e239U, 0x3000U, 0U});
+    psprecomp::GeneratedProjectOptions options;
+    options.platform_directory = project / "platform";
+    psprecomp::emit_project(image, project / "generated", nullptr, options);
+    std::ifstream dispatch_stream(project / "generated" / "dispatch.cpp");
+    const std::string dispatch(
+        (std::istreambuf_iterator<char>(dispatch_stream)),
+        std::istreambuf_iterator<char>());
+    std::ifstream platform_stream(project / "platform" / "macos" /
+                                  "platform.cpp");
+    const std::string platform(
+        (std::istreambuf_iterator<char>(platform_stream)),
+        std::istreambuf_iterator<char>());
+    std::filesystem::remove_all(project);
+    CHECK(dispatch.find("dispatch_offset >= 0x00003000U && dispatch_offset <= "
+                        "0x00003000U") != std::string::npos);
+    CHECK(dispatch.find("state.stop_reason == StopReason::running") !=
+          std::string::npos);
+    CHECK(dispatch.find("state.fault_pc = current_pc") != std::string::npos);
+    CHECK(platform.find("note_cpu_import_dispatch(state)") !=
+          std::string::npos);
 }

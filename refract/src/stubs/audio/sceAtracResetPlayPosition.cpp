@@ -9,6 +9,10 @@ void sceAtracResetPlayPosition(Implementation& implementation, psprecomp::State&
     return;
   }
   std::lock_guard lock(decoder->decoder_mutex);
+  if (state.gpr[5] > decoder->track.end_sample) {
+    state.gpr[2] = atrac_state::bad_sample;
+    return;
+  }
   if (!decoder->seek(state.gpr[5])) {
     state.gpr[2] = atrac_state::bad_data;
     return;

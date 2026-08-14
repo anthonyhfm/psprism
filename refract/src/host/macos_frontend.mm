@@ -1,4 +1,5 @@
 #include "host.hpp"
+#include "ge/ge_framebuffer_source.hpp"
 #if defined(REFRACT_HAS_DESKTOP_DIALOGS)
 #include "desktop_dialogs.hpp"
 #endif
@@ -134,6 +135,7 @@ std::vector<GeometryBatch> presented_geometry_batches;
 std::mutex vertex_buffer_pool_mutex;
 NSMutableArray<id<MTLBuffer>>* vertex_buffer_pool;
 refract::ge::CacheMetricsAccumulator ge_cache_counters;
+refract::ge::FramebufferSourceTracker framebuffer_sources;
 std::atomic_uint32_t display_framebuffer_address{0x04000000U};
 std::atomic_uint32_t ge_presented_frames{};
 std::atomic_uint32_t keyboard_buttons{};
@@ -219,6 +221,7 @@ refract::desktop::DialogFrame current_dialog_frame();
 @property(nonatomic, strong) NSArray<id<MTLDepthStencilState>>* depthStates;
 @property(nonatomic, strong) NSArray<id<MTLSamplerState>>* samplerStates;
 @property(nonatomic, strong) NSMutableDictionary<NSNumber*, id<MTLTexture>>* renderTargets;
+@property(nonatomic, strong) NSMutableDictionary<NSNumber*, id<MTLTexture>>* cpuFramebuffers;
 @property(nonatomic, strong) NSMutableDictionary<NSNumber*, id<MTLTexture>>* depthTargets;
 @property(nonatomic, strong) NSMutableDictionary<NSString*, id<MTLTexture>>* uploadedTextures;
 @end
@@ -230,6 +233,7 @@ refract::desktop::DialogFrame current_dialog_frame();
   self.device = view.device;
   self.queue = [self.device newCommandQueue];
   self.renderTargets = [NSMutableDictionary dictionary];
+  self.cpuFramebuffers = [NSMutableDictionary dictionary];
   self.depthTargets = [NSMutableDictionary dictionary];
   self.uploadedTextures = [NSMutableDictionary dictionary];
   {
@@ -847,9 +851,12 @@ refract::desktop::DialogFrame current_dialog_frame();
     presented_geometry_batches.clear();
   }
 
-  id<MTLTexture> display_texture = [self.renderTargets
-      objectForKey:@(normalized_vram_address(
-                       display_framebuffer_address.load()))];
+  const auto display_address =
+      normalized_vram_address(display_framebuffer_address.load());
+  id<MTLTexture> display_texture =
+      framebuffer_sources.cpu_is_latest(display_address)
+          ? [self.cpuFramebuffers objectForKey:@(display_address)]
+          : [self.renderTargets objectForKey:@(display_address)];
   if (display_texture == nil) display_texture = self.texture;
   id<MTLRenderCommandEncoder> display_encoder =
       [commands renderCommandEncoderWithDescriptor:display_pass];
@@ -1291,21 +1298,36 @@ void present_frame(const std::uint8_t* pixels, std::uint32_t stride,
                    std::uint32_t width, std::uint32_t height,
                    std::uint32_t format, std::uint32_t address) {
   if (pixels == nullptr || width == 0 || height == 0) return;
-  display_framebuffer_address.store(normalized_vram_address(address));
+  const auto framebuffer_address = normalized_vram_address(address);
+  display_framebuffer_address.store(framebuffer_address);
   auto converted = std::make_shared<std::vector<std::uint8_t>>(
       convert_frame(pixels, stride, width, height, format));
+  const auto upload_cpu_frame =
+      framebuffer_sources.record_cpu_frame(framebuffer_address, *converted);
   dispatch_async(dispatch_get_main_queue(), ^{
     if (renderer == nil) return;
-    MTLTextureDescriptor* descriptor =
-        [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
-                                                           width:width
-                                                          height:height
-                                                       mipmapped:NO];
-    renderer.texture = [renderer.device newTextureWithDescriptor:descriptor];
-    const MTLRegion region = MTLRegionMake2D(0, 0, width, height);
-    [renderer.texture replaceRegion:region mipmapLevel:0
-                          withBytes:converted->data()
-                        bytesPerRow:static_cast<NSUInteger>(width) * 4U];
+    NSNumber* framebuffer_key = @(framebuffer_address);
+    id<MTLTexture> cpu_texture =
+        [renderer.cpuFramebuffers objectForKey:framebuffer_key];
+    if (upload_cpu_frame || cpu_texture == nil || cpu_texture.width != width ||
+        cpu_texture.height != height) {
+      if (cpu_texture == nil || cpu_texture.width != width ||
+          cpu_texture.height != height) {
+        MTLTextureDescriptor* descriptor = [MTLTextureDescriptor
+            texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                         width:width
+                                        height:height
+                                     mipmapped:NO];
+        cpu_texture = [renderer.device newTextureWithDescriptor:descriptor];
+        [renderer.cpuFramebuffers setObject:cpu_texture forKey:framebuffer_key];
+      }
+      const MTLRegion region = MTLRegionMake2D(0, 0, width, height);
+      [cpu_texture replaceRegion:region
+                     mipmapLevel:0
+                       withBytes:converted->data()
+                     bytesPerRow:static_cast<NSUInteger>(width) * 4U];
+    }
+    renderer.texture = cpu_texture;
     [metal_view setNeedsDisplay:YES];
   });
   present_ge_frame();
@@ -1326,13 +1348,20 @@ void present_ge_frame() {
   }
   const auto frame = ge_presented_frames.fetch_add(1U,
                                                     std::memory_order_relaxed);
+  static std::atomic<std::uint64_t> next_metrics_log{};
+  const auto now = monotonic_microseconds();
+  auto next_log = next_metrics_log.load(std::memory_order_relaxed);
   if (verbose_logging.load(std::memory_order_relaxed) && frame != 0U &&
-      frame % 120U == 0U) {
+      now >= next_log && next_metrics_log.compare_exchange_strong(
+                             next_log, now + 5000000U,
+                             std::memory_order_relaxed)) {
     const auto metrics = ge_cache_counters.snapshot();
+    const auto audio = audio_telemetry();
     std::fprintf(
         stderr,
         "[psprism:ge-cache] texture=%llu/%llu upload=%llu "
-        "pipeline=%llu/%llu vertex=%llu/%llu upload=%llu\n",
+        "pipeline=%llu/%llu vertex=%llu/%llu upload=%llu "
+        "audio(queue/peak)=%llu/%llu underrun=%llu/%llu overrun=%llu\n",
         static_cast<unsigned long long>(metrics.texture_hits),
         static_cast<unsigned long long>(metrics.texture_misses),
         static_cast<unsigned long long>(metrics.texture_upload_bytes),
@@ -1340,7 +1369,12 @@ void present_ge_frame() {
         static_cast<unsigned long long>(metrics.pipeline_misses),
         static_cast<unsigned long long>(metrics.vertex_buffer_reuses),
         static_cast<unsigned long long>(metrics.vertex_buffer_allocations),
-        static_cast<unsigned long long>(metrics.vertex_upload_bytes));
+        static_cast<unsigned long long>(metrics.vertex_upload_bytes),
+        static_cast<unsigned long long>(audio.queued_frames),
+        static_cast<unsigned long long>(audio.peak_queued_frames),
+        static_cast<unsigned long long>(audio.underrun_callbacks),
+        static_cast<unsigned long long>(audio.underrun_frames),
+        static_cast<unsigned long long>(audio.overrun_submissions));
   }
   if (has_geometry)
     dispatch_async(dispatch_get_main_queue(), ^{ [metal_view setNeedsDisplay:YES]; });
@@ -1393,6 +1427,8 @@ void submit_ge_primitive(std::uint32_t type,
     default:
       return;
   }
+  framebuffer_sources.record_ge_write(
+      normalized_vram_address(graphics_state.render_target_address));
   {
     std::lock_guard lock(geometry_mutex);
     building_geometry_batches.push_back(

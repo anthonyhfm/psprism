@@ -170,4 +170,16 @@ bool submit_audio(const std::int16_t* interleaved_stereo,
          AudioEngine::SubmitResult::submitted;
 }
 
+void shutdown_audio() {
+  auto& output = audio_output();
+  std::lock_guard lock(output.configuration_mutex);
+  output.engine.reset();
+  if (output.queue == nullptr) return;
+  AudioQueueStop(output.queue, true);
+  AudioQueueDispose(output.queue, true);
+  output.queue = nullptr;
+  output.buffers.fill(nullptr);
+  output.device_failed.store(false, std::memory_order_relaxed);
+}
+
 } // namespace refract::host

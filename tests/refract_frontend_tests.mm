@@ -34,6 +34,27 @@ void submit_test_primitive(std::uint32_t target, float x) {
 } // namespace
 
 int main() {
+  {
+    refract::ge::FramebufferSourceTracker sources;
+    constexpr std::uint32_t first_address = 0x04000000U;
+    constexpr std::uint32_t second_address = 0x04044000U;
+    const std::vector<std::uint8_t> black(16U, 0U);
+    auto decoded_video = black;
+    decoded_video[3] = 0xffU;
+
+    CHECK(sources.record_cpu_frame(first_address, black));
+    CHECK(sources.cpu_is_latest(first_address));
+    sources.record_ge_write(first_address);
+    CHECK(!sources.cpu_is_latest(first_address));
+    CHECK(!sources.record_cpu_frame(first_address, black));
+    CHECK(!sources.cpu_is_latest(first_address));
+    CHECK(sources.record_cpu_frame(first_address, decoded_video));
+    CHECK(sources.cpu_is_latest(first_address));
+    CHECK(!sources.cpu_is_latest(second_address));
+    sources.reset();
+    CHECK(!sources.cpu_is_latest(first_address));
+  }
+
   CHECK(render_target_texture_scale(512U, 512U) == 1.0F);
   CHECK(std::abs(render_target_texture_scale(512U, 272U) -
                  (512.0F / 272.0F)) < 0.0001F);

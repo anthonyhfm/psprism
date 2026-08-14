@@ -72,9 +72,32 @@ std::vector<std::uint8_t> looping_atrac_header() {
   return bytes;
 }
 
+std::vector<std::uint8_t> delayed_full_track_loop_header() {
+  auto bytes = looping_atrac_header();
+  // Real ATRAC encoders (including Daxter's menuloop.at3) describe smpl loop
+  // points on the encoded timeline.  A loop spanning all 3000 playable
+  // samples therefore ends at factSamples + firstSampleOffset - 1.
+  write_u32(bytes, 140U, 100U);
+  write_u32(bytes, 144U, 3099U);
+  return bytes;
+}
+
 } // namespace
 
 int main() {
+  std::vector<int> ids;
+  for (int index = 0; index < 6; ++index) {
+    const auto id = atrac_state::create(atrac_state::codec_atrac3plus);
+    CHECK(id == index);
+    ids.push_back(id);
+  }
+  CHECK(static_cast<std::uint32_t>(
+            atrac_state::create(atrac_state::codec_atrac3plus)) ==
+        atrac_state::no_atrac_id);
+  CHECK(atrac_state::release(ids[2]));
+  CHECK(atrac_state::create(atrac_state::codec_atrac3plus) == 2);
+  for (int id = 0; id < 6; ++id) CHECK(atrac_state::release(id));
+
   auto memory = streaming_atrac_header();
   constexpr std::uint32_t memory_base = 0x08800000U;
   psprecomp::State state{};
@@ -99,6 +122,14 @@ int main() {
   CHECK(loop_track.loop_start == 400U);
   CHECK(loop_track.loop_end == 1399U);
   CHECK(loop_track.loop_play_count == 3U);
+
+  auto delayed_loop_memory = delayed_full_track_loop_header();
+  atrac_state::Track delayed_loop_track;
+  CHECK(atrac_state::parse_riff(delayed_loop_memory.data(),
+                                delayed_loop_memory.size(),
+                                delayed_loop_track));
+  CHECK(delayed_loop_track.loop_start == 0U);
+  CHECK(delayed_loop_track.loop_end == 2999U);
   atrac_state::Decoder loop_decoder;
   loop_decoder.track = loop_track;
   loop_decoder.loop_count = 2;

@@ -14,13 +14,14 @@ namespace mpeg_state {
 inline constexpr std::uint32_t avc_es_size = 2048U;
 inline constexpr std::uint32_t atrac_es_size = 2112U;
 inline constexpr std::uint32_t atrac_es_output_size = 8192U;
-inline constexpr std::uint32_t required_memory_size = 0x10000U;
+inline constexpr std::uint32_t required_memory_size = 0xb3dbU;
 inline constexpr std::uint32_t ringbuffer_packet_size = 2048U;
 inline constexpr std::uint32_t ringbuffer_packet_overhead = 104U;
 inline constexpr std::uint32_t no_data = 0x80618001U;
 inline constexpr std::uint32_t bad_version = 0x80610002U;
 inline constexpr std::uint32_t invalid_address = 0x80610103U;
 inline constexpr std::uint32_t invalid_value = 0x806101feU;
+inline constexpr std::uint32_t insufficient_memory = 0x80610022U;
 inline constexpr std::uint32_t decode_fatal = 0x80628002U;
 
 struct Ringbuffer {
@@ -76,8 +77,8 @@ inline void update_ringbuffer_usage(Ringbuffer& ringbuffer,
   ringbuffer.packets_available = static_cast<std::int32_t>(used);
 }
 
-constexpr std::uint32_t ringbuffer_memory_size(std::uint32_t packet_count) {
-  return packet_count *
+constexpr std::uint64_t ringbuffer_memory_size(std::uint32_t packet_count) {
+  return static_cast<std::uint64_t>(packet_count) *
          (ringbuffer_packet_size + ringbuffer_packet_overhead);
 }
 

@@ -18,11 +18,17 @@ namespace atrac_state {
 
 constexpr std::uint32_t success = 0U;
 constexpr std::uint32_t invalid_id = 0x80630005U;
+constexpr std::uint32_t no_atrac_id = 0x80630003U;
 constexpr std::uint32_t bad_codec_type = 0x80630004U;
 constexpr std::uint32_t unknown_format = 0x80630006U;
 constexpr std::uint32_t unmatched_format = 0x80630007U;
 constexpr std::uint32_t bad_data = 0x80630008U;
 constexpr std::uint32_t unset_data = 0x80630010U;
+constexpr std::uint32_t all_data_on_memory_error = 0x80630009U;
+constexpr std::uint32_t read_size_over_buffer = 0x80630013U;
+constexpr std::uint32_t not_4byte_alignment = 0x80630014U;
+constexpr std::uint32_t bad_sample = 0x80630015U;
+constexpr std::uint32_t add_data_too_big = 0x80630018U;
 constexpr std::uint32_t no_data = 0x80630023U;
 constexpr std::uint32_t all_data_decoded = 0x80630024U;
 constexpr std::uint32_t second_buffer_not_needed = 0x80630022U;
@@ -176,16 +182,19 @@ inline bool parse_riff(const std::uint8_t* data, std::size_t size,
     // inclusive index of the final playable sample.
     --track.end_sample;
   }
-  if (track.loop_start != all_data_on_memory &&
-      (track.loop_start > track.loop_end ||
-       track.loop_end > track.end_sample))
-    return false;
   if (track.loop_start != all_data_on_memory) {
-    if (track.loop_start < track.first_sample_offset ||
+    // RIFF smpl positions use the encoded sample timeline, including the
+    // encoder delay recorded as the second fact value.  PSP's sound-sample
+    // APIs and fact's sample count use the playable timeline.  Validate the
+    // adjusted positions, otherwise a normal full-track loop whose raw end
+    // is factSamples + firstSampleOffset - 1 is incorrectly rejected.
+    if (track.loop_start > track.loop_end ||
+        track.loop_start < track.first_sample_offset ||
         track.loop_end < track.first_sample_offset)
       return false;
     track.loop_start -= track.first_sample_offset;
     track.loop_end -= track.first_sample_offset;
+    if (track.loop_end > track.end_sample) return false;
   }
   return true;
 }
@@ -531,14 +540,16 @@ inline std::unordered_map<int, std::shared_ptr<Decoder>>& decoders() {
 }
 
 inline int create(std::uint32_t codec_type = 0U) {
-  static int next_id = 0;
   if (codec_type != 0U && codec_type != codec_atrac3 &&
       codec_type != codec_atrac3plus)
     return static_cast<int>(bad_codec_type);
   std::lock_guard lock(mutex());
-  const auto id = next_id++;
-  decoders()[id] = std::make_shared<Decoder>(codec_type);
-  return id;
+  for (int id = 0; id < 6; ++id) {
+    if (decoders().contains(id)) continue;
+    decoders()[id] = std::make_shared<Decoder>(codec_type);
+    return id;
+  }
+  return static_cast<int>(no_atrac_id);
 }
 
 inline std::shared_ptr<Decoder> get(int id) {
