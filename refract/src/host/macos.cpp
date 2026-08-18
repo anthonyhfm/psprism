@@ -166,7 +166,7 @@ bool submit_audio(const std::int16_t* interleaved_stereo,
   const auto timeout = std::chrono::microseconds(
       audio_callback_timeout_microseconds(frame_count, sample_rate));
   return output.engine.submit(interleaved_stereo, frame_count, channel,
-                              blocking, timeout) ==
+                              blocking, timeout, blocking) ==
          AudioEngine::SubmitResult::submitted;
 }
 
