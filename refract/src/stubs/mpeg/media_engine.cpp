@@ -97,6 +97,11 @@ std::unordered_map<std::uint32_t, std::shared_ptr<MediaEngine>>& engines() {
   return value;
 }
 
+std::unordered_map<std::uint32_t, std::uint32_t>& ringbuffer_gps() {
+  static std::unordered_map<std::uint32_t, std::uint32_t> value;
+  return value;
+}
+
 std::mutex& engines_mutex() {
   static std::mutex value;
   return value;
@@ -832,6 +837,24 @@ void delete_media_engine(std::uint32_t mpeg_address) {
 void reset_media_engines() {
   std::lock_guard lock(engines_mutex());
   engines().clear();
+  ringbuffer_gps().clear();
+}
+
+void remember_ringbuffer_gp(std::uint32_t ringbuffer_address,
+                            std::uint32_t gp) {
+  std::lock_guard lock(engines_mutex());
+  ringbuffer_gps()[ringbuffer_address] = gp;
+}
+
+std::uint32_t ringbuffer_gp(std::uint32_t ringbuffer_address) {
+  std::lock_guard lock(engines_mutex());
+  const auto found = ringbuffer_gps().find(ringbuffer_address);
+  return found == ringbuffer_gps().end() ? 0U : found->second;
+}
+
+void forget_ringbuffer_gp(std::uint32_t ringbuffer_address) {
+  std::lock_guard lock(engines_mutex());
+  ringbuffer_gps().erase(ringbuffer_address);
 }
 
 } // namespace mpeg_state

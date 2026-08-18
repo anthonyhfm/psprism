@@ -36,7 +36,6 @@ struct Ringbuffer {
   std::uint32_t data_upper_bound{};
   std::int32_t semaphore{};
   std::uint32_t mpeg{};
-  std::uint32_t gp{};
 };
 
 struct AccessUnit {
@@ -46,7 +45,7 @@ struct AccessUnit {
   std::uint32_t elementary_stream_size{};
 };
 
-static_assert(sizeof(Ringbuffer) == 48U);
+static_assert(sizeof(Ringbuffer) == 44U);
 static_assert(sizeof(AccessUnit) == 24U);
 
 template <typename T>

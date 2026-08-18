@@ -29,7 +29,11 @@ void sceMpegRingbufferConstruct(Implementation& implementation, psprecomp::State
   }
   ringbuffer->data_upper_bound = static_cast<std::uint32_t>(data_upper_bound);
   ringbuffer->mpeg = 0U;
-  ringbuffer->gp = state.gpr[28];
+  // The PSP ABI exposes an eleven-word (44-byte) ringbuffer.  Callback $gp is
+  // kernel-owned context, not a twelfth guest word; writing it at +0x2c
+  // corrupts objects which embed SceMpegRingbuffer followed by game data.
+  mpeg_state::remember_ringbuffer_gp(
+      psprecomp::canonical_address(state.gpr[4]), state.gpr[28]);
   state.gpr[2] = 0U;
 #else
   (void)implementation;

@@ -20,6 +20,8 @@ void sceMpegRingbufferPut(Implementation& implementation, psprecomp::State& stat
     return;
   }
   while (requested > 0) {
+    const auto callback_gp = mpeg_state::ringbuffer_gp(
+        psprecomp::canonical_address(state.gpr[4]));
     const auto write_position =
         ringbuffer->packets_write_position % ringbuffer->packets;
     const auto contiguous =
@@ -34,7 +36,7 @@ void sceMpegRingbufferPut(Implementation& implementation, psprecomp::State& stat
       std::fprintf(stderr,
                    "[psprism:mpeg] ring-put callback=%08x gp=%08x "
                    "data=%08x packets=%d\n",
-                   ringbuffer->callback, ringbuffer->gp, data_address,
+                   ringbuffer->callback, callback_gp, data_address,
                    contiguous);
     }
     if (!dispatch_guest_callback(
@@ -42,7 +44,7 @@ void sceMpegRingbufferPut(Implementation& implementation, psprecomp::State& stat
             data_address,
             static_cast<std::uint32_t>(contiguous),
             ringbuffer->callback_argument, &callback_result,
-            ringbuffer->gp)) {
+            callback_gp)) {
       state.gpr[2] = 0xffffffffU;
       return;
     }
