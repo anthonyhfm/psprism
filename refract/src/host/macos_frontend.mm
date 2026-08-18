@@ -246,6 +246,8 @@ refract::desktop::DialogFrame current_dialog_frame();
 @property(nonatomic, strong) NSMutableDictionary<NSNumber*, id<MTLTexture>>* cpuFramebuffers;
 @property(nonatomic, strong) NSMutableDictionary<NSNumber*, id<MTLTexture>>* depthTargets;
 @property(nonatomic, strong) NSMutableDictionary<NSString*, id<MTLTexture>>* uploadedTextures;
+@property(nonatomic, strong) NSMutableDictionary<NSString*, NSNumber*>* uploadedTextureHashes;
+- (id<MTLTexture>)uploadedTextureForBatch:(const GeometryBatch&)batch;
 @end
 
 @implementation PsprismRenderer
@@ -259,6 +261,7 @@ refract::desktop::DialogFrame current_dialog_frame();
   self.depthTargets = [NSMutableDictionary dictionary];
   self.stencilStates = [NSMutableDictionary dictionary];
   self.uploadedTextures = [NSMutableDictionary dictionary];
+  self.uploadedTextureHashes = [NSMutableDictionary dictionary];
   {
     std::lock_guard lock(vertex_buffer_pool_mutex);
     if (vertex_buffer_pool == nil)
@@ -528,6 +531,53 @@ refract::desktop::DialogFrame current_dialog_frame();
   }
   self.samplerStates = sampler_states;
   return self;
+}
+
+- (id<MTLTexture>)uploadedTextureForBatch:(const GeometryBatch&)batch {
+  if (batch.texture == nullptr || batch.texture->empty() ||
+      batch.texture_width == 0U || batch.texture_height == 0U)
+    return nil;
+  // Content changes frequently for streaming textures such as decoded video.
+  // Keep only the latest upload for a stable guest texture identity instead of
+  // retaining every distinct frame until the entire cache is flushed.
+  NSString* texture_key = [NSString
+      stringWithFormat:@"%08x:%u:%u:%u:%u:%u",
+                       batch.state.texture_address, batch.texture_width,
+                       batch.texture_height, batch.state.texture_format,
+                       batch.state.texture_buffer_width,
+                       batch.state.texture_mipmap_level];
+  id<MTLTexture> texture = [self.uploadedTextures objectForKey:texture_key];
+  NSNumber* cached_hash = [self.uploadedTextureHashes objectForKey:texture_key];
+  const auto content_matches =
+      texture != nil && cached_hash != nil &&
+      cached_hash.unsignedLongLongValue == batch.state.texture_content_hash;
+  ge_cache_counters.record_texture(
+      content_matches,
+      static_cast<std::uint64_t>(batch.texture_width) *
+          batch.texture_height * 4U);
+  if (content_matches) return texture;
+
+  MTLTextureDescriptor* descriptor = [MTLTextureDescriptor
+      texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                   width:batch.texture_width
+                                  height:batch.texture_height
+                               mipmapped:NO];
+  texture = [self.device newTextureWithDescriptor:descriptor];
+  [texture replaceRegion:MTLRegionMake2D(0, 0, batch.texture_width,
+                                         batch.texture_height)
+              mipmapLevel:0
+                withBytes:batch.texture->data()
+              bytesPerRow:batch.texture_width * 4U];
+  if ([self.uploadedTextures objectForKey:texture_key] == nil &&
+      self.uploadedTextures.count >= 2048U) {
+    [self.uploadedTextures removeAllObjects];
+    [self.uploadedTextureHashes removeAllObjects];
+  }
+  [self.uploadedTextures setObject:texture forKey:texture_key];
+  [self.uploadedTextureHashes
+      setObject:@(batch.state.texture_content_hash)
+        forKey:texture_key];
+  return texture;
 }
 
 - (id<MTLDepthStencilState>)depthStencilStateForGeometryState:
@@ -830,37 +880,7 @@ refract::desktop::DialogFrame current_dialog_frame();
       }
       if (sampled_texture == nil && batch.texture != nullptr &&
           !batch.texture->empty()) {
-        NSString* texture_key = [NSString
-            stringWithFormat:@"%08x:%u:%u:%u:%016llx:%016llx",
-                             batch.state.texture_address,
-                             batch.texture_width, batch.texture_height,
-                             batch.state.texture_format,
-                             static_cast<unsigned long long>(
-                                 batch.state.texture_generation),
-                             static_cast<unsigned long long>(
-                                 batch.state.texture_content_hash)];
-        sampled_texture = [self.uploadedTextures objectForKey:texture_key];
-        ge_cache_counters.record_texture(
-            sampled_texture != nil,
-            static_cast<std::uint64_t>(batch.texture_width) *
-                batch.texture_height * 4U);
-        if (sampled_texture == nil) {
-          MTLTextureDescriptor* descriptor = [MTLTextureDescriptor
-              texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
-                                           width:batch.texture_width
-                                          height:batch.texture_height
-                                       mipmapped:NO];
-          sampled_texture = [self.device newTextureWithDescriptor:descriptor];
-          [sampled_texture
-              replaceRegion:MTLRegionMake2D(0, 0, batch.texture_width,
-                                            batch.texture_height)
-               mipmapLevel:0
-                 withBytes:batch.texture->data()
-               bytesPerRow:batch.texture_width * 4U];
-          if (self.uploadedTextures.count >= 2048U)
-            [self.uploadedTextures removeAllObjects];
-          [self.uploadedTextures setObject:sampled_texture forKey:texture_key];
-        }
+        sampled_texture = [self uploadedTextureForBatch:batch];
       }
       const auto needs_special_pipeline =
           batch.state.alpha_blend || batch.state.color_write_mask != 0x0fU;

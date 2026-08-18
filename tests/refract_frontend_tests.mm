@@ -91,6 +91,29 @@ int main() {
   stencil_state.stencil_depth_pass = 2U;
   CHECK([test_renderer depthStencilStateForGeometryState:stencil_state] != nil);
 
+  GeometryBatch texture_batch;
+  texture_batch.texture_width = 2U;
+  texture_batch.texture_height = 2U;
+  texture_batch.state.texture_address = 0x04010000U;
+  texture_batch.state.texture_format = 3U;
+  texture_batch.state.texture_buffer_width = 2U;
+  texture_batch.state.texture_content_hash = 1U;
+  texture_batch.texture =
+      std::make_shared<const std::vector<std::uint8_t>>(16U, 0U);
+  id<MTLTexture> first_texture =
+      [test_renderer uploadedTextureForBatch:texture_batch];
+  CHECK(first_texture != nil);
+  CHECK(test_renderer.uploadedTextures.count == 1U);
+  CHECK([test_renderer uploadedTextureForBatch:texture_batch] == first_texture);
+  texture_batch.state.texture_generation = 10U;
+  CHECK([test_renderer uploadedTextureForBatch:texture_batch] == first_texture);
+  texture_batch.state.texture_content_hash = 2U;
+  id<MTLTexture> changed_texture =
+      [test_renderer uploadedTextureForBatch:texture_batch];
+  CHECK(changed_texture != nil);
+  CHECK(changed_texture != first_texture);
+  CHECK(test_renderer.uploadedTextures.count == 1U);
+
   refract::host::reset_ge_cache_metrics();
   CHECK(refract::host::ge_cache_metrics() == refract::ge::CacheMetrics{});
   ge_cache_counters.record_texture(false, 128U);
