@@ -1,5 +1,6 @@
 void sceUtilityGetSystemParamInt(Implementation& implementation, psprecomp::State& state) {
 #if !defined(__PSP__)
+  (void)implementation;
   std::uint32_t value{};
   switch (state.gpr[4]) {
   case 2U: value = 0U; break;

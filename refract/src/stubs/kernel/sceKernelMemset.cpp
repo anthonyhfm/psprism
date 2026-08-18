@@ -6,7 +6,7 @@ void sceKernelMemset(Implementation& implementation, psprecomp::State& state) {
   const auto dest = state.gpr[4];
   const auto val = static_cast<std::uint8_t>(state.gpr[5]);
   const auto count = state.gpr[6];
-  if (auto* output = guest_pointer<std::uint8_t>(state, dest)) {
+  if (auto* output = psprecomp::mapped_address(state, dest, count)) {
     std::memset(output, val, count);
   }
   state.gpr[2] = dest;

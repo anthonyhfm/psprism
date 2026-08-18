@@ -4,15 +4,48 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 
 namespace psprecomp {
+
+#if defined(__BYTE_ORDER__) && defined(__ORDER_BIG_ENDIAN__) && (__BYTE_ORDER__ == __ORDER_BIG_ENDIAN__)
+inline constexpr bool is_big_endian = true;
+#else
+inline constexpr bool is_big_endian = false;
+#endif
 
 #if defined(PSPRECOMP_PROFILE_CPU) || defined(PSPRECOMP_PROFILE_DISPATCH)
 inline constexpr bool cpu_profiling_compiled = true;
 #else
 inline constexpr bool cpu_profiling_compiled = false;
 #endif
+
+template <typename T>
+constexpr T byteswap(T value) noexcept {
+    if constexpr (sizeof(T) == 2) {
+        return static_cast<T>((static_cast<std::uint16_t>(value) >> 8U) |
+                              (static_cast<std::uint16_t>(value) << 8U));
+    } else if constexpr (sizeof(T) == 4) {
+        const auto v = static_cast<std::uint32_t>(value);
+        return static_cast<T>((v >> 24U) |
+                              ((v >> 8U) & 0x0000ff00U) |
+                              ((v << 8U) & 0x00ff0000U) |
+                              (v << 24U));
+    } else if constexpr (sizeof(T) == 8) {
+        const auto v = static_cast<std::uint64_t>(value);
+        return static_cast<T>((v >> 56U) |
+                              ((v >> 40U) & 0x000000000000ff00ULL) |
+                              ((v >> 24U) & 0x0000000000ff0000ULL) |
+                              ((v >> 8U)  & 0x00000000ff000000ULL) |
+                              ((v << 8U)  & 0x000000ff00000000ULL) |
+                              ((v << 24U) & 0x0000ff0000000000ULL) |
+                              ((v << 40U) & 0x00ff000000000000ULL) |
+                              (v << 56U));
+    } else {
+        return value;
+    }
+}
 
 enum class StopReason : std::uint8_t {
     running,
@@ -173,42 +206,17 @@ inline std::uint8_t* mapped_address(const State& state, std::uint32_t address,
 
     switch (address >> 24U) {
     case 0x00U:
-        if (auto* pointer = region_address(state.scratchpad,
-                                           state.scratchpad_size, 0x00010000U,
-                                           address, width)) {
-            return pointer;
-        }
-        break;
+        return region_address(state.scratchpad, state.scratchpad_size,
+                              0x00010000U, address, width);
     case 0x04U:
-        if (auto* pointer = region_address(state.video_memory,
-                                           state.video_memory_size,
-                                           0x04000000U, address, width)) {
-            return pointer;
-        }
-        break;
+        return region_address(state.video_memory, state.video_memory_size,
+                              0x04000000U, address, width);
     case 0x08U:
-        if (auto* pointer = region_address(state.volatile_memory,
-                                           state.volatile_memory_size,
-                                           0x08400000U, address, width)) {
-            return pointer;
-        }
-        break;
-    default: break;
+        return region_address(state.volatile_memory, state.volatile_memory_size,
+                              0x08400000U, address, width);
+    default:
+        return nullptr;
     }
-
-    // Preserve support for deliberately oversized/custom test mappings that
-    // cross the normal PSP 16 MiB region pages.
-    if (auto* pointer = region_address(state.scratchpad, state.scratchpad_size,
-                                       0x00010000U, address, width)) {
-        return pointer;
-    }
-    if (auto* pointer = region_address(state.video_memory,
-                                       state.video_memory_size, 0x04000000U,
-                                       address, width)) {
-        return pointer;
-    }
-    return region_address(state.volatile_memory, state.volatile_memory_size,
-                          0x08400000U, address, width);
 }
 
 inline bool address_ok(const State& state, std::uint32_t address,
@@ -272,6 +280,17 @@ inline std::uint8_t load8(State& state, std::uint32_t address) {
     return 0;
 }
 
+inline std::uint16_t byte_swap16(std::uint16_t value) {
+    return static_cast<std::uint16_t>((value >> 8U) | (value << 8U));
+}
+
+inline std::uint32_t byte_swap(std::uint32_t value) {
+    return ((value & 0x000000FFU) << 24U) |
+           ((value & 0x0000FF00U) << 8U)  |
+           ((value & 0x00FF0000U) >> 8U)  |
+           ((value & 0xFF000000U) >> 24U);
+}
+
 inline std::uint16_t load16(State& state, std::uint32_t address) {
     if constexpr (cpu_profiling_compiled) {
         if (state.cpu_profile_enabled) {
@@ -282,9 +301,13 @@ inline std::uint16_t load16(State& state, std::uint32_t address) {
         note_memory_fault(state, address);
         return 0;
     }
-    if (auto* pointer = mapped_address(state, address, 2)) {
-        return static_cast<std::uint16_t>(pointer[0]) |
-               static_cast<std::uint16_t>(pointer[1]) << 8U;
+    if (const auto* pointer = mapped_address(state, address, 2)) {
+        std::uint16_t value{};
+        std::memcpy(&value, pointer, sizeof(value));
+        if constexpr (is_big_endian) {
+            value = byte_swap16(value);
+        }
+        return value;
     }
     if (state.direct_memory_access) {
         if (!direct_address_ok(state, address, 2)) {
@@ -294,10 +317,14 @@ inline std::uint16_t load16(State& state, std::uint32_t address) {
         return *reinterpret_cast<volatile std::uint16_t*>(
             static_cast<std::uintptr_t>(address));
 #else
-        const auto* pointer = reinterpret_cast<volatile std::uint8_t*>(
+        const auto* pointer = reinterpret_cast<const void*>(
             static_cast<std::uintptr_t>(address));
-        return static_cast<std::uint16_t>(pointer[0]) |
-               static_cast<std::uint16_t>(pointer[1]) << 8U;
+        std::uint16_t value{};
+        std::memcpy(&value, pointer, sizeof(value));
+        if constexpr (is_big_endian) {
+            value = byte_swap16(value);
+        }
+        return value;
 #endif
     }
     note_memory_fault(state, address);
@@ -314,11 +341,13 @@ inline std::uint32_t load32(State& state, std::uint32_t address) {
         note_memory_fault(state, address);
         return 0;
     }
-    if (auto* pointer = mapped_address(state, address, 4)) {
-        return static_cast<std::uint32_t>(pointer[0]) |
-               static_cast<std::uint32_t>(pointer[1]) << 8U |
-               static_cast<std::uint32_t>(pointer[2]) << 16U |
-               static_cast<std::uint32_t>(pointer[3]) << 24U;
+    if (const auto* pointer = mapped_address(state, address, 4)) {
+        std::uint32_t value{};
+        std::memcpy(&value, pointer, sizeof(value));
+        if constexpr (is_big_endian) {
+            value = byte_swap(value);
+        }
+        return value;
     }
     if (state.direct_memory_access) {
         if (!direct_address_ok(state, address, 4)) {
@@ -328,12 +357,14 @@ inline std::uint32_t load32(State& state, std::uint32_t address) {
         return *reinterpret_cast<volatile std::uint32_t*>(
             static_cast<std::uintptr_t>(address));
 #else
-        const auto* pointer = reinterpret_cast<volatile std::uint8_t*>(
+        const auto* pointer = reinterpret_cast<const void*>(
             static_cast<std::uintptr_t>(address));
-        return static_cast<std::uint32_t>(pointer[0]) |
-               static_cast<std::uint32_t>(pointer[1]) << 8U |
-               static_cast<std::uint32_t>(pointer[2]) << 16U |
-               static_cast<std::uint32_t>(pointer[3]) << 24U;
+        std::uint32_t value{};
+        std::memcpy(&value, pointer, sizeof(value));
+        if constexpr (is_big_endian) {
+            value = byte_swap(value);
+        }
+        return value;
 #endif
     }
     note_memory_fault(state, address);
@@ -354,10 +385,12 @@ inline std::uint32_t instruction_word(const State& state,
     if (pointer == nullptr) {
         return fallback;
     }
-    return static_cast<std::uint32_t>(pointer[0]) |
-           static_cast<std::uint32_t>(pointer[1]) << 8U |
-           static_cast<std::uint32_t>(pointer[2]) << 16U |
-           static_cast<std::uint32_t>(pointer[3]) << 24U;
+    std::uint32_t value{};
+    std::memcpy(&value, pointer, sizeof(value));
+    if constexpr (is_big_endian) {
+        value = byte_swap(value);
+    }
+    return value;
 }
 
 inline std::uint32_t instruction_immediate(const State& state,
@@ -427,9 +460,11 @@ inline void store16(State& state, std::uint32_t address, std::uint16_t value) {
         note_memory_fault(state, address);
         return;
     }
+    if constexpr (is_big_endian) {
+        value = byte_swap16(value);
+    }
     if (auto* pointer = mapped_address(state, address, 2)) {
-        pointer[0] = static_cast<std::uint8_t>(value);
-        pointer[1] = static_cast<std::uint8_t>(value >> 8U);
+        std::memcpy(pointer, &value, sizeof(value));
         return;
     }
     if (state.direct_memory_access) {
@@ -440,10 +475,9 @@ inline void store16(State& state, std::uint32_t address, std::uint16_t value) {
         *reinterpret_cast<volatile std::uint16_t*>(
             static_cast<std::uintptr_t>(address)) = value;
 #else
-        auto* pointer = reinterpret_cast<volatile std::uint8_t*>(
+        auto* pointer = reinterpret_cast<void*>(
             static_cast<std::uintptr_t>(address));
-        pointer[0] = static_cast<std::uint8_t>(value);
-        pointer[1] = static_cast<std::uint8_t>(value >> 8U);
+        std::memcpy(pointer, &value, sizeof(value));
 #endif
         return;
     }
@@ -460,11 +494,11 @@ inline void store32(State& state, std::uint32_t address, std::uint32_t value) {
         note_memory_fault(state, address);
         return;
     }
+    if constexpr (is_big_endian) {
+        value = byte_swap(value);
+    }
     if (auto* pointer = mapped_address(state, address, 4)) {
-        pointer[0] = static_cast<std::uint8_t>(value);
-        pointer[1] = static_cast<std::uint8_t>(value >> 8U);
-        pointer[2] = static_cast<std::uint8_t>(value >> 16U);
-        pointer[3] = static_cast<std::uint8_t>(value >> 24U);
+        std::memcpy(pointer, &value, sizeof(value));
         return;
     }
     if (state.direct_memory_access) {
@@ -475,12 +509,9 @@ inline void store32(State& state, std::uint32_t address, std::uint32_t value) {
         *reinterpret_cast<volatile std::uint32_t*>(
             static_cast<std::uintptr_t>(address)) = value;
 #else
-        auto* pointer = reinterpret_cast<volatile std::uint8_t*>(
+        auto* pointer = reinterpret_cast<void*>(
             static_cast<std::uintptr_t>(address));
-        pointer[0] = static_cast<std::uint8_t>(value);
-        pointer[1] = static_cast<std::uint8_t>(value >> 8U);
-        pointer[2] = static_cast<std::uint8_t>(value >> 16U);
-        pointer[3] = static_cast<std::uint8_t>(value >> 24U);
+        std::memcpy(pointer, &value, sizeof(value));
 #endif
         return;
     }
@@ -535,52 +566,158 @@ inline void direct_store32(std::uint32_t address, std::uint32_t value) {
 
 inline std::uint32_t load_word_left(State& state, std::uint32_t address,
                                     std::uint32_t value) {
+    if constexpr (cpu_profiling_compiled) {
+        if (state.cpu_profile_enabled) {
+            ++state.cpu_profile.memory_reads;
+        }
+    }
     const auto offset = address & 3U;
     const auto aligned = address & ~3U;
-    for (std::uint32_t i = 0; i <= offset; ++i) {
-        const auto shift = 8U * (3U - offset + i);
-        const auto mask = 0xffU << shift;
-        value = (value & ~mask) |
-                (static_cast<std::uint32_t>(
-                     PSPRECOMP_LOAD8(state, aligned + i))
-                 << shift);
+    const auto count = offset + 1U;
+    if constexpr (!is_big_endian) {
+        if (const auto* pointer = mapped_address(state, aligned, count)) {
+            std::memcpy(reinterpret_cast<std::uint8_t*>(&value) + (4U - count),
+                        pointer, count);
+            return value;
+        }
+        if (state.direct_memory_access) {
+            if (!direct_address_ok(state, aligned, count)) {
+                return value;
+            }
+            std::memcpy(reinterpret_cast<std::uint8_t*>(&value) + (4U - count),
+                        reinterpret_cast<const void*>(
+                            static_cast<std::uintptr_t>(aligned)),
+                        count);
+            return value;
+        }
+    } else {
+        for (std::uint32_t i = 0; i <= offset; ++i) {
+            const auto shift = 8U * (3U - offset + i);
+            const auto mask = 0xffU << shift;
+            value = (value & ~mask) |
+                    (static_cast<std::uint32_t>(
+                         PSPRECOMP_LOAD8(state, aligned + i))
+                     << shift);
+        }
+        return value;
     }
+    note_memory_fault(state, aligned);
     return value;
 }
 
 inline std::uint32_t load_word_right(State& state, std::uint32_t address,
                                      std::uint32_t value) {
-    const auto offset = address & 3U;
-    const auto aligned = address & ~3U;
-    for (std::uint32_t i = offset; i < 4U; ++i) {
-        const auto shift = 8U * (i - offset);
-        const auto mask = 0xffU << shift;
-        value = (value & ~mask) |
-                (static_cast<std::uint32_t>(
-                     PSPRECOMP_LOAD8(state, aligned + i))
-                 << shift);
+    if constexpr (cpu_profiling_compiled) {
+        if (state.cpu_profile_enabled) {
+            ++state.cpu_profile.memory_reads;
+        }
     }
+    const auto offset = address & 3U;
+    const auto count = 4U - offset;
+    if constexpr (!is_big_endian) {
+        if (const auto* pointer = mapped_address(state, address, count)) {
+            std::memcpy(&value, pointer, count);
+            return value;
+        }
+        if (state.direct_memory_access) {
+            if (!direct_address_ok(state, address, count)) {
+                return value;
+            }
+            std::memcpy(&value,
+                        reinterpret_cast<const void*>(
+                            static_cast<std::uintptr_t>(address)),
+                        count);
+            return value;
+        }
+    } else {
+        const auto aligned = address & ~3U;
+        for (std::uint32_t i = offset; i < 4U; ++i) {
+            const auto shift = 8U * (i - offset);
+            const auto mask = 0xffU << shift;
+            value = (value & ~mask) |
+                    (static_cast<std::uint32_t>(
+                         PSPRECOMP_LOAD8(state, aligned + i))
+                     << shift);
+        }
+        return value;
+    }
+    note_memory_fault(state, address);
     return value;
 }
 
 inline void store_word_left(State& state, std::uint32_t address,
                             std::uint32_t value) {
+    if constexpr (cpu_profiling_compiled) {
+        if (state.cpu_profile_enabled) {
+            ++state.cpu_profile.memory_writes;
+        }
+    }
     const auto offset = address & 3U;
     const auto aligned = address & ~3U;
-    for (std::uint32_t i = 0; i <= offset; ++i) {
-        const auto shift = 8U * (3U - offset + i);
-        store8(state, aligned + i, static_cast<std::uint8_t>(value >> shift));
+    const auto count = offset + 1U;
+    if constexpr (!is_big_endian) {
+        if (auto* pointer = mapped_address(state, aligned, count)) {
+            std::memcpy(pointer,
+                        reinterpret_cast<const std::uint8_t*>(&value) +
+                            (4U - count),
+                        count);
+            return;
+        }
+        if (state.direct_memory_access) {
+            if (!direct_address_ok(state, aligned, count)) {
+                return;
+            }
+            std::memcpy(reinterpret_cast<void*>(
+                            static_cast<std::uintptr_t>(aligned)),
+                        reinterpret_cast<const std::uint8_t*>(&value) +
+                            (4U - count),
+                        count);
+            return;
+        }
+    } else {
+        for (std::uint32_t i = 0; i <= offset; ++i) {
+            const auto shift = 8U * (3U - offset + i);
+            store8(state, aligned + i,
+                   static_cast<std::uint8_t>(value >> shift));
+        }
+        return;
     }
+    note_memory_fault(state, aligned);
 }
 
 inline void store_word_right(State& state, std::uint32_t address,
                              std::uint32_t value) {
-    const auto offset = address & 3U;
-    const auto aligned = address & ~3U;
-    for (std::uint32_t i = offset; i < 4U; ++i) {
-        const auto shift = 8U * (i - offset);
-        store8(state, aligned + i, static_cast<std::uint8_t>(value >> shift));
+    if constexpr (cpu_profiling_compiled) {
+        if (state.cpu_profile_enabled) {
+            ++state.cpu_profile.memory_writes;
+        }
     }
+    const auto offset = address & 3U;
+    const auto count = 4U - offset;
+    if constexpr (!is_big_endian) {
+        if (auto* pointer = mapped_address(state, address, count)) {
+            std::memcpy(pointer, &value, count);
+            return;
+        }
+        if (state.direct_memory_access) {
+            if (!direct_address_ok(state, address, count)) {
+                return;
+            }
+            std::memcpy(reinterpret_cast<void*>(
+                            static_cast<std::uintptr_t>(address)),
+                        &value, count);
+            return;
+        }
+    } else {
+        const auto aligned = address & ~3U;
+        for (std::uint32_t i = offset; i < 4U; ++i) {
+            const auto shift = 8U * (i - offset);
+            store8(state, aligned + i,
+                   static_cast<std::uint8_t>(value >> shift));
+        }
+        return;
+    }
+    note_memory_fault(state, address);
 }
 
 inline std::int32_t as_s32(std::uint32_t value) {
@@ -605,11 +742,13 @@ inline std::uint32_t rotate_right(std::uint32_t value, std::uint32_t amount) {
 }
 
 inline float f32(const State& state, std::uint32_t index) {
-    return std::bit_cast<float>(state.fpr[index & 31U]);
+    float result{};
+    std::memcpy(&result, &state.fpr[index & 31U], sizeof(result));
+    return result;
 }
 
 inline void set_f32(State& state, std::uint32_t index, float value) {
-    state.fpr[index & 31U] = std::bit_cast<std::uint32_t>(value);
+    std::memcpy(&state.fpr[index & 31U], &value, sizeof(value));
 }
 
 inline bool fpu_condition(const State& state, std::uint32_t cc) {
@@ -666,13 +805,6 @@ inline std::uint32_t reverse_bits(std::uint32_t value) {
     value = ((value & 0x0F0F0F0FU) << 4U) | ((value & 0xF0F0F0F0U) >> 4U);
     value = ((value & 0x00FF00FFU) << 8U) | ((value & 0xFF00FF00U) >> 8U);
     return (value << 16U) | (value >> 16U);
-}
-
-inline std::uint32_t byte_swap(std::uint32_t value) {
-    return ((value & 0x000000FFU) << 24U) |
-           ((value & 0x0000FF00U) << 8U)  |
-           ((value & 0x00FF0000U) >> 8U)  |
-           ((value & 0xFF000000U) >> 24U);
 }
 
 } // namespace psprecomp

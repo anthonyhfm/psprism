@@ -187,10 +187,41 @@ int main() {
     CHECK(memory[4] == 0x33 && memory[5] == 0x44);
 
     psprecomp::store32(state, 0x1008, 0x44332211U);
-    CHECK(psprecomp::load_word_left(state, 0x1009, 0xaabbccddU) ==
-          0x2211ccddU);
-    CHECK(psprecomp::load_word_right(state, 0x100a, 0xaabbccddU) ==
-          0xaabb4433U);
+    CHECK(psprecomp::load_word_left(state, 0x1008, 0xaabbccddU) == 0x11bbccddU);
+    CHECK(psprecomp::load_word_left(state, 0x1009, 0xaabbccddU) == 0x2211ccddU);
+    CHECK(psprecomp::load_word_left(state, 0x100a, 0xaabbccddU) == 0x332211ddU);
+    CHECK(psprecomp::load_word_left(state, 0x100b, 0xaabbccddU) == 0x44332211U);
+
+    CHECK(psprecomp::load_word_right(state, 0x1008, 0xaabbccddU) == 0x44332211U);
+    CHECK(psprecomp::load_word_right(state, 0x1009, 0xaabbccddU) == 0xaa443322U);
+    CHECK(psprecomp::load_word_right(state, 0x100a, 0xaabbccddU) == 0xaabb4433U);
+    CHECK(psprecomp::load_word_right(state, 0x100b, 0xaabbccddU) == 0xaabbcc44U);
+
+    psprecomp::store32(state, 0x1000, 0x00000000U);
+    psprecomp::store_word_left(state, 0x1000, 0x88776655U);
+    CHECK(memory[0] == 0x88);
+    psprecomp::store32(state, 0x1000, 0x00000000U);
+    psprecomp::store_word_left(state, 0x1001, 0x88776655U);
+    CHECK(memory[0] == 0x77 && memory[1] == 0x88);
+    psprecomp::store32(state, 0x1000, 0x00000000U);
+    psprecomp::store_word_left(state, 0x1002, 0x88776655U);
+    CHECK(memory[0] == 0x66 && memory[1] == 0x77 && memory[2] == 0x88);
+    psprecomp::store32(state, 0x1000, 0x00000000U);
+    psprecomp::store_word_left(state, 0x1003, 0x88776655U);
+    CHECK(memory[0] == 0x55 && memory[1] == 0x66 && memory[2] == 0x77 && memory[3] == 0x88);
+
+    psprecomp::store32(state, 0x1000, 0x00000000U);
+    psprecomp::store_word_right(state, 0x1000, 0x88776655U);
+    CHECK(memory[0] == 0x55 && memory[1] == 0x66 && memory[2] == 0x77 && memory[3] == 0x88);
+    psprecomp::store32(state, 0x1000, 0x00000000U);
+    psprecomp::store_word_right(state, 0x1001, 0x88776655U);
+    CHECK(memory[1] == 0x55 && memory[2] == 0x66 && memory[3] == 0x77);
+    psprecomp::store32(state, 0x1000, 0x00000000U);
+    psprecomp::store_word_right(state, 0x1002, 0x88776655U);
+    CHECK(memory[2] == 0x55 && memory[3] == 0x66);
+    psprecomp::store32(state, 0x1000, 0x00000000U);
+    psprecomp::store_word_right(state, 0x1003, 0x88776655U);
+    CHECK(memory[3] == 0x55);
 
     state.vfpu[psprecomp::vfpu_index(0, 1)] =
         std::bit_cast<std::uint32_t>(2.0F);

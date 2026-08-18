@@ -18,7 +18,7 @@ void sceIoDopen(Implementation& implementation, psprecomp::State& state) {
             [](const auto& left, const auto& right) {
               return left.path().filename() < right.path().filename();
             });
-  std::lock_guard lock(implementation.objects_mutex);
+  std::lock_guard lock(implementation.io_mutex);
   const auto uid = implementation.next_file++;
   implementation.directories.emplace(uid, std::move(directory));
   state.gpr[2] = static_cast<std::uint32_t>(uid);

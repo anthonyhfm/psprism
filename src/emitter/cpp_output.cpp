@@ -39,8 +39,8 @@ void emit_cpp(const ElfImage& image, const std::filesystem::path& output,
             const auto pc =
                 section.address + static_cast<std::uint32_t>(offset);
             const auto instruction = word_at(section, offset);
-            cases << "        case " << hex(pc) << ": // " << hex(instruction)
-                  << "\n            "
+            cases << "        case " << hex(pc) << ": " << pc_label(pc)
+                  << ": // " << hex(instruction) << "\n            "
                   << emit_instruction(pc, instruction, relocated.contains(pc))
                   << "\n            break;\n";
         }

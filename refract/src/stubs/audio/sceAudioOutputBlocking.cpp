@@ -2,6 +2,7 @@
 
 void sceAudioOutputBlocking(Implementation& implementation, psprecomp::State& state) {
 #if !defined(__PSP__)
+  (void)implementation;
   {
     GuestExecutionPause pause(implementation);
     state.gpr[2] = audio_state::output(

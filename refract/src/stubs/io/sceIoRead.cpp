@@ -1,13 +1,28 @@
 void sceIoRead(Implementation& implementation, psprecomp::State& state) {
 #if !defined(__PSP__)
   const auto psp_descriptor = static_cast<int>(state.gpr[4]);
-  const auto descriptor = implementation.descriptor(psp_descriptor);
+  int descriptor = -1;
+  bool sector_file = false;
+  std::optional<io_state::FileView> file_view;
+  {
+    std::lock_guard lock(implementation.io_mutex);
+    if (psp_descriptor >= 0 && psp_descriptor <= 2) {
+      descriptor = psp_descriptor;
+    } else {
+      const auto found = implementation.files.find(psp_descriptor);
+      if (found != implementation.files.end())
+        descriptor = found->second;
+    }
+    sector_file = implementation.sector_files.contains(psp_descriptor);
+    const auto view = implementation.file_views.find(psp_descriptor);
+    if (view != implementation.file_views.end())
+      file_view = view->second;
+  }
   auto size = static_cast<std::size_t>(state.gpr[6]);
   if (descriptor < 0) {
     state.gpr[2] = io_error;
     return;
   }
-  const auto sector_file = implementation.sector_files.contains(psp_descriptor);
   if (sector_file) {
     const auto byte_count = io_state::sector_byte_count(state.gpr[6]);
     if (!byte_count) {
@@ -16,15 +31,14 @@ void sceIoRead(Implementation& implementation, psprecomp::State& state) {
     }
     size = *byte_count;
   }
-  const auto view = implementation.file_views.find(psp_descriptor);
-  if (view != implementation.file_views.end()) {
+  if (file_view) {
     const auto position = ::lseek(descriptor, 0, SEEK_CUR);
     if (position < 0) {
       state.gpr[2] = io_error;
       return;
     }
     size = io_state::readable_size(
-        view->second, static_cast<std::uint64_t>(position), size);
+        *file_view, static_cast<std::uint64_t>(position), size);
   }
   if (size == 0U) {
     state.gpr[2] = 0U;

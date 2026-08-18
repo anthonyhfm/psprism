@@ -1,7 +1,26 @@
 void sceIoLseek(Implementation& implementation, psprecomp::State& state) {
 #if !defined(__PSP__)
       const auto psp_descriptor = static_cast<int>(state.gpr[4]);
-      const auto descriptor = implementation.descriptor(psp_descriptor);
+      int descriptor = -1;
+      bool has_view = false;
+      io_state::FileView file_view{};
+      bool sector_file = false;
+      {
+        std::lock_guard lock(implementation.io_mutex);
+        if (psp_descriptor >= 0 && psp_descriptor <= 2) {
+          descriptor = psp_descriptor;
+        } else {
+          const auto found = implementation.files.find(psp_descriptor);
+          if (found != implementation.files.end())
+            descriptor = found->second;
+        }
+        sector_file = implementation.sector_files.contains(psp_descriptor);
+        const auto view = implementation.file_views.find(psp_descriptor);
+        if (view != implementation.file_views.end()) {
+          has_view = true;
+          file_view = view->second;
+        }
+      }
       if (descriptor < 0) {
         state.gpr[2] = io_error;
         state.gpr[3] = 0xffffffffU;
@@ -12,9 +31,6 @@ void sceIoLseek(Implementation& implementation, psprecomp::State& state) {
       const auto offset =
           io_state::signed_from_words(state.gpr[6], state.gpr[7]);
       const auto whence = state.gpr[8];
-      const auto view = implementation.file_views.find(psp_descriptor);
-      const auto sector_file =
-          implementation.sector_files.contains(psp_descriptor);
       off_t result{-1};
       if (sector_file) {
         std::optional<std::uint64_t> origin;
@@ -41,29 +57,29 @@ void sceIoLseek(Implementation& implementation, psprecomp::State& state) {
             ::lseek(descriptor, static_cast<off_t>(*byte_offset), SEEK_SET) >=
                 0)
           result = static_cast<off_t>(*logical);
-      } else if (view == implementation.file_views.end()) {
+      } else if (!has_view) {
         result = ::lseek(descriptor, offset, static_cast<int>(whence));
       } else {
         std::optional<std::uint64_t> origin;
         if (whence == SEEK_SET) {
           origin = 0U;
         } else if (whence == SEEK_END) {
-          origin = view->second.size;
+          origin = file_view.size;
         } else if (whence == SEEK_CUR) {
           const auto current = ::lseek(descriptor, 0, SEEK_CUR);
           if (current >= 0 &&
-              static_cast<std::uint64_t>(current) >= view->second.base)
-            origin = static_cast<std::uint64_t>(current) - view->second.base;
+              static_cast<std::uint64_t>(current) >= file_view.base)
+            origin = static_cast<std::uint64_t>(current) - file_view.base;
         }
         const auto logical = origin ? io_state::add_signed(*origin, offset)
                                     : std::nullopt;
         if (logical &&
             *logical <= std::numeric_limits<std::uint64_t>::max() -
-                            view->second.base &&
-            view->second.base + *logical <=
+                            file_view.base &&
+            file_view.base + *logical <=
                 static_cast<std::uint64_t>(std::numeric_limits<off_t>::max()) &&
             ::lseek(descriptor,
-                    static_cast<off_t>(view->second.base + *logical),
+                    static_cast<off_t>(file_view.base + *logical),
                     SEEK_SET) >= 0)
           result = static_cast<off_t>(*logical);
       }

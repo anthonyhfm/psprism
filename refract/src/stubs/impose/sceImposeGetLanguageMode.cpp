@@ -1,5 +1,6 @@
 void sceImposeGetLanguageMode(Implementation& implementation, psprecomp::State& state) {
 #if !defined(__PSP__)
+  (void)implementation;
   if (auto* language = guest_pointer<std::uint32_t>(state, state.gpr[4]))
     *language = 1U; // English
   if (auto* button = guest_pointer<std::uint32_t>(state, state.gpr[5]))

@@ -6,8 +6,8 @@ void sceKernelMemcpy(Implementation& implementation, psprecomp::State& state) {
   const auto dest = state.gpr[4];
   const auto src = state.gpr[5];
   const auto count = state.gpr[6];
-  if (auto* dest_ptr = guest_pointer<std::uint8_t>(state, dest)) {
-    if (const auto* src_ptr = guest_pointer<std::uint8_t>(state, src)) {
+  if (auto* dest_ptr = psprecomp::mapped_address(state, dest, count)) {
+    if (const auto* src_ptr = psprecomp::mapped_address(state, src, count)) {
       std::memcpy(dest_ptr, src_ptr, count);
     }
   }

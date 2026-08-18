@@ -3,6 +3,7 @@ void execute_ge_list(Implementation& implementation, psprecomp::State& state,
                      int list_id, std::uint32_t start_address,
                      std::uint32_t stall_address,
                      std::uint32_t callback_id) {
+  using namespace refract::ge;
   const auto submission = implementation.submitted_ge_lists++;
   struct PendingCallback {
     std::uint32_t entry;

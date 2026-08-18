@@ -2,6 +2,7 @@
 
 void sceAtracReleaseAtracID(Implementation& implementation, psprecomp::State& state) {
 #if !defined(__PSP__)
+  (void)implementation;
   static_cast<void>(implementation);
   state.gpr[2] = atrac_state::release(static_cast<int>(state.gpr[4]))
                      ? 0U

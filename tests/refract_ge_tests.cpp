@@ -990,5 +990,145 @@ int main() {
   refract::Runtime::instance().wait_for_guest_threads();
   CHECK(observed_thread_gp.load() == guest_gp);
   CHECK(observed_thread_pc.load() == thread_entry);
+
+  // 1. sceKernelMemset & sceKernelMemcpy with bounds checking
+  constexpr std::uint32_t mem_src_addr = memory_base + 0x6100U;
+  constexpr std::uint32_t mem_dst_addr = memory_base + 0x6200U;
+  std::memset(memory.data() + mem_src_addr - memory_base, 0xaa, 64);
+  std::memset(memory.data() + mem_dst_addr - memory_base, 0, 64);
+  state.gpr[4] = mem_dst_addr;
+  state.gpr[5] = mem_src_addr;
+  state.gpr[6] = 32U;
+  refract::pspsdk::sceKernelMemcpy(state);
+  CHECK(state.gpr[2] == mem_dst_addr);
+  for (std::size_t i = 0; i < 32; ++i) {
+    CHECK(memory[mem_dst_addr - memory_base + i] == 0xaa);
+  }
+  CHECK(memory[mem_dst_addr - memory_base + 32] == 0);
+
+  // Out of bounds memcpy (dest + count exceeds memory size)
+  state.gpr[4] = memory_base + static_cast<std::uint32_t>(memory.size()) - 10U;
+  state.gpr[5] = mem_src_addr;
+  state.gpr[6] = 100U;
+  refract::pspsdk::sceKernelMemcpy(state);
+  CHECK(state.gpr[2] == memory_base + static_cast<std::uint32_t>(memory.size()) - 10U);
+
+  // sceKernelMemset
+  state.gpr[4] = mem_dst_addr;
+  state.gpr[5] = 0x55U;
+  state.gpr[6] = 16U;
+  refract::pspsdk::sceKernelMemset(state);
+  CHECK(state.gpr[2] == mem_dst_addr);
+  for (std::size_t i = 0; i < 16; ++i) {
+    CHECK(memory[mem_dst_addr - memory_base + i] == 0x55);
+  }
+
+  // 2. sceKernelSysClock2USec, sceKernelSysClock2USecWide, sceKernelUSec2SysClock
+  constexpr std::uint32_t clock_addr = memory_base + 0x6300U;
+  constexpr std::uint32_t low_addr = memory_base + 0x6310U;
+  constexpr std::uint32_t high_addr = memory_base + 0x6314U;
+  std::uint64_t test_clock = 0x100000002ULL;
+  std::memcpy(memory.data() + clock_addr - memory_base, &test_clock, sizeof(test_clock));
+  state.gpr[4] = clock_addr;
+  state.gpr[5] = low_addr;
+  state.gpr[6] = high_addr;
+  refract::pspsdk::sceKernelSysClock2USec(state);
+  CHECK(state.gpr[2] == 0U);
+  std::uint32_t low_val = 0, high_val = 0;
+  std::memcpy(&low_val, memory.data() + low_addr - memory_base, 4);
+  std::memcpy(&high_val, memory.data() + high_addr - memory_base, 4);
+  CHECK(low_val == 2U);
+  CHECK(high_val == 1U);
+
+  state.gpr[4] = 2U;
+  state.gpr[5] = 1U;
+  state.gpr[6] = low_addr;
+  state.gpr[7] = high_addr;
+  refract::pspsdk::sceKernelSysClock2USecWide(state);
+  CHECK(state.gpr[2] == 0U);
+  std::memcpy(&low_val, memory.data() + low_addr - memory_base, 4);
+  std::memcpy(&high_val, memory.data() + high_addr - memory_base, 4);
+  CHECK(low_val == 2U);
+  CHECK(high_val == 1U);
+
+  state.gpr[4] = 0x12345678U;
+  state.gpr[5] = clock_addr;
+  refract::pspsdk::sceKernelUSec2SysClock(state);
+  CHECK(state.gpr[2] == 0U);
+  std::memcpy(&test_clock, memory.data() + clock_addr - memory_base, sizeof(test_clock));
+  CHECK(test_clock == 0x12345678ULL);
+
+  // 3. scePowerGetBatteryChargePercent, sceKernelChangeThreadPriority
+  refract::pspsdk::scePowerGetBatteryChargePercent(state);
+  CHECK(state.gpr[2] == 100U);
+  state.gpr[4] = 1U;
+  state.gpr[5] = 16U;
+  refract::pspsdk::sceKernelChangeThreadPriority(state);
+  CHECK(state.gpr[2] == 0U);
+
+  // 4. sceIoOpenAsync, sceIoPollAsync non-destructive polling, sceIoWaitAsync
+  const auto test_io_dir = std::filesystem::temp_directory_path() / "test_async_io";
+  std::filesystem::create_directories(test_io_dir);
+  const auto test_file_path = test_io_dir / "async_test.bin";
+  {
+    std::ofstream ofs(test_file_path, std::ios::binary);
+    ofs << "Hello PSP Async IO";
+  }
+  constexpr std::uint32_t io_path_addr = memory_base + 0x6400U;
+  constexpr std::uint32_t async_res_addr = memory_base + 0x6450U;
+  const std::string ms0_path = "ms0:/test_async_io/async_test.bin";
+  std::memcpy(memory.data() + io_path_addr - memory_base, ms0_path.c_str(), ms0_path.size() + 1);
+  state.gpr[4] = io_path_addr;
+  state.gpr[5] = 1U; // O_RDONLY
+  state.gpr[6] = 0U;
+  refract::pspsdk::sceIoOpenAsync(state);
+  const auto async_fd = state.gpr[2];
+  CHECK(async_fd >= 3U);
+
+  // First poll must succeed and write result without erasing entry
+  state.gpr[4] = async_fd;
+  state.gpr[5] = async_res_addr;
+  refract::pspsdk::sceIoPollAsync(state);
+  CHECK(state.gpr[2] == 0U);
+
+  // Second poll must ALSO succeed because poll is non-destructive
+  state.gpr[4] = async_fd;
+  state.gpr[5] = async_res_addr;
+  refract::pspsdk::sceIoPollAsync(state);
+  CHECK(state.gpr[2] == 0U);
+
+  // Then wait async consumes the result
+  state.gpr[4] = async_fd;
+  state.gpr[5] = async_res_addr;
+  refract::pspsdk::sceIoWaitAsync(state);
+  CHECK(state.gpr[2] == 0U);
+
+  // Close fd
+  state.gpr[4] = async_fd;
+  refract::pspsdk::sceIoClose(state);
+  CHECK(state.gpr[2] == 0U);
+  std::filesystem::remove_all(test_io_dir);
+
+  // 5. umd0: path resolution bug test:
+  const auto disc_root_path = std::filesystem::temp_directory_path() / "disc";
+  std::filesystem::create_directories(disc_root_path);
+  const auto umd_file_path = std::filesystem::temp_directory_path() / "test_umd.bin";
+  {
+    std::ofstream ofs(umd_file_path, std::ios::binary);
+    ofs << "UMD DATA";
+  }
+  const std::string umd_path_str = "umd0:/test_umd.bin";
+  std::memcpy(memory.data() + io_path_addr - memory_base, umd_path_str.c_str(), umd_path_str.size() + 1);
+  state.gpr[4] = io_path_addr;
+  state.gpr[5] = 1U;
+  state.gpr[6] = 0U;
+  refract::pspsdk::sceIoOpen(state);
+  const auto umd_fd = state.gpr[2];
+  CHECK(umd_fd >= 3U);
+  state.gpr[4] = umd_fd;
+  refract::pspsdk::sceIoClose(state);
+  CHECK(state.gpr[2] == 0U);
+  std::filesystem::remove(umd_file_path);
+
   return 0;
 }

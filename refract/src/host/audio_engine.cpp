@@ -21,10 +21,11 @@ AudioEngine::SubmitResult AudioEngine::submit(
   }
 
   auto& target = (*channels_)[channel];
-  std::unique_lock lock(target.mutex);
-  const auto can_submit = [&target, frame_count] {
-    return target.queued_frames == 0U &&
-           frame_count <= maximum_frames_per_channel;
+  std::unique_lock lock(target.submit_mutex);
+  const auto can_submit = [&target] {
+    const auto w = target.write_index_.load(std::memory_order_relaxed);
+    const auto r = target.read_index_.load(std::memory_order_acquire);
+    return w == r;
   };
   if (!can_submit()) {
     if (!blocking) {
@@ -39,26 +40,38 @@ AudioEngine::SubmitResult AudioEngine::submit(
         return SubmitResult::timeout;
       }
 
-      // PSP blocking audio writes do not report a transient busy result.  If
+      // PSP blocking audio writes do not report a transient busy result. If
       // the host device stalls, discard the stale queue and accept the new
       // buffer so a guest cannot turn a host callback race into a permanent
       // retry loop while holding one of its own locks.
-      const auto discarded = target.queued_frames;
-      target.read_frame = 0U;
-      target.queued_frames = 0U;
-      queued_frames_.fetch_sub(discarded, std::memory_order_relaxed);
-      dropped_frames_.fetch_add(discarded, std::memory_order_relaxed);
+      const auto cur_w = target.write_index_.load(std::memory_order_relaxed);
+      const auto cur_r = target.read_index_.load(std::memory_order_relaxed);
+      const auto discarded = cur_w - cur_r;
+      target.read_index_.store(cur_w, std::memory_order_release);
+      if (discarded != 0U) {
+        queued_frames_.fetch_sub(discarded, std::memory_order_relaxed);
+        dropped_frames_.fetch_add(discarded, std::memory_order_relaxed);
+      }
     }
   }
 
-  // Every PSP output call starts at an empty queue.  Keeping the write at
-  // index zero makes submission a single bounded copy and leaves wraparound
-  // exclusively on the consumer side.
-  std::memcpy(target.samples.data(), interleaved_stereo,
-              static_cast<std::size_t>(frame_count) * 2U *
-                  sizeof(std::int16_t));
-  target.read_frame = 0U;
-  target.queued_frames = frame_count;
+  const auto w = target.write_index_.load(std::memory_order_relaxed);
+  constexpr std::size_t cap = maximum_frames_per_channel;
+  constexpr std::size_t mask = cap - 1U;
+  const auto start_frame = w & mask;
+  const auto frames_to_end = cap - start_frame;
+  const auto first_frames = std::min<std::size_t>(frame_count, frames_to_end);
+
+  std::memcpy(&target.samples[start_frame * 2U], interleaved_stereo,
+              first_frames * 2U * sizeof(std::int16_t));
+  if (first_frames < frame_count) {
+    const auto second_frames =
+        static_cast<std::size_t>(frame_count) - first_frames;
+    std::memcpy(&target.samples[0], interleaved_stereo + first_frames * 2U,
+                second_frames * 2U * sizeof(std::int16_t));
+  }
+  target.write_index_.store(w + frame_count, std::memory_order_release);
+
   submitted_frames_.fetch_add(frame_count, std::memory_order_relaxed);
   const auto depth =
       queued_frames_.fetch_add(frame_count, std::memory_order_relaxed) +
@@ -80,20 +93,20 @@ std::uint32_t AudioEngine::consume(std::int16_t* interleaved_stereo,
   callback_count_.fetch_add(1U, std::memory_order_relaxed);
 
   std::uint32_t maximum_consumed = 0U;
-  for (auto& source : *channels_) {
-    std::unique_lock lock(source.mutex, std::try_to_lock);
-    if (!lock.owns_lock()) {
-      callback_lock_contentions_.fetch_add(1U, std::memory_order_relaxed);
-      continue;
-    }
-    if (source.queued_frames == 0U) continue;
+  constexpr std::size_t cap = maximum_frames_per_channel;
+  constexpr std::size_t mask = cap - 1U;
 
-    const auto consumed = static_cast<std::uint32_t>(
-        std::min<std::size_t>(frame_count, source.queued_frames));
+  for (auto& source : *channels_) {
+    const auto w = source.write_index_.load(std::memory_order_acquire);
+    const auto r = source.read_index_.load(std::memory_order_relaxed);
+    if (w == r) continue;
+
+    const auto available = static_cast<std::uint32_t>(w - r);
+    const auto consumed = std::min(frame_count, available);
     maximum_consumed = std::max(maximum_consumed, consumed);
+
     for (std::size_t frame = 0U; frame < consumed; ++frame) {
-      const auto source_frame =
-          (source.read_frame + frame) % maximum_frames_per_channel;
+      const auto source_frame = (r + frame) & mask;
       for (std::size_t side = 0U; side < 2U; ++side) {
         const auto output_index = frame * 2U + side;
         const auto mixed =
@@ -105,14 +118,15 @@ std::uint32_t AudioEngine::consume(std::int16_t* interleaved_stereo,
                                      std::numeric_limits<std::int16_t>::max()));
       }
     }
-    source.read_frame =
-        (source.read_frame + consumed) % maximum_frames_per_channel;
-    source.queued_frames -= consumed;
+
+    source.read_index_.store(r + consumed, std::memory_order_release);
     queued_frames_.fetch_sub(consumed, std::memory_order_relaxed);
-    const bool drained = source.queued_frames == 0U;
-    lock.unlock();
-    if (drained) source.space_available.notify_all();
+
+    if (r + consumed == w) {
+      source.space_available.notify_all();
+    }
   }
+
   consumed_frames_.fetch_add(maximum_consumed, std::memory_order_relaxed);
   if (maximum_consumed < frame_count) {
     underrun_callbacks_.fetch_add(1U, std::memory_order_relaxed);
@@ -122,11 +136,12 @@ std::uint32_t AudioEngine::consume(std::int16_t* interleaved_stereo,
   return maximum_consumed;
 }
 
-std::uint32_t AudioEngine::queued_frames(std::uint32_t channel) const {
+std::uint32_t AudioEngine::queued_frames(std::uint32_t channel) const noexcept {
   if (channel >= channels_->size()) return 0U;
   const auto& source = (*channels_)[channel];
-  std::lock_guard lock(source.mutex);
-  return static_cast<std::uint32_t>(source.queued_frames);
+  const auto w = source.write_index_.load(std::memory_order_acquire);
+  const auto r = source.read_index_.load(std::memory_order_acquire);
+  return static_cast<std::uint32_t>(w >= r ? w - r : 0U);
 }
 
 AudioTelemetry AudioEngine::telemetry() const noexcept {
@@ -149,14 +164,12 @@ AudioTelemetry AudioEngine::telemetry() const noexcept {
 void AudioEngine::reset_channel(std::uint32_t channel) {
   if (channel >= channels_->size()) return;
   auto& target = (*channels_)[channel];
-  std::size_t discarded{};
-  {
-    std::lock_guard lock(target.mutex);
-    discarded = target.queued_frames;
-    target.read_frame = 0U;
-    target.queued_frames = 0U;
-  }
+  std::lock_guard lock(target.submit_mutex);
+  const auto cur_w = target.write_index_.load(std::memory_order_relaxed);
+  const auto cur_r = target.read_index_.load(std::memory_order_relaxed);
+  const auto discarded = cur_w - cur_r;
   if (discarded != 0U) {
+    target.read_index_.store(cur_w, std::memory_order_release);
     queued_frames_.fetch_sub(discarded, std::memory_order_relaxed);
     dropped_frames_.fetch_add(discarded, std::memory_order_relaxed);
   }

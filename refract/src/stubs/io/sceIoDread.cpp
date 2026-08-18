@@ -1,6 +1,6 @@
 void sceIoDread(Implementation& implementation, psprecomp::State& state) {
 #if !defined(__PSP__)
-  std::lock_guard lock(implementation.objects_mutex);
+  std::lock_guard lock(implementation.io_mutex);
   const auto found =
       implementation.directories.find(static_cast<int>(state.gpr[4]));
   if (found == implementation.directories.end())

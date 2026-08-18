@@ -38,6 +38,7 @@ void sceIoOpenAsync(Implementation& implementation, psprecomp::State& state) {
       if (descriptor < 0) {
         state.gpr[2] = io_state::error_from_errno(errno);
       } else {
+        std::lock_guard lock(implementation.io_mutex);
         const auto psp_descriptor = implementation.next_file++;
         implementation.files.emplace(psp_descriptor, descriptor);
         if (raw_disc)

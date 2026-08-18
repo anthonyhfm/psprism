@@ -59,6 +59,11 @@ int main() {
     CHECK(psprecomp::analyze_coverage(image, &map, clean_report));
     CHECK(clean_report.str().find("invalid_words=0\n") != std::string::npos);
 
+    append_word(image.executable_sections[0].bytes, 0x00400021U); // addu $0, $v0, $0 (rd=0)
+    append_word(image.executable_sections[0].bytes, 0x24000001U); // addiu $0, $0, 1 (rt=0)
+    append_word(image.executable_sections[0].bytes, 0x8c400004U); // lw $0, 4($v0) (rt=0)
+    append_word(image.executable_sections[0].bytes, 0x50400002U); // beql $v0, $0, +2
+
     const auto output = std::filesystem::temp_directory_path() /
                         ("psprism-vfpu-emitter-" +
                          std::to_string(std::chrono::steady_clock::now()
@@ -78,6 +83,10 @@ int main() {
     CHECK(generated.find("note_vfpu_helper_fallback(state)") !=
           std::string::npos);
     CHECK(generated.find("execute_vfpu(state, 0x63c06000U") !=
+          std::string::npos);
+    CHECK(generated.find("static_cast<void>(PSPRECOMP_LOAD32(state, state.gpr[2] + 0x00000004U));") !=
+          std::string::npos);
+    CHECK(generated.find("state.pc = state.memory_base + 0x0000102cU;") !=
           std::string::npos);
 
     const auto project = std::filesystem::temp_directory_path() /

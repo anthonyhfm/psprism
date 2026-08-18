@@ -2,6 +2,7 @@
 
 void sceAudioGetChannelRestLength(Implementation& implementation, psprecomp::State& state) {
 #if !defined(__PSP__)
+  (void)implementation;
   static_cast<void>(implementation);
   state.gpr[2] = audio_state::rest_length(state.gpr[4]);
   return;

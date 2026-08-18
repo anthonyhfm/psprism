@@ -158,17 +158,8 @@ void transform44(const std::array<float, 16>& matrix, const float input[3],
   output[3] = matrix[3] * input[0] + matrix[7] * input[1] +
               matrix[11] * input[2] + matrix[15];
 }
-
-struct DecodedTexture {
-  std::shared_ptr<std::vector<std::uint8_t>> pixels;
-  std::uint32_t width{};
-  std::uint32_t height{};
-  std::uint32_t address{};
-  std::uint32_t buffer_width{};
-  std::uint32_t format{};
-  std::uint32_t mipmap_level{};
-  std::uint64_t content_hash{};
-};
+ 
+using ge::DecodedTexture;
 
 using TextureKey = std::array<std::uint32_t, 12>;
 
@@ -182,7 +173,7 @@ struct TextureKeyHash {
     return hash;
   }
 };
-
+ 
 std::uint32_t decode_16bit_color(std::uint16_t packed,
                                  std::uint32_t format) {
   const auto expand_4 = [](std::uint32_t value) { return value * 17U; };
@@ -683,6 +674,7 @@ struct Runtime::Implementation {
   std::filesystem::path current_directory;
   std::filesystem::path disc_image;
   std::unordered_map<std::string, std::uint32_t> disc_sectors;
+  mutable std::mutex io_mutex;
   std::mutex objects_mutex;
   // Allegrex user threads share one CPU.  Generated guest code therefore
   // runs cooperatively under this lock and releases it only while an HLE call
@@ -806,23 +798,31 @@ struct Runtime::Implementation {
         value.remove_prefix(1);
       return value;
     };
-    if (io_state::starts_with_case_insensitive(psp_path, "disc0:") ||
-        io_state::starts_with_case_insensitive(psp_path, "umd0:")) {
+    if (io_state::starts_with_case_insensitive(psp_path, "disc0:")) {
       return configuration.disc_root / suffix(psp_path, "disc0:");
+    }
+    if (io_state::starts_with_case_insensitive(psp_path, "umd0:")) {
+      return configuration.disc_root / suffix(psp_path, "umd0:");
     }
     if (io_state::starts_with_case_insensitive(psp_path, "ms0:")) {
       return configuration.writable_root / suffix(psp_path, "ms0:");
     }
     if (!psp_path.empty() && psp_path.front() == '/')
       return configuration.disc_root / suffix(psp_path, "");
-    return (current_directory.empty() ? configuration.disc_root
-                                      : current_directory) /
+    std::filesystem::path current;
+    {
+      std::lock_guard lock(io_mutex);
+      current = current_directory;
+    }
+    return (current.empty() ? configuration.disc_root
+                            : current) /
            suffix(psp_path, "");
   }
 
   int descriptor(int psp_descriptor) const {
     if (psp_descriptor >= 0 && psp_descriptor <= 2)
       return psp_descriptor;
+    std::lock_guard lock(io_mutex);
     const auto found = files.find(psp_descriptor);
     return found == files.end() ? -1 : found->second;
   }
@@ -1055,13 +1055,171 @@ namespace {
 
 namespace pspsdk {
 
+constexpr bool is_non_yielding_stub(std::string_view name) {
+  constexpr std::string_view non_yielding[] = {
+    "sceKernelGetSystemTimeLow",
+    "sceKernelGetSystemTimeWide",
+    "sceKernelGetSystemTime",
+    "sceKernelLibcClock",
+    "sceKernelLibcTime",
+    "sceKernelLibcGettimeofday",
+    "sceKernelSysClock2USec",
+    "sceKernelSysClock2USecWide",
+    "sceKernelUSec2SysClock",
+    "sceKernelUSec2SysClockWide",
+    "sceKernelGetThreadId",
+    "sceKernelGetThreadCurrentPriority",
+    "sceKernelReferThreadStatus",
+    "sceKernelReferThreadRunStatus",
+    "sceKernelReferThreadProfiler",
+    "sceKernelReferGlobalProfiler",
+    "sceKernelReferSystemStatus",
+    "sceKernelGetGPI",
+    "sceKernelSetGPO",
+    "sceKernelGetModuleId",
+    "sceKernelGetModuleIdByAddress",
+    "sceKernelGetBlockHeadAddr",
+    "sceKernelMaxFreeMemSize",
+    "sceKernelTotalFreeMemSize",
+    "sceKernelSetCompiledSdkVersion",
+    "sceKernelSetCompiledSdkVersion370",
+    "sceKernelSetCompiledSdkVersion500_505",
+    "sceKernelSetCompiledSdkVersion603_605",
+    "sceKernelSetCompilerVersion",
+    "sceKernelCpuSuspendIntr",
+    "sceKernelCpuResumeIntr",
+    "sceKernelCpuResumeIntrWithSync",
+    "sceKernelIsCpuIntrEnable",
+    "sceKernelIsCpuIntrSuspended",
+    "scePowerGetCpuClockFrequencyInt",
+    "scePowerGetCpuClockFrequency",
+    "scePowerGetBusClockFrequencyInt",
+    "scePowerGetBusClockFrequency",
+    "scePowerGetPllClockFrequencyFloat",
+    "scePowerGetBatteryChargePercent",
+    "scePowerGetBatteryLifePercent",
+    "scePowerGetBatteryLifeTime",
+    "scePowerIsBatteryCharging",
+    "scePowerSetCpuClockFrequency",
+    "scePowerSetBusClockFrequency",
+    "scePowerTick",
+    "sceKernelPowerTick",
+    "sceKernelPowerLock",
+    "sceKernelPowerUnlock",
+    "sceDisplayGetVcount",
+    "sceDisplayGetFramePerSec",
+    "sceDisplayGetFrameBuf",
+    "sceDisplayGetCurrentHcount",
+    "sceDisplayIsVblank",
+    "sceDisplaySetMode",
+    "sceDisplaySetHoldMode",
+    "sceKernelMemcpy",
+    "sceKernelMemset",
+    "sceDmacMemcpy",
+    "sceDmacTryMemcpy",
+    "sceKernelTryAllocateVpl",
+    "sceKernelTryAllocateFpl",
+    "sceKernelDcacheWritebackAll",
+    "sceKernelDcacheWritebackInvalidateAll",
+    "sceKernelDcacheWritebackRange",
+    "sceKernelDcacheWritebackInvalidateRange",
+    "sceKernelPollEventFlag",
+    "sceKernelPollSema",
+    "sceKernelPollMbx",
+    "sceKernelReferEventFlagStatus",
+    "sceKernelClearEventFlag",
+    "sceGeEdramGetAddr",
+    "sceGeEdramGetSize",
+    "sceGeEdramSetAddrTranslation",
+    "sceGeGetCmd",
+    "sceGeSaveContext",
+    "sceGeRestoreContext",
+    "sceUtilityGetSystemParamInt",
+    "sceUtilityGetSystemParamString",
+    "sceUtilitySetSystemParamInt",
+    "sceImposeGetLanguageMode",
+    "sceImposeSetLanguageMode",
+    "sceKernelPrintf",
+    "sceKernelStdout",
+    "sceKernelStderr",
+    "sceKernelStdin",
+    "sceCtrlPeekBufferPositive",
+    "sceCtrlSetSamplingMode",
+    "sceCtrlSetSamplingCycle",
+    "sceCtrlSetIdleCancelThreshold",
+    "sceUmdCheckMedium",
+    "sceUmdGetDriveStat",
+    "sceUmdGetErrorStat",
+    "sceRtcGetCurrentTick",
+    "sceRtcGetTickResolution",
+    "sceRtcSetTick",
+    "sceRtcGetTick",
+    "sceRtcGetCurrentClock",
+    "sceRtcGetCurrentClockLocalTime",
+    "sceRtcGetTime_t",
+    "sceRtcCompareTick",
+    "sceRtcGetAccumulativeTime",
+    "sceWlanGetEtherAddr",
+    "sceWlanGetSwitchState",
+    "sceNetGetLocalEtherAddr",
+    "sceNetEtherNtostr",
+    "sceNetEtherStrton",
+    "sceNetInetGetErrno",
+    "sceAtracGetBitrate",
+    "sceAtracGetChannel",
+    "sceAtracGetMaxSample",
+    "sceAtracGetNextSample",
+    "sceAtracGetRemainFrame",
+    "sceAtracGetSoundSample",
+    "sceAtracGetStreamDataInfo",
+    "sceAtracGetSecondBufferInfo",
+    "sceAtracGetBufferInfoForResetting",
+    "sceAtracGetLoopStatus",
+    "sceAtracGetInternalErrorInfo",
+    "sceAtracGetAtracID",
+    "sceAudioGetChannelRestLength",
+    "sceAudioOutput2GetRestSample",
+    "sceAudioOutput2ChangeLength",
+    "__sceSasGetOutputmode",
+    "__sceSasGetEndFlag",
+    "__sceSasGetEnvelopeHeight",
+    "__sceSasGetAllEnvelopeHeights",
+    "__sceSasGetGrain",
+    "__sceSasGetPauseFlag",
+    "__sceSasSetADSR",
+    "__sceSasSetADSRmode",
+    "__sceSasSetGrain",
+    "__sceSasSetKeyOff",
+    "__sceSasSetKeyOn",
+    "__sceSasSetNoise",
+    "__sceSasSetOutputmode",
+    "__sceSasSetPause",
+    "__sceSasSetPitch",
+    "__sceSasSetSL",
+    "__sceSasSetSimpleADSR",
+    "__sceSasSetVoice",
+    "__sceSasSetVoicePCM",
+    "__sceSasSetVolume",
+    "__sceSasRevEVOL",
+    "__sceSasRevParam",
+    "__sceSasRevType",
+    "__sceSasRevVON",
+  };
+  for (const auto& item : non_yielding) {
+    if (name == item) {
+      return true;
+    }
+  }
+  return false;
+}
+
 #define PSPSDK_STUB(name)                                                  \
   void name(psprecomp::State& state) {                                     \
     auto& implementation = Runtime::instance().implementation();           \
     ::refract::name(implementation, state);                                \
     if (implementation.exit_requested) {                                   \
       state.stop_reason = psprecomp::StopReason::returned;                  \
-    } else {                                                               \
+    } else if constexpr (!is_non_yielding_stub(#name)) {                   \
       yield_guest(implementation);                                         \
     }                                                                      \
   }
@@ -1079,9 +1237,12 @@ Runtime::Runtime() : implementation_(new Implementation) {}
 
 Runtime::~Runtime() {
   wait_for_guest_threads();
-  for (const auto& [psp_descriptor, host_descriptor] : implementation_->files) {
-    static_cast<void>(psp_descriptor);
-    ::close(host_descriptor);
+  {
+    std::lock_guard lock(implementation_->io_mutex);
+    for (const auto& [psp_descriptor, host_descriptor] : implementation_->files) {
+      static_cast<void>(psp_descriptor);
+      ::close(host_descriptor);
+    }
   }
   delete implementation_;
 }

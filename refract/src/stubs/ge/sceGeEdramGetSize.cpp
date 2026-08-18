@@ -1,5 +1,6 @@
 void sceGeEdramGetSize(Implementation& implementation, psprecomp::State& state) {
 #if !defined(__PSP__)
+  (void)implementation;
   state.gpr[2] = 2U * 1024U * 1024U;
   return;
 #else

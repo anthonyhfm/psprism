@@ -1,17 +1,66 @@
 #include "../elf.hpp"
 
 #include <algorithm>
+#include <charconv>
 #include <cstdint>
 #include <cstring>
 #include <fstream>
 #include <iostream>
 #include <limits>
 #include <optional>
-#include <sstream>
 #include <stdexcept>
+#include <string_view>
 
 namespace psprecomp
 {
+    namespace
+    {
+        std::string_view next_token(std::string_view &rest)
+        {
+            while (!rest.empty() && (rest.front() == ' ' || rest.front() == '\t' ||
+                                     rest.front() == '\r' || rest.front() == '\n'))
+            {
+                rest.remove_prefix(1);
+            }
+            if (rest.empty())
+            {
+                return {};
+            }
+            std::size_t end = 0;
+            while (end < rest.size() && rest[end] != ' ' && rest[end] != '\t' &&
+                   rest[end] != '\r' && rest[end] != '\n')
+            {
+                ++end;
+            }
+            const auto token = rest.substr(0, end);
+            rest.remove_prefix(end);
+            return token;
+        }
+
+        bool parse_u32(std::string_view value, std::uint32_t &out)
+        {
+            if (value.empty())
+            {
+                return false;
+            }
+            int base = 10;
+            if (value.size() >= 2U && value[0] == '0' &&
+                (value[1] == 'x' || value[1] == 'X'))
+            {
+                base = 16;
+                value.remove_prefix(2U);
+                if (value.empty())
+                {
+                    return false;
+                }
+            }
+            const auto *first = value.data();
+            const auto *last = value.data() + value.size();
+            const auto [ptr, ec] = std::from_chars(first, last, out, base);
+            return ec == std::errc{} && ptr == last;
+        }
+    } // namespace
+
     CodeMap load_code_map(const std::filesystem::path &path)
     {
         std::ifstream stream(path);
@@ -29,29 +78,30 @@ namespace psprecomp
         {
             ++line_number;
 
-            if (line.empty() || line[0] == '#')
+            std::string_view view(line);
+            while (!view.empty() && (view.front() == ' ' || view.front() == '\t' ||
+                                     view.front() == '\r' || view.front() == '\n'))
+            {
+                view.remove_prefix(1);
+            }
+
+            if (view.empty() || view.front() == '#')
             {
                 continue;
             }
 
-            std::istringstream fields(line);
-            std::string kind;
-            std::string first;
-            std::string second;
-            fields >> kind >> first;
+            const auto kind = next_token(view);
+            const auto first = next_token(view);
 
-            const auto parse_address = [&](const std::string &value)
+            const auto parse_address = [&](std::string_view value) -> std::uint32_t
             {
-                std::size_t consumed = 0;
-                const auto parsed = std::stoul(value, &consumed, 0);
-
-                if (consumed != value.size() ||
-                    parsed > std::numeric_limits<std::uint32_t>::max())
+                std::uint32_t parsed = 0;
+                if (value.empty() || !parse_u32(value, parsed))
                 {
                     throw std::runtime_error("invalid address in code map line " + std::to_string(line_number));
                 }
 
-                return static_cast<std::uint32_t>(parsed);
+                return parsed;
             };
 
             if (kind == "entry" && !first.empty())
@@ -70,14 +120,20 @@ namespace psprecomp
             {
                 const auto address = parse_address(first);
                 map.function_starts.push_back(address);
-                std::string name;
-                if (fields >> name)
+                const auto name = next_token(view);
+                if (!name.empty())
                 {
-                    map.function_symbols.push_back({address, std::move(name)});
+                    map.function_symbols.push_back({address, std::string(name)});
                 }
             }
-            else if (kind == "function_range" && !first.empty() && fields >> second)
+            else if (kind == "function_range" && !first.empty())
             {
+                const auto second = next_token(view);
+                if (second.empty())
+                {
+                    throw std::runtime_error("invalid code map line " + std::to_string(line_number));
+                }
+
                 const auto begin = parse_address(first);
                 const auto end = parse_address(second);
 
@@ -86,22 +142,27 @@ namespace psprecomp
                     throw std::runtime_error("invalid function range in code map line " + std::to_string(line_number));
                 }
 
-                std::string name;
-                fields >> name;
-                map.function_ranges.push_back({begin, end, name});
+                const auto name = next_token(view);
+                map.function_ranges.push_back({begin, end, std::string(name)});
                 map.function_starts.push_back(begin);
 
                 if (!name.empty())
                 {
-                    map.function_symbols.push_back({begin, std::move(name)});
+                    map.function_symbols.push_back({begin, std::string(name)});
                 }
             }
             else if (kind == "block" && !first.empty())
             {
                 map.block_entries.push_back(parse_address(first));
             }
-            else if ((kind == "gp" || kind == "t9") && !first.empty() && fields >> second)
+            else if ((kind == "gp" || kind == "t9") && !first.empty())
             {
+                const auto second = next_token(view);
+                if (second.empty())
+                {
+                    throw std::runtime_error("invalid code map line " + std::to_string(line_number));
+                }
+
                 RegisterMetadata metadata{parse_address(first), parse_address(second)};
                 (kind == "gp" ? map.gp_values : map.t9_values).push_back(metadata);
             }
@@ -109,8 +170,14 @@ namespace psprecomp
             {
                 map.overlay_starts.push_back(parse_address(first));
             }
-            else if (kind == "exclude" && !first.empty() && fields >> second)
+            else if (kind == "exclude" && !first.empty())
             {
+                const auto second = next_token(view);
+                if (second.empty())
+                {
+                    throw std::runtime_error("invalid code map line " + std::to_string(line_number));
+                }
+
                 const auto begin = parse_address(first);
                 const auto end = parse_address(second);
 

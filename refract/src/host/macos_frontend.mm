@@ -161,7 +161,6 @@ std::atomic_uint32_t display_framebuffer_address{0x04000000U};
 std::atomic_uint32_t ge_presented_frames{};
 std::atomic_uint32_t keyboard_buttons{};
 std::atomic_uint32_t keyboard_latched_buttons{};
-std::atomic_uint64_t keyboard_latched_until{};
 std::atomic_uint32_t keyboard_analog_directions{};
 std::atomic_bool verbose_logging{};
 std::atomic_bool frontend_exit_requested{};
@@ -185,9 +184,6 @@ void update_keyboard_button(std::uint32_t mask, bool pressed) {
   update_keyboard_mask(keyboard_buttons, mask, pressed);
   if (pressed) {
     keyboard_latched_buttons.fetch_or(mask, std::memory_order_relaxed);
-    keyboard_latched_until.store(
-        refract::host::monotonic_microseconds() + 100000U,
-        std::memory_order_relaxed);
   }
 }
 
@@ -709,254 +705,256 @@ refract::desktop::DialogFrame current_dialog_frame();
   id<MTLCommandBuffer> commands = [self.queue commandBuffer];
   id<MTLBuffer> frame_vertex_buffer = nil;
   std::size_t frame_vertex_offset{};
+  std::vector<GeometryBatch> local_batches;
   if (self.geometryPipeline != nil) {
-    std::lock_guard lock(geometry_mutex);
-    std::size_t required_vertex_bytes{};
-    for (const auto& batch : presented_geometry_batches) {
-      required_vertex_bytes =
-          (required_vertex_bytes + 255U) & ~std::size_t{255U};
-      required_vertex_bytes +=
-          batch.vertices.size() * sizeof(refract::host::GeometryVertex);
+    {
+      std::lock_guard lock(geometry_mutex);
+      local_batches.swap(presented_geometry_batches);
     }
-    if (required_vertex_bytes != 0U) {
-      bool reused{};
-      {
-        std::lock_guard pool_lock(vertex_buffer_pool_mutex);
-        for (NSInteger index =
-                 static_cast<NSInteger>(vertex_buffer_pool.count) - 1;
-             index >= 0; --index) {
-          id<MTLBuffer> candidate = vertex_buffer_pool[index];
-          if (candidate.length < required_vertex_bytes) continue;
-          frame_vertex_buffer = candidate;
-          [vertex_buffer_pool removeObjectAtIndex:index];
-          reused = true;
-          break;
+    if (!local_batches.empty()) {
+      std::size_t required_vertex_bytes{};
+      for (const auto& batch : local_batches) {
+        required_vertex_bytes =
+            (required_vertex_bytes + 255U) & ~std::size_t{255U};
+        required_vertex_bytes +=
+            batch.vertices.size() * sizeof(refract::host::GeometryVertex);
+      }
+      if (required_vertex_bytes != 0U) {
+        bool reused{};
+        {
+          std::lock_guard pool_lock(vertex_buffer_pool_mutex);
+          for (NSInteger index =
+                   static_cast<NSInteger>(vertex_buffer_pool.count) - 1;
+               index >= 0; --index) {
+            id<MTLBuffer> candidate = vertex_buffer_pool[index];
+            if (candidate.length < required_vertex_bytes) continue;
+            frame_vertex_buffer = candidate;
+            [vertex_buffer_pool removeObjectAtIndex:index];
+            reused = true;
+            break;
+          }
         }
+        if (frame_vertex_buffer == nil) {
+          constexpr std::size_t initial_vertex_buffer_size = 4U << 20U;
+          const auto allocation_size =
+              std::max(required_vertex_bytes, initial_vertex_buffer_size);
+          frame_vertex_buffer = [self.device
+              newBufferWithLength:allocation_size
+                          options:MTLResourceStorageModeShared];
+        }
+        ge_cache_counters.record_vertex_buffer(reused, required_vertex_bytes);
       }
-      if (frame_vertex_buffer == nil) {
-        constexpr std::size_t initial_vertex_buffer_size = 4U << 20U;
-        const auto allocation_size =
-            std::max(required_vertex_bytes, initial_vertex_buffer_size);
-        frame_vertex_buffer = [self.device
-            newBufferWithLength:allocation_size
-                        options:MTLResourceStorageModeShared];
-      }
-      ge_cache_counters.record_vertex_buffer(reused, required_vertex_bytes);
-    }
-    id<MTLRenderCommandEncoder> encoder = nil;
-    std::uint32_t active_target = UINT32_MAX;
-    id<MTLTexture> active_target_texture = nil;
-    id<MTLTexture> active_depth_texture = nil;
-    for (const auto& batch : presented_geometry_batches) {
-      if (batch.vertices.empty()) continue;
-      const auto target_address =
-          normalized_vram_address(batch.state.render_target_address);
-      NSNumber* target_key = @(target_address);
-      id<MTLTexture> target =
-          [self.renderTargets objectForKey:target_key];
-      const auto depth_address =
-          normalized_vram_address(batch.state.depth_target_address);
-      NSNumber* depth_key = @(depth_address);
-      id<MTLTexture> depth = [self.depthTargets objectForKey:depth_key];
-      bool created_target = false;
-      if (target == nil || target.width < batch.state.render_target_width ||
-          target.height < batch.state.render_target_height) {
-        const auto target_width =
-            std::max<NSUInteger>(target.width,
-                                 batch.state.render_target_width);
-        const auto target_height =
-            std::max<NSUInteger>(target.height,
-                                 batch.state.render_target_height);
-        MTLTextureDescriptor* target_descriptor = [MTLTextureDescriptor
-            texture2DDescriptorWithPixelFormat:view.colorPixelFormat
-                                         width:target_width
-                                        height:target_height
-                                     mipmapped:NO];
-        target_descriptor.usage =
-            MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
-        target = [self.device newTextureWithDescriptor:target_descriptor];
-        [self.renderTargets setObject:target forKey:target_key];
-        created_target = true;
-      }
-      bool created_depth = false;
-      if (depth == nil || depth.width < batch.state.render_target_width ||
-          depth.height < batch.state.render_target_height) {
-        const auto depth_width = std::max<NSUInteger>(
-            depth.width, batch.state.render_target_width);
-        const auto depth_height = std::max<NSUInteger>(
-            depth.height, batch.state.render_target_height);
-        MTLTextureDescriptor* depth_descriptor = [MTLTextureDescriptor
-            texture2DDescriptorWithPixelFormat:view.depthStencilPixelFormat
-                                         width:depth_width
-                                        height:depth_height
-                                     mipmapped:NO];
-        depth_descriptor.usage = MTLTextureUsageRenderTarget;
-        depth = [self.device newTextureWithDescriptor:depth_descriptor];
-        [self.depthTargets setObject:depth forKey:depth_key];
-        created_depth = true;
-      }
-      if (encoder == nil || active_target != target_address ||
-          active_target_texture != target || active_depth_texture != depth) {
-        if (encoder != nil) [encoder endEncoding];
-        MTLRenderPassDescriptor* target_pass =
-            [MTLRenderPassDescriptor renderPassDescriptor];
-        target_pass.colorAttachments[0].texture = target;
-        target_pass.colorAttachments[0].loadAction =
-            created_target ? MTLLoadActionClear : MTLLoadActionLoad;
-        target_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
-        target_pass.colorAttachments[0].clearColor =
-            MTLClearColorMake(0.0, 0.0, 0.0, 0.0);
-        target_pass.depthAttachment.texture = depth;
-        target_pass.depthAttachment.loadAction =
-            created_depth ? MTLLoadActionClear : MTLLoadActionLoad;
-        target_pass.depthAttachment.storeAction = MTLStoreActionStore;
-        target_pass.depthAttachment.clearDepth = 1.0;
-        target_pass.stencilAttachment.texture = depth;
-        target_pass.stencilAttachment.loadAction =
-            created_depth ? MTLLoadActionClear : MTLLoadActionLoad;
-        target_pass.stencilAttachment.storeAction = MTLStoreActionStore;
-        target_pass.stencilAttachment.clearStencil = 0U;
-        encoder = [commands renderCommandEncoderWithDescriptor:target_pass];
-        const MTLViewport target_viewport{
-            0.0, 0.0, static_cast<double>(target.width),
-            static_cast<double>(target.height), 0.0, 1.0};
-        [encoder setViewport:target_viewport];
-        active_target = target_address;
-        active_target_texture = target;
-        active_depth_texture = depth;
-      }
-      const auto scissor_left = std::min<NSUInteger>(
-          batch.state.scissor_left, target.width);
-      const auto scissor_top = std::min<NSUInteger>(
-          batch.state.scissor_top, target.height);
-      const auto scissor_right = std::min<NSUInteger>(
-          batch.state.scissor_right, target.width);
-      const auto scissor_bottom = std::min<NSUInteger>(
-          batch.state.scissor_bottom, target.height);
-      if (scissor_right <= scissor_left || scissor_bottom <= scissor_top)
-        continue;
-      const MTLScissorRect scissor{
-          scissor_left, scissor_top, scissor_right - scissor_left,
-          scissor_bottom - scissor_top};
-      [encoder setScissorRect:scissor];
-      [encoder setCullMode:batch.state.cull_face ? MTLCullModeBack
-                                                 : MTLCullModeNone];
-      [encoder setFrontFacingWinding:batch.state.front_face_clockwise
-                                         ? MTLWindingClockwise
-                                         : MTLWindingCounterClockwise];
-      [encoder setDepthStencilState:
-                   [self depthStencilStateForGeometryState:batch.state]];
-      if (batch.state.stencil_test || batch.state.clear_stencil)
-        [encoder setStencilReferenceValue:batch.state.stencil_reference &
-                                          0xffU];
-      const FragmentState fragment_state{
-          batch.state.color_test ? 1U : 0U,
-          batch.state.color_function,
-          batch.state.color_reference,
-          batch.state.color_mask,
-          batch.state.alpha_test ? 1U : 0U,
-          batch.state.alpha_function,
-          batch.state.alpha_reference,
-          batch.state.alpha_mask,
-          batch.state.texture_function,
-          batch.state.texture_alpha_used ? 1U : 0U,
-          batch.state.texture_color_double ? 1U : 0U,
-          batch.state.texture_environment_color};
-      [encoder setFragmentBytes:&fragment_state
-                         length:sizeof(fragment_state)
+      id<MTLRenderCommandEncoder> encoder = nil;
+      std::uint32_t active_target = UINT32_MAX;
+      id<MTLTexture> active_target_texture = nil;
+      id<MTLTexture> active_depth_texture = nil;
+      for (const auto& batch : local_batches) {
+        if (batch.vertices.empty()) continue;
+        const auto target_address =
+            normalized_vram_address(batch.state.render_target_address);
+        NSNumber* target_key = @(target_address);
+        id<MTLTexture> target =
+            [self.renderTargets objectForKey:target_key];
+        const auto depth_address =
+            normalized_vram_address(batch.state.depth_target_address);
+        NSNumber* depth_key = @(depth_address);
+        id<MTLTexture> depth = [self.depthTargets objectForKey:depth_key];
+        bool created_target = false;
+        if (target == nil || target.width < batch.state.render_target_width ||
+            target.height < batch.state.render_target_height) {
+          const auto target_width =
+              std::max<NSUInteger>(target.width,
+                                   batch.state.render_target_width);
+          const auto target_height =
+              std::max<NSUInteger>(target.height,
+                                   batch.state.render_target_height);
+          MTLTextureDescriptor* target_descriptor = [MTLTextureDescriptor
+              texture2DDescriptorWithPixelFormat:view.colorPixelFormat
+                                           width:target_width
+                                          height:target_height
+                                       mipmapped:NO];
+          target_descriptor.usage =
+              MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+          target = [self.device newTextureWithDescriptor:target_descriptor];
+          [self.renderTargets setObject:target forKey:target_key];
+          created_target = true;
+        }
+        bool created_depth = false;
+        if (depth == nil || depth.width < batch.state.render_target_width ||
+            depth.height < batch.state.render_target_height) {
+          const auto depth_width = std::max<NSUInteger>(
+              depth.width, batch.state.render_target_width);
+          const auto depth_height = std::max<NSUInteger>(
+              depth.height, batch.state.render_target_height);
+          MTLTextureDescriptor* depth_descriptor = [MTLTextureDescriptor
+              texture2DDescriptorWithPixelFormat:view.depthStencilPixelFormat
+                                           width:depth_width
+                                          height:depth_height
+                                       mipmapped:NO];
+          depth_descriptor.usage = MTLTextureUsageRenderTarget;
+          depth = [self.device newTextureWithDescriptor:depth_descriptor];
+          [self.depthTargets setObject:depth forKey:depth_key];
+          created_depth = true;
+        }
+        if (encoder == nil || active_target != target_address ||
+            active_target_texture != target || active_depth_texture != depth) {
+          if (encoder != nil) [encoder endEncoding];
+          MTLRenderPassDescriptor* target_pass =
+              [MTLRenderPassDescriptor renderPassDescriptor];
+          target_pass.colorAttachments[0].texture = target;
+          target_pass.colorAttachments[0].loadAction =
+              created_target ? MTLLoadActionClear : MTLLoadActionLoad;
+          target_pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+          target_pass.colorAttachments[0].clearColor =
+              MTLClearColorMake(0.0, 0.0, 0.0, 0.0);
+          target_pass.depthAttachment.texture = depth;
+          target_pass.depthAttachment.loadAction =
+              created_depth ? MTLLoadActionClear : MTLLoadActionLoad;
+          target_pass.depthAttachment.storeAction = MTLStoreActionStore;
+          target_pass.depthAttachment.clearDepth = 1.0;
+          target_pass.stencilAttachment.texture = depth;
+          target_pass.stencilAttachment.loadAction =
+              created_depth ? MTLLoadActionClear : MTLLoadActionLoad;
+          target_pass.stencilAttachment.storeAction = MTLStoreActionStore;
+          target_pass.stencilAttachment.clearStencil = 0U;
+          encoder = [commands renderCommandEncoderWithDescriptor:target_pass];
+          const MTLViewport target_viewport{
+              0.0, 0.0, static_cast<double>(target.width),
+              static_cast<double>(target.height), 0.0, 1.0};
+          [encoder setViewport:target_viewport];
+          active_target = target_address;
+          active_target_texture = target;
+          active_depth_texture = depth;
+        }
+        const auto scissor_left = std::min<NSUInteger>(
+            batch.state.scissor_left, target.width);
+        const auto scissor_top = std::min<NSUInteger>(
+            batch.state.scissor_top, target.height);
+        const auto scissor_right = std::min<NSUInteger>(
+            batch.state.scissor_right, target.width);
+        const auto scissor_bottom = std::min<NSUInteger>(
+            batch.state.scissor_bottom, target.height);
+        if (scissor_right <= scissor_left || scissor_bottom <= scissor_top)
+          continue;
+        const MTLScissorRect scissor{
+            scissor_left, scissor_top, scissor_right - scissor_left,
+            scissor_bottom - scissor_top};
+        [encoder setScissorRect:scissor];
+        [encoder setCullMode:batch.state.cull_face ? MTLCullModeBack
+                                                   : MTLCullModeNone];
+        [encoder setFrontFacingWinding:batch.state.front_face_clockwise
+                                           ? MTLWindingClockwise
+                                           : MTLWindingCounterClockwise];
+        [encoder setDepthStencilState:
+                     [self depthStencilStateForGeometryState:batch.state]];
+        if (batch.state.stencil_test || batch.state.clear_stencil)
+          [encoder setStencilReferenceValue:batch.state.stencil_reference &
+                                            0xffU];
+        const FragmentState fragment_state{
+            batch.state.color_test ? 1U : 0U,
+            batch.state.color_function,
+            batch.state.color_reference,
+            batch.state.color_mask,
+            batch.state.alpha_test ? 1U : 0U,
+            batch.state.alpha_function,
+            batch.state.alpha_reference,
+            batch.state.alpha_mask,
+            batch.state.texture_function,
+            batch.state.texture_alpha_used ? 1U : 0U,
+            batch.state.texture_color_double ? 1U : 0U,
+            batch.state.texture_environment_color};
+        [encoder setFragmentBytes:&fragment_state
+                           length:sizeof(fragment_state)
+                          atIndex:1];
+        id<MTLTexture> sampled_texture = nil;
+        float geometry_texture_scale[2]{1.0F, 1.0F};
+        const auto texture_address =
+            normalized_vram_address(batch.state.texture_address);
+        if (batch.state.texture_address != 0U) {
+          sampled_texture = [self.renderTargets objectForKey:@(texture_address)];
+          if (sampled_texture != nil) {
+            geometry_texture_scale[0] = render_target_texture_scale(
+                batch.texture_width, sampled_texture.width);
+            geometry_texture_scale[1] = render_target_texture_scale(
+                batch.texture_height, sampled_texture.height);
+          }
+        }
+        if (sampled_texture == nil && batch.texture != nullptr &&
+            !batch.texture->empty()) {
+          sampled_texture = [self uploadedTextureForBatch:batch];
+        }
+        const auto needs_special_pipeline =
+            batch.state.alpha_blend || batch.state.color_write_mask != 0x0fU;
+        if (!needs_special_pipeline) ge_cache_counters.record_pipeline(true);
+        if (sampled_texture == nil) {
+          [encoder setRenderPipelineState:
+                       needs_special_pipeline
+                           ? [self blendPipelineForView:view
+                                              textured:NO
+                                                 state:batch.state]
+                           : self.geometryPipeline];
+        } else {
+          [encoder setRenderPipelineState:
+                       needs_special_pipeline
+                           ? [self blendPipelineForView:view
+                                              textured:YES
+                                                 state:batch.state]
+                           : self.texturedGeometryPipeline];
+          const auto sampler_state =
+              (batch.state.texture_min_linear ? 8U : 0U) +
+              (batch.state.texture_mag_linear ? 4U : 0U) +
+              (batch.state.texture_clamp_t ? 2U : 0U) +
+              (batch.state.texture_clamp_s ? 1U : 0U);
+          [encoder setFragmentSamplerState:self.samplerStates[sampler_state]
+                                   atIndex:0];
+          [encoder setFragmentTexture:sampled_texture atIndex:0];
+        }
+        if (batch.state.alpha_blend &&
+            (batch.state.blend_source >= 10U ||
+             batch.state.blend_destination >= 10U)) {
+          const auto fixed = batch.state.blend_source >= 10U
+                                 ? batch.state.blend_fix_a
+                                 : batch.state.blend_fix_b;
+          [encoder setBlendColorRed:static_cast<double>(fixed & 0xffU) / 255.0
+                              green:static_cast<double>((fixed >> 8U) & 0xffU) / 255.0
+                               blue:static_cast<double>((fixed >> 16U) & 0xffU) / 255.0
+                              alpha:1.0];
+        }
+        const auto vertex_bytes =
+            batch.vertices.size() * sizeof(refract::host::GeometryVertex);
+        frame_vertex_offset = (frame_vertex_offset + 255U) & ~std::size_t{255U};
+        if (frame_vertex_buffer == nil ||
+            frame_vertex_offset + vertex_bytes > frame_vertex_buffer.length) {
+          NSLog(@"psprism: GE vertex upload buffer exhausted (%zu bytes)",
+                required_vertex_bytes);
+          continue;
+        }
+        std::memcpy(static_cast<std::uint8_t*>(frame_vertex_buffer.contents) +
+                        frame_vertex_offset,
+                    batch.vertices.data(), vertex_bytes);
+        [encoder setVertexBuffer:frame_vertex_buffer
+                          offset:frame_vertex_offset
+                         atIndex:0];
+        frame_vertex_offset += vertex_bytes;
+        [encoder setVertexBytes:geometry_texture_scale
+                         length:sizeof(geometry_texture_scale)
                         atIndex:1];
-      id<MTLTexture> sampled_texture = nil;
-      float geometry_texture_scale[2]{1.0F, 1.0F};
-      const auto texture_address =
-          normalized_vram_address(batch.state.texture_address);
-      if (batch.state.texture_address != 0U) {
-        sampled_texture = [self.renderTargets objectForKey:@(texture_address)];
-        if (sampled_texture != nil) {
-          geometry_texture_scale[0] = render_target_texture_scale(
-              batch.texture_width, sampled_texture.width);
-          geometry_texture_scale[1] = render_target_texture_scale(
-              batch.texture_height, sampled_texture.height);
-        }
+        const float geometry_target_scale[2]{
+            render_target_geometry_scale(batch.state.through_coordinates,
+                                         batch.state.render_target_width,
+                                         target.width),
+            render_target_geometry_scale(batch.state.through_coordinates,
+                                         batch.state.render_target_height,
+                                         target.height)};
+        [encoder setVertexBytes:geometry_target_scale
+                         length:sizeof(geometry_target_scale)
+                        atIndex:2];
+        [encoder drawPrimitives:batch.type
+                    vertexStart:0
+                    vertexCount:batch.vertices.size()];
       }
-      if (sampled_texture == nil && batch.texture != nullptr &&
-          !batch.texture->empty()) {
-        sampled_texture = [self uploadedTextureForBatch:batch];
-      }
-      const auto needs_special_pipeline =
-          batch.state.alpha_blend || batch.state.color_write_mask != 0x0fU;
-      if (!needs_special_pipeline) ge_cache_counters.record_pipeline(true);
-      if (sampled_texture == nil) {
-        [encoder setRenderPipelineState:
-                     needs_special_pipeline
-                         ? [self blendPipelineForView:view
-                                            textured:NO
-                                               state:batch.state]
-                         : self.geometryPipeline];
-      } else {
-        [encoder setRenderPipelineState:
-                     needs_special_pipeline
-                         ? [self blendPipelineForView:view
-                                            textured:YES
-                                               state:batch.state]
-                         : self.texturedGeometryPipeline];
-        const auto sampler_state =
-            (batch.state.texture_min_linear ? 8U : 0U) +
-            (batch.state.texture_mag_linear ? 4U : 0U) +
-            (batch.state.texture_clamp_t ? 2U : 0U) +
-            (batch.state.texture_clamp_s ? 1U : 0U);
-        [encoder setFragmentSamplerState:self.samplerStates[sampler_state]
-                                 atIndex:0];
-        [encoder setFragmentTexture:sampled_texture atIndex:0];
-      }
-      if (batch.state.alpha_blend &&
-          (batch.state.blend_source >= 10U ||
-           batch.state.blend_destination >= 10U)) {
-        const auto fixed = batch.state.blend_source >= 10U
-                               ? batch.state.blend_fix_a
-                               : batch.state.blend_fix_b;
-        [encoder setBlendColorRed:static_cast<double>(fixed & 0xffU) / 255.0
-                            green:static_cast<double>((fixed >> 8U) & 0xffU) / 255.0
-                             blue:static_cast<double>((fixed >> 16U) & 0xffU) / 255.0
-                            alpha:1.0];
-      }
-      const auto vertex_bytes =
-          batch.vertices.size() * sizeof(refract::host::GeometryVertex);
-      frame_vertex_offset = (frame_vertex_offset + 255U) & ~std::size_t{255U};
-      if (frame_vertex_buffer == nil ||
-          frame_vertex_offset + vertex_bytes > frame_vertex_buffer.length) {
-        NSLog(@"psprism: GE vertex upload buffer exhausted (%zu bytes)",
-              required_vertex_bytes);
-        continue;
-      }
-      std::memcpy(static_cast<std::uint8_t*>(frame_vertex_buffer.contents) +
-                      frame_vertex_offset,
-                  batch.vertices.data(), vertex_bytes);
-      [encoder setVertexBuffer:frame_vertex_buffer
-                        offset:frame_vertex_offset
-                       atIndex:0];
-      frame_vertex_offset += vertex_bytes;
-      [encoder setVertexBytes:geometry_texture_scale
-                       length:sizeof(geometry_texture_scale)
-                      atIndex:1];
-      const float geometry_target_scale[2]{
-          render_target_geometry_scale(batch.state.through_coordinates,
-                                       batch.state.render_target_width,
-                                       target.width),
-          render_target_geometry_scale(batch.state.through_coordinates,
-                                       batch.state.render_target_height,
-                                       target.height)};
-      [encoder setVertexBytes:geometry_target_scale
-                       length:sizeof(geometry_target_scale)
-                      atIndex:2];
-      [encoder drawPrimitives:batch.type
-                  vertexStart:0
-                  vertexCount:batch.vertices.size()];
+      if (encoder != nil) [encoder endEncoding];
     }
-    if (encoder != nil) [encoder endEncoding];
-    // A PSP frame may be assembled from several GE lists.  Consume every
-    // completed list once, in submission order, after encoding it into the
-    // persistent framebuffer targets.
-    presented_geometry_batches.clear();
   }
 
   const auto display_address =
@@ -1449,6 +1447,7 @@ void present_frame(const std::uint8_t* pixels, std::uint32_t stride,
 }
 
 void present_ge_frame() {
+  keyboard_latched_buttons.store(0U, std::memory_order_relaxed);
   bool has_geometry = false;
   {
     std::lock_guard lock(geometry_mutex);
@@ -1561,14 +1560,8 @@ ControllerState controller_state() {
 #if defined(REFRACT_HAS_DESKTOP_DIALOGS)
   if (desktop_dialogs != nullptr && desktop_dialogs->visible()) return result;
 #endif
-  auto latched_buttons = keyboard_latched_buttons.load(std::memory_order_relaxed);
-  if (refract::host::monotonic_microseconds() >=
-      keyboard_latched_until.load(std::memory_order_relaxed)) {
-    keyboard_latched_buttons.store(0U, std::memory_order_relaxed);
-    latched_buttons = 0U;
-  }
   result.buttons = keyboard_buttons.load(std::memory_order_relaxed) |
-                   latched_buttons;
+                   keyboard_latched_buttons.load(std::memory_order_relaxed);
   const auto directions =
       keyboard_analog_directions.load(std::memory_order_relaxed);
   const auto horizontal = ((directions & analog_right) != 0 ? 1 : 0) -
@@ -1595,7 +1588,6 @@ void present_dialog(DialogModel model) {
       desktop_dialogs = std::make_unique<refract::desktop::DialogFrontend>();
     keyboard_buttons.store(0, std::memory_order_relaxed);
     keyboard_latched_buttons.store(0, std::memory_order_relaxed);
-    keyboard_latched_until.store(0, std::memory_order_relaxed);
     keyboard_analog_directions.store(0, std::memory_order_relaxed);
     previous_dialog_buttons = 0;
     dialog_controller_armed = false;

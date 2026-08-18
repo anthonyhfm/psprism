@@ -2,6 +2,7 @@
 
 void sceAtracGetLoopStatus(Implementation& implementation, psprecomp::State& state) {
 #if !defined(__PSP__)
+  (void)implementation;
   static_cast<void>(implementation);
   const auto decoder = atrac_state::get(static_cast<int>(state.gpr[4]));
   if (decoder == nullptr) {

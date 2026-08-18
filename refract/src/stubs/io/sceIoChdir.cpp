@@ -7,6 +7,7 @@ void sceIoChdir(Implementation& implementation, psprecomp::State& state) {
   if (!std::filesystem::is_directory(resolved)) {
     state.gpr[2] = io_error;
   } else {
+    std::lock_guard lock(implementation.io_mutex);
     implementation.current_directory = resolved;
     state.gpr[2] = 0;
   }

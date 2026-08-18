@@ -129,8 +129,7 @@ inline std::int16_t read_sample(const std::uint8_t* input) {
 }
 
 inline std::int16_t scale_sample(std::int16_t sample, std::uint32_t volume) {
-  const auto scaled = static_cast<std::int64_t>(sample) * volume /
-                      maximum_volume;
+  const auto scaled = (static_cast<std::int64_t>(sample) * volume) >> 15U;
   return static_cast<std::int16_t>(std::clamp<std::int64_t>(
       scaled, std::numeric_limits<std::int16_t>::min(),
       std::numeric_limits<std::int16_t>::max()));
@@ -167,8 +166,10 @@ inline std::uint32_t output(psprecomp::State& state, std::uint32_t channel,
                                                  byte_count);
   if (input == nullptr) return 0xffffffffU;
 
-  std::vector<std::int16_t> stereo(
-      static_cast<std::size_t>(selected.sample_count) * 2U);
+  std::array<std::int16_t, 8222> stereo{};
+  const auto total_samples =
+      static_cast<std::size_t>(selected.sample_count) * 2U;
+  if (total_samples > stereo.size()) return 0xffffffffU;
   for (std::size_t frame = 0; frame < selected.sample_count; ++frame) {
     const auto left = read_sample(input + frame * source_channels * 2U);
     const auto right = source_channels == 1U
@@ -248,12 +249,15 @@ inline std::uint32_t output_output2(psprecomp::State& state,
   const auto* input =
       psprecomp::mapped_address(state, buffer_address, byte_count);
   if (input == nullptr) return 0xffffffffU;
-  std::vector<std::int16_t> stereo(
-      static_cast<std::size_t>(selected.sample_count) * 2U);
-  for (std::size_t sample = 0U; sample < stereo.size(); ++sample)
+  std::array<std::int16_t, 8222> stereo{};
+  const auto total_samples =
+      static_cast<std::size_t>(selected.sample_count) * 2U;
+  if (total_samples > stereo.size()) return 0xffffffffU;
+  for (std::size_t sample = 0U; sample < total_samples; ++sample)
     stereo[sample] = read_sample(input + sample * sizeof(std::int16_t));
   if (volume != maximum_volume) {
-    for (auto& sample : stereo) sample = scale_sample(sample, volume);
+    for (std::size_t sample = 0U; sample < total_samples; ++sample)
+      stereo[sample] = scale_sample(stereo[sample], volume);
   }
   if (!refract::host::submit_audio(stereo.data(), selected.sample_count,
                                    output2_channel, blocking))

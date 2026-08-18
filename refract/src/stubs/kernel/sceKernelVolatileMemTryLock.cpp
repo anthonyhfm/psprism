@@ -1,5 +1,6 @@
 void sceKernelVolatileMemTryLock(Implementation& implementation, psprecomp::State& state) {
 #if !defined(__PSP__)
+  (void)implementation;
   constexpr std::uint32_t volatile_address = 0x08400000U;
   constexpr std::uint32_t volatile_size = 4U * 1024U * 1024U;
   if (auto* output = guest_pointer<std::uint32_t>(state, state.gpr[5]))

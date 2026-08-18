@@ -14,9 +14,8 @@
 
 namespace refract::host {
 
-// Fixed-storage mixer shared by the platform audio backend and unit tests.
-// Producers may block, but the real-time consumer only ever uses try_lock and
-// never allocates memory.
+// Lock-free mixer shared by the platform audio backend and unit tests.
+// Audio consumer reads lock-free with zero mutex locks using SPSC circular ring buffers.
 class AudioEngine {
  public:
   static constexpr std::size_t channel_count = 9U;
@@ -40,7 +39,7 @@ class AudioEngine {
                       bool recover_on_timeout = false);
   std::uint32_t consume(std::int16_t* interleaved_stereo,
                         std::uint32_t frame_count) noexcept;
-  [[nodiscard]] std::uint32_t queued_frames(std::uint32_t channel) const;
+  [[nodiscard]] std::uint32_t queued_frames(std::uint32_t channel) const noexcept;
   [[nodiscard]] AudioTelemetry telemetry() const noexcept;
   [[nodiscard]] std::uint64_t clock_frames() const noexcept {
     return consumed_frames_.load(std::memory_order_relaxed);
@@ -53,11 +52,11 @@ class AudioEngine {
 
  private:
   struct Channel {
-    mutable std::mutex mutex;
-    std::condition_variable space_available;
+    alignas(64) std::atomic<std::size_t> write_index_{0};
+    alignas(64) std::atomic<std::size_t> read_index_{0};
     std::array<std::int16_t, maximum_frames_per_channel * 2U> samples{};
-    std::size_t read_frame{};
-    std::size_t queued_frames{};
+    mutable std::mutex submit_mutex;
+    std::condition_variable space_available;
   };
 
   std::unique_ptr<std::array<Channel, channel_count>> channels_;

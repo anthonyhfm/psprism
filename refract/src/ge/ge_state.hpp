@@ -7,12 +7,39 @@
 #include <bit>
 #include <cstdint>
 #include <cstring>
+#include <memory>
 #include <mutex>
 #include <span>
+#include <unordered_map>
+#include <vector>
 
 namespace refract::ge {
 
 inline constexpr std::size_t context_word_count = 512U;
+
+struct DecodedTexture {
+  std::shared_ptr<std::vector<std::uint8_t>> pixels;
+  std::uint32_t width{};
+  std::uint32_t height{};
+  std::uint32_t address{};
+  std::uint32_t buffer_width{};
+  std::uint32_t format{};
+  std::uint32_t mipmap_level{};
+  std::uint64_t content_hash{};
+};
+
+using TextureKey = std::array<std::uint32_t, 12>;
+
+struct TextureKeyHash {
+  std::size_t operator()(const TextureKey& key) const noexcept {
+    std::size_t hash = 0xcbf29ce484222325ULL;
+    for (const auto value : key) {
+      hash ^= value;
+      hash *= 0x100000001b3ULL;
+    }
+    return hash;
+  }
+};
 
 struct State {
   std::mutex mutex;
@@ -33,6 +60,7 @@ struct State {
   std::uint32_t bone_matrix_index{};
   std::uint32_t address_translation_width{};
   std::uint64_t texture_generation{};
+  std::unordered_map<std::uint64_t, DecodedTexture> texture_cache;
   Trace trace;
 
   void reset() {
@@ -53,6 +81,7 @@ struct State {
     bone_matrix_index = 0U;
     address_translation_width = 0U;
     texture_generation = 0U;
+    texture_cache.clear();
     trace.clear();
   }
 
@@ -119,6 +148,7 @@ struct State {
     bone_matrix_index = *cursor++;
     address_translation_width = *cursor;
     ++texture_generation;
+    texture_cache.clear();
   }
 };
 

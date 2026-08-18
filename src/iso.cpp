@@ -80,17 +80,13 @@ std::string record_name(const std::uint8_t *record, std::size_t length) {
   return name;
 }
 
-std::vector<std::uint8_t> read_range(const std::filesystem::path &path,
+std::vector<std::uint8_t> read_range(std::istream &stream,
+                                     std::uint64_t file_size,
                                      std::uint64_t offset, std::size_t size) {
-  std::ifstream stream(path, std::ios::binary | std::ios::ate);
-  if (!stream) {
-    throw std::runtime_error("cannot open ISO image: " + path.string());
-  }
-  const auto file_size = stream.tellg();
-  if (file_size < 0 || offset > static_cast<std::uint64_t>(file_size) ||
-      size > static_cast<std::uint64_t>(file_size) - offset) {
+  if (offset > file_size || size > file_size - offset) {
     throw std::runtime_error("ISO extent is outside the image");
   }
+  stream.clear();
   stream.seekg(static_cast<std::streamoff>(offset));
   std::vector<std::uint8_t> result(size);
   if (size != 0U) {
@@ -101,6 +97,20 @@ std::vector<std::uint8_t> read_range(const std::filesystem::path &path,
     throw std::runtime_error("failed while reading ISO image");
   }
   return result;
+}
+
+std::vector<std::uint8_t> read_range(const std::filesystem::path &path,
+                                     std::uint64_t offset, std::size_t size) {
+  std::ifstream stream(path, std::ios::binary | std::ios::ate);
+  if (!stream) {
+    throw std::runtime_error("cannot open ISO image: " + path.string());
+  }
+  const auto file_size = stream.tellg();
+  if (file_size < 0) {
+    throw std::runtime_error("cannot determine ISO image size");
+  }
+  return read_range(stream, static_cast<std::uint64_t>(file_size), offset,
+                    size);
 }
 
 std::string sfo_string(const std::vector<std::uint8_t> &data,
@@ -148,7 +158,18 @@ std::string sfo_string(const std::vector<std::uint8_t> &data,
 } // namespace
 
 IsoImage::IsoImage(std::filesystem::path path) : path_(std::move(path)) {
-  const auto descriptor = read_range(path_, 16ULL * sector_size, sector_size);
+  std::ifstream stream(path_, std::ios::binary | std::ios::ate);
+  if (!stream) {
+    throw std::runtime_error("cannot open ISO image: " + path_.string());
+  }
+  const auto file_size_signed = stream.tellg();
+  if (file_size_signed < 0) {
+    throw std::runtime_error("cannot determine ISO image size");
+  }
+  const auto file_size = static_cast<std::uint64_t>(file_size_signed);
+
+  const auto descriptor =
+      read_range(stream, file_size, 16ULL * sector_size, sector_size);
   if (descriptor[0] != 1U ||
       std::string_view(reinterpret_cast<const char *>(descriptor.data() + 1U),
                        5U) != "CD001" ||
@@ -176,9 +197,10 @@ IsoImage::IsoImage(std::filesystem::path path) : path_(std::move(path)) {
     if (!visited.emplace(directory.extent, directory.size).second) {
       continue;
     }
-    const auto bytes = read_range(
-        path_, static_cast<std::uint64_t>(directory.extent) * sector_size,
-        directory.size);
+    const auto bytes =
+        read_range(stream, file_size,
+                   static_cast<std::uint64_t>(directory.extent) * sector_size,
+                   directory.size);
     std::size_t cursor = 0;
     while (cursor < bytes.size()) {
       const auto length = bytes[cursor];
@@ -206,7 +228,7 @@ IsoImage::IsoImage(std::filesystem::path path) : path_(std::move(path)) {
   }
   std::sort(entries_.begin(), entries_.end(),
             [](const IsoEntry &left, const IsoEntry &right) {
-              return left.path.generic_string() < right.path.generic_string();
+              return left.path.native() < right.path.native();
             });
 }
 
@@ -218,12 +240,15 @@ const std::vector<IsoEntry> &IsoImage::entries() const noexcept {
 
 std::optional<IsoEntry> IsoImage::find(std::string_view path) const {
   const auto wanted = normalized(path);
-  const auto found = std::find_if(
-      entries_.begin(), entries_.end(), [&](const IsoEntry &entry) {
-        return normalized(entry.path.generic_string()) == wanted;
+  const auto found = std::lower_bound(
+      entries_.begin(), entries_.end(), wanted,
+      [](const IsoEntry &entry, std::string_view value) {
+        return entry.path.native() < value;
       });
-  return found == entries_.end() ? std::nullopt
-                                 : std::optional<IsoEntry>(*found);
+  if (found != entries_.end() && found->path.native() == wanted) {
+    return *found;
+  }
+  return std::nullopt;
 }
 
 std::vector<std::uint8_t> IsoImage::read(const IsoEntry &entry) const {

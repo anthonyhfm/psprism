@@ -2,6 +2,7 @@
 
 void sceAtracSetDataAndGetID(Implementation& implementation, psprecomp::State& state) {
 #if !defined(__PSP__)
+  (void)implementation;
   static_cast<void>(implementation);
   const auto* source = psprecomp::mapped_address(state, state.gpr[4], state.gpr[5]);
   atrac_state::Track track;

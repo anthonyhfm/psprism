@@ -208,27 +208,30 @@ struct MediaEngine::Implementation {
       }
       return;
     }
-    if (*first != 0U) {
-      video_bytes.erase(video_bytes.begin(),
-                        video_bytes.begin() +
-                            static_cast<std::ptrdiff_t>(*first));
-    }
+    std::size_t cursor = *first;
     while (unit_count(StreamKind::video) <
            maximum_access_units_per_kind) {
-      const auto next = find_video_aud(video_bytes, 4U);
-      if (!next) return;
+      const auto remaining =
+          std::span<const std::uint8_t>(video_bytes).subspan(cursor);
+      const auto next = find_video_aud(remaining, 4U);
+      if (!next) break;
       MediaAccessUnit unit;
-      unit.bytes.assign(video_bytes.begin(),
-                        video_bytes.begin() +
-                            static_cast<std::ptrdiff_t>(*next));
+      unit.bytes.assign(remaining.data(), remaining.data() + *next);
       unit.pts = video_next_pts;
       unit.dts = video_next_pts;
       unit.source_bytes = static_cast<std::uint32_t>(unit.bytes.size());
       units.push_back({StreamKind::video, std::move(unit)});
       if (video_next_pts >= 0) video_next_pts += 3003;
-      video_bytes.erase(video_bytes.begin(),
-                        video_bytes.begin() +
-                            static_cast<std::ptrdiff_t>(*next));
+      cursor += *next;
+    }
+    if (cursor != 0U) {
+      if (cursor >= video_bytes.size()) {
+        video_bytes.clear();
+      } else {
+        video_bytes.erase(video_bytes.begin(),
+                          video_bytes.begin() +
+                              static_cast<std::ptrdiff_t>(cursor));
+      }
     }
   }
 
@@ -279,35 +282,43 @@ struct MediaEngine::Implementation {
     auto& staging = found_staging->second;
     auto& audio_bytes = staging.bytes;
     constexpr std::array<std::uint8_t, 2> audio_header{0x0fU, 0xd0U};
+    std::size_t cursor = 0U;
     for (;;) {
-      const auto header = std::search(audio_bytes.begin(), audio_bytes.end(),
+      const auto remaining =
+          std::span<const std::uint8_t>(audio_bytes).subspan(cursor);
+      const auto header = std::search(remaining.begin(), remaining.end(),
                                       audio_header.begin(), audio_header.end());
-      if (header == audio_bytes.end()) {
-        if (audio_bytes.size() > 1U) {
-          const auto last = audio_bytes.back();
-          audio_bytes.clear();
-          if (last == 0x0fU) audio_bytes.push_back(last);
+      if (header == remaining.end()) {
+        if (remaining.size() > 1U) {
+          const auto last = remaining.back();
+          if (last == 0x0fU) {
+            cursor = audio_bytes.size() - 1U;
+          } else {
+            cursor = audio_bytes.size();
+          }
         }
-        return;
+        break;
       }
-      if (header != audio_bytes.begin()) audio_bytes.erase(audio_bytes.begin(), header);
-      if (audio_bytes.size() < 4U) return;
-      const auto code1 = audio_bytes[2];
-      const auto code2 = audio_bytes[3];
+      cursor += static_cast<std::size_t>(
+          std::distance(remaining.begin(), header));
+      if (audio_bytes.size() - cursor < 4U) break;
+      const auto code1 = audio_bytes[cursor + 2U];
+      const auto code2 = audio_bytes[cursor + 3U];
       const auto frame_size =
           static_cast<std::size_t>(((code1 & 3U) << 8U) | (code2 * 8U)) + 16U;
       if (frame_size < 8U || frame_size > 8192U) {
-        audio_bytes.erase(audio_bytes.begin());
+        cursor += 1U;
         continue;
       }
-      if (audio_bytes.size() < frame_size) return;
+      if (audio_bytes.size() - cursor < frame_size) break;
       if (unit_count(StreamKind::audio) >=
           maximum_access_units_per_kind) {
-        return;
+        break;
       }
       MediaAccessUnit unit;
-      unit.bytes.assign(audio_bytes.begin() + 8, audio_bytes.begin() +
-                                                      static_cast<std::ptrdiff_t>(frame_size));
+      unit.bytes.assign(audio_bytes.begin() + cursor + 8U,
+                        audio_bytes.begin() + cursor +
+                            static_cast<std::ptrdiff_t>(frame_size));
       unit.pts = staging.next_pts;
       unit.dts = staging.next_pts;
       unit.source_bytes = static_cast<std::uint32_t>(frame_size);
@@ -315,8 +326,16 @@ struct MediaEngine::Implementation {
       unit.channels = code1 == 0x24U ? 1U : 2U;
       units.push_back({StreamKind::audio, std::move(unit)});
       if (staging.next_pts >= 0) staging.next_pts += 4180;
-      audio_bytes.erase(audio_bytes.begin(),
-                        audio_bytes.begin() + static_cast<std::ptrdiff_t>(frame_size));
+      cursor += frame_size;
+    }
+    if (cursor != 0U) {
+      if (cursor >= audio_bytes.size()) {
+        audio_bytes.clear();
+      } else {
+        audio_bytes.erase(audio_bytes.begin(),
+                          audio_bytes.begin() +
+                              static_cast<std::ptrdiff_t>(cursor));
+      }
     }
   }
 
@@ -325,8 +344,8 @@ struct MediaEngine::Implementation {
     for (auto& staging : audio_staging) {
       if (!staging.second.bytes.empty()) extract_audio_frames(staging.first);
     }
-    std::size_t cursor{};
-    std::size_t consumed{};
+    std::size_t cursor = encoded_offset;
+    std::size_t consumed = encoded_offset;
     while (cursor + 6U <= encoded.size()) {
       while (cursor + 3U < encoded.size() &&
              !(encoded[cursor] == 0U && encoded[cursor + 1U] == 0U &&
@@ -364,9 +383,10 @@ struct MediaEngine::Implementation {
       cursor = end;
       consumed = cursor;
     }
-    if (consumed != 0U) {
-      encoded.erase(encoded.begin(),
-                    encoded.begin() + static_cast<std::ptrdiff_t>(consumed));
+    encoded_offset = consumed;
+    if (encoded_offset >= encoded.size()) {
+      encoded.clear();
+      encoded_offset = 0U;
     }
   }
 
@@ -391,6 +411,7 @@ struct MediaEngine::Implementation {
   mutable std::mutex mutex;
   std::size_t capacity{};
   std::vector<std::uint8_t> encoded;
+  std::size_t encoded_offset{};
   std::vector<std::uint8_t> video_bytes;
   std::unordered_map<std::uint8_t, AudioStaging> audio_staging;
   std::deque<std::pair<StreamKind, MediaAccessUnit>> units;
@@ -429,11 +450,20 @@ bool MediaEngine::append_packets(std::span<const std::uint8_t> bytes) {
   if (bytes.empty()) return true;
   std::size_t queued{};
   for (const auto& item : impl.units) queued += item.second.source_bytes;
+  const auto active_encoded = impl.encoded.size() - impl.encoded_offset;
   if (bytes.size() > impl.capacity ||
-      impl.encoded.size() + impl.video_bytes.size() +
+      active_encoded + impl.video_bytes.size() +
               impl.audio_staging_size() + queued >
           impl.capacity - bytes.size()) {
     return false;
+  }
+  if (impl.encoded_offset > 0U &&
+      (impl.encoded_offset * 2U >= impl.encoded.size() ||
+       impl.encoded_offset >= 65536U)) {
+    impl.encoded.erase(
+        impl.encoded.begin(),
+        impl.encoded.begin() + static_cast<std::ptrdiff_t>(impl.encoded_offset));
+    impl.encoded_offset = 0U;
   }
   impl.encoded.insert(impl.encoded.end(), bytes.begin(), bytes.end());
   impl.demux();
@@ -471,7 +501,7 @@ MediaQueueStats MediaEngine::queue_stats() const {
   std::lock_guard lock(impl.mutex);
   MediaQueueStats result;
   result.capacity_bytes = impl.capacity;
-  result.encoded_bytes = impl.encoded.size();
+  result.encoded_bytes = impl.encoded.size() - impl.encoded_offset;
   result.video_staging_bytes = impl.video_bytes.size();
   result.audio_staging_bytes = impl.audio_staging_size();
   result.pending_video = impl.pending_video.has_value();
@@ -778,6 +808,7 @@ void MediaEngine::flush() {
   auto& impl = *implementation_;
   std::lock_guard lock(impl.mutex);
   impl.encoded.clear();
+  impl.encoded_offset = 0U;
   impl.video_bytes.clear();
   impl.audio_staging.clear();
   impl.units.clear();
@@ -795,8 +826,8 @@ void MediaEngine::flush() {
 std::size_t MediaEngine::buffered_bytes() const {
   const auto& impl = *implementation_;
   std::lock_guard lock(impl.mutex);
-  std::size_t result = impl.encoded.size() + impl.video_bytes.size() +
-                       impl.audio_staging_size();
+  std::size_t result = (impl.encoded.size() - impl.encoded_offset) +
+                       impl.video_bytes.size() + impl.audio_staging_size();
   for (const auto& item : impl.units) result += item.second.source_bytes;
   return result;
 }

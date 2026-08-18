@@ -316,6 +316,11 @@ inline std::uint32_t mix(psprecomp::State& state, std::uint32_t core_address,
   if (output == nullptr) return invalid_parameter;
   auto* mixed = core->mix_buffer.data();
   std::fill_n(mixed, sample_total, 0);
+
+  const bool is_aligned =
+      (reinterpret_cast<std::uintptr_t>(output) % alignof(std::int16_t)) == 0;
+  auto* output_samples = reinterpret_cast<std::int16_t*>(output);
+
   if (preserve) {
     for (std::size_t frame = 0; frame < grain_size; ++frame) {
       for (std::size_t side = 0; side < channels; ++side) {
@@ -323,13 +328,16 @@ inline std::uint32_t mix(psprecomp::State& state, std::uint32_t core_address,
                                       ? side * grain_size + frame
                                       : frame * channels + side;
         std::int16_t sample{};
-        std::memcpy(&sample, output + output_index * sizeof(sample),
-                    sizeof(sample));
+        if (is_aligned) {
+          sample = output_samples[output_index];
+        } else {
+          std::memcpy(&sample, output + output_index * sizeof(sample),
+                      sizeof(sample));
+        }
         const auto volume = (side & 1U) == 0U ? preserve_left_volume
                                               : preserve_right_volume;
         mixed[frame * channels + side] =
-            static_cast<std::int32_t>(sample) * volume /
-            static_cast<std::int32_t>(max_volume);
+            (static_cast<std::int32_t>(sample) * volume) >> 12;
       }
     }
   }
@@ -365,21 +373,16 @@ inline std::uint32_t mix(psprecomp::State& state, std::uint32_t core_address,
                           12U);
       advance_envelope(voice);
       const auto sample = static_cast<std::int32_t>(
-          static_cast<std::int64_t>(interpolated) * voice.envelope_height /
-          max_envelope_height);
+          (static_cast<std::int64_t>(interpolated) * voice.envelope_height) >> 30U);
       mixed[frame * channels] +=
-          static_cast<std::int32_t>(sample) * voice.left_volume /
-          static_cast<std::int32_t>(max_volume);
+          (static_cast<std::int32_t>(sample) * voice.left_volume) >> 12;
       mixed[frame * channels + 1U] +=
-          static_cast<std::int32_t>(sample) * voice.right_volume /
-          static_cast<std::int32_t>(max_volume);
+          (static_cast<std::int32_t>(sample) * voice.right_volume) >> 12;
       if (channels == 4U) {
         mixed[frame * channels + 2U] +=
-            sample * voice.effect_left_volume /
-            static_cast<std::int32_t>(max_volume);
+            (sample * voice.effect_left_volume) >> 12;
         mixed[frame * channels + 3U] +=
-            sample * voice.effect_right_volume /
-            static_cast<std::int32_t>(max_volume);
+            (sample * voice.effect_right_volume) >> 12;
       }
       voice.position += voice.pitch;
     }
@@ -388,14 +391,27 @@ inline std::uint32_t mix(psprecomp::State& state, std::uint32_t core_address,
                                   ? voice.samples.size() - position
                                   : 0U;
   }
-  for (std::size_t frame = 0; frame < grain_size; ++frame) {
-    for (std::size_t side = 0; side < channels; ++side) {
-      const auto sample = clamp_sample(mixed[frame * channels + side]);
-      const auto output_index = channels == 4U
-                                    ? side * grain_size + frame
-                                    : frame * channels + side;
-      std::memcpy(output + output_index * sizeof(sample), &sample,
-                  sizeof(sample));
+
+  if (is_aligned) {
+    for (std::size_t frame = 0; frame < grain_size; ++frame) {
+      for (std::size_t side = 0; side < channels; ++side) {
+        const auto output_index = channels == 4U
+                                      ? side * grain_size + frame
+                                      : frame * channels + side;
+        output_samples[output_index] =
+            clamp_sample(mixed[frame * channels + side]);
+      }
+    }
+  } else {
+    for (std::size_t frame = 0; frame < grain_size; ++frame) {
+      for (std::size_t side = 0; side < channels; ++side) {
+        const auto sample = clamp_sample(mixed[frame * channels + side]);
+        const auto output_index = channels == 4U
+                                      ? side * grain_size + frame
+                                      : frame * channels + side;
+        std::memcpy(output + output_index * sizeof(sample), &sample,
+                    sizeof(sample));
+      }
     }
   }
   return 0U;

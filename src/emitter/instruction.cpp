@@ -190,7 +190,7 @@ namespace psprecomp::detail
             switch (function)
             {
             case 0x00:
-                if (instruction == 0)
+                if (rd == 0 || instruction == 0)
                 {
                     out << "/* nop */";
                 }
@@ -202,12 +202,26 @@ namespace psprecomp::detail
             case 0x02:
                 if (rs == 1)
                 {
-                    out << reg(rd) << " = rotate_right(" << reg(rt) << ", " << shift
-                        << "U);";
+                    if (rd == 0)
+                    {
+                        out << "/* nop */";
+                    }
+                    else
+                    {
+                        out << reg(rd) << " = rotate_right(" << reg(rt) << ", " << shift
+                            << "U);";
+                    }
                 }
                 else if (rs == 0)
                 {
-                    out << reg(rd) << " = " << reg(rt) << " >> " << shift << "U;";
+                    if (rd == 0)
+                    {
+                        out << "/* nop */";
+                    }
+                    else
+                    {
+                        out << reg(rd) << " = " << reg(rt) << " >> " << shift << "U;";
+                    }
                 }
                 else
                 {
@@ -216,23 +230,51 @@ namespace psprecomp::detail
                 }
                 break;
             case 0x03:
-                out << reg(rd) << " = arithmetic_shift_right(" << reg(rt) << ", "
-                    << shift << "U);";
+                if (rd == 0)
+                {
+                    out << "/* nop */";
+                }
+                else
+                {
+                    out << reg(rd) << " = arithmetic_shift_right(" << reg(rt) << ", "
+                        << shift << "U);";
+                }
                 break;
             case 0x04:
-                out << reg(rd) << " = " << reg(rt) << " << (" << reg(rs)
-                    << " & 31U);";
+                if (rd == 0)
+                {
+                    out << "/* nop */";
+                }
+                else
+                {
+                    out << reg(rd) << " = " << reg(rt) << " << (" << reg(rs)
+                        << " & 31U);";
+                }
                 break;
             case 0x06:
                 if (shift == 1)
                 {
-                    out << reg(rd) << " = rotate_right(" << reg(rt) << ", "
-                        << reg(rs) << ");";
+                    if (rd == 0)
+                    {
+                        out << "/* nop */";
+                    }
+                    else
+                    {
+                        out << reg(rd) << " = rotate_right(" << reg(rt) << ", "
+                            << reg(rs) << ");";
+                    }
                 }
                 else if (shift == 0)
                 {
-                    out << reg(rd) << " = " << reg(rt) << " >> (" << reg(rs)
-                        << " & 31U);";
+                    if (rd == 0)
+                    {
+                        out << "/* nop */";
+                    }
+                    else
+                    {
+                        out << reg(rd) << " = " << reg(rt) << " >> (" << reg(rs)
+                            << " & 31U);";
+                    }
                 }
                 else
                 {
@@ -241,25 +283,50 @@ namespace psprecomp::detail
                 }
                 break;
             case 0x07:
-                out << reg(rd) << " = arithmetic_shift_right(" << reg(rt) << ", "
-                    << reg(rs) << ");";
+                if (rd == 0)
+                {
+                    out << "/* nop */";
+                }
+                else
+                {
+                    out << reg(rd) << " = arithmetic_shift_right(" << reg(rt) << ", "
+                        << reg(rs) << ");";
+                }
                 break;
             case 0x08:
                 out << "state.branch_pending = true; state.branch_target = "
                     << reg(rs) << ";";
                 break;
             case 0x09:
-                out << reg(rd) << " = state.memory_base + " << hex(pc + 8U)
-                    << "; state.branch_pending = true; state.branch_target = "
+                if (rd != 0)
+                {
+                    out << reg(rd) << " = state.memory_base + " << hex(pc + 8U)
+                        << "; ";
+                }
+                out << "state.branch_pending = true; state.branch_target = "
                     << reg(rs) << ";";
                 break;
             case 0x0a:
-                out << "if (" << reg(rt) << " == 0) { " << reg(rd) << " = "
-                    << reg(rs) << "; }";
+                if (rd == 0)
+                {
+                    out << "/* nop */";
+                }
+                else
+                {
+                    out << "if (" << reg(rt) << " == 0) { " << reg(rd) << " = "
+                        << reg(rs) << "; }";
+                }
                 break;
             case 0x0b:
-                out << "if (" << reg(rt) << " != 0) { " << reg(rd) << " = "
-                    << reg(rs) << "; }";
+                if (rd == 0)
+                {
+                    out << "/* nop */";
+                }
+                else
+                {
+                    out << "if (" << reg(rt) << " != 0) { " << reg(rd) << " = "
+                        << reg(rs) << "; }";
+                }
                 break;
             case 0x0c:
                 out << "state.stop_reason = StopReason::syscall;";
@@ -276,22 +343,50 @@ namespace psprecomp::detail
                 out << "/* sync: generated C++ executes in order */";
                 break;
             case 0x10:
-                out << reg(rd) << " = state.hi;";
+                if (rd == 0)
+                {
+                    out << "/* nop */";
+                }
+                else
+                {
+                    out << reg(rd) << " = state.hi;";
+                }
                 break;
             case 0x11:
                 out << "state.hi = " << reg(rs) << ";";
                 break;
             case 0x12:
-                out << reg(rd) << " = state.lo;";
+                if (rd == 0)
+                {
+                    out << "/* nop */";
+                }
+                else
+                {
+                    out << reg(rd) << " = state.lo;";
+                }
                 break;
             case 0x13:
                 out << "state.lo = " << reg(rs) << ";";
                 break;
             case 0x16: // Allegrex clz
-                out << reg(rd) << " = std::countl_zero(" << reg(rs) << ");";
+                if (rd == 0)
+                {
+                    out << "/* nop */";
+                }
+                else
+                {
+                    out << reg(rd) << " = std::countl_zero(" << reg(rs) << ");";
+                }
                 break;
             case 0x17: // Allegrex clo
-                out << reg(rd) << " = std::countl_one(" << reg(rs) << ");";
+                if (rd == 0)
+                {
+                    out << "/* nop */";
+                }
+                else
+                {
+                    out << reg(rd) << " = std::countl_one(" << reg(rs) << ");";
+                }
                 break;
             case 0x18:
                 out << "{ const auto product = static_cast<std::int64_t>(as_s32("
@@ -356,38 +451,108 @@ namespace psprecomp::detail
             }
             case 0x20:
             case 0x21:
-                out << reg(rd) << " = " << reg(rs) << " + " << reg(rt) << ";";
+                if (rd == 0)
+                {
+                    out << "/* nop */";
+                }
+                else
+                {
+                    out << reg(rd) << " = " << reg(rs) << " + " << reg(rt) << ";";
+                }
                 break;
             case 0x22:
             case 0x23:
-                out << reg(rd) << " = " << reg(rs) << " - " << reg(rt) << ";";
+                if (rd == 0)
+                {
+                    out << "/* nop */";
+                }
+                else
+                {
+                    out << reg(rd) << " = " << reg(rs) << " - " << reg(rt) << ";";
+                }
                 break;
             case 0x24:
-                out << reg(rd) << " = " << reg(rs) << " & " << reg(rt) << ";";
+                if (rd == 0)
+                {
+                    out << "/* nop */";
+                }
+                else
+                {
+                    out << reg(rd) << " = " << reg(rs) << " & " << reg(rt) << ";";
+                }
                 break;
             case 0x25:
-                out << reg(rd) << " = " << reg(rs) << " | " << reg(rt) << ";";
+                if (rd == 0)
+                {
+                    out << "/* nop */";
+                }
+                else
+                {
+                    out << reg(rd) << " = " << reg(rs) << " | " << reg(rt) << ";";
+                }
                 break;
             case 0x26:
-                out << reg(rd) << " = " << reg(rs) << " ^ " << reg(rt) << ";";
+                if (rd == 0)
+                {
+                    out << "/* nop */";
+                }
+                else
+                {
+                    out << reg(rd) << " = " << reg(rs) << " ^ " << reg(rt) << ";";
+                }
                 break;
             case 0x27:
-                out << reg(rd) << " = ~(" << reg(rs) << " | " << reg(rt) << ");";
+                if (rd == 0)
+                {
+                    out << "/* nop */";
+                }
+                else
+                {
+                    out << reg(rd) << " = ~(" << reg(rs) << " | " << reg(rt) << ");";
+                }
                 break;
             case 0x2a:
-                out << reg(rd) << " = as_s32(" << reg(rs) << ") < as_s32("
-                    << reg(rt) << ");";
+                if (rd == 0)
+                {
+                    out << "/* nop */";
+                }
+                else
+                {
+                    out << reg(rd) << " = as_s32(" << reg(rs) << ") < as_s32("
+                        << reg(rt) << ");";
+                }
                 break;
             case 0x2b:
-                out << reg(rd) << " = " << reg(rs) << " < " << reg(rt) << ";";
+                if (rd == 0)
+                {
+                    out << "/* nop */";
+                }
+                else
+                {
+                    out << reg(rd) << " = " << reg(rs) << " < " << reg(rt) << ";";
+                }
                 break;
             case 0x2c: // Allegrex max
-                out << reg(rd) << " = as_s32(" << reg(rs) << ") > as_s32("
-                    << reg(rt) << ") ? " << reg(rs) << " : " << reg(rt) << ";";
+                if (rd == 0)
+                {
+                    out << "/* nop */";
+                }
+                else
+                {
+                    out << reg(rd) << " = as_s32(" << reg(rs) << ") > as_s32("
+                        << reg(rt) << ") ? " << reg(rs) << " : " << reg(rt) << ";";
+                }
                 break;
             case 0x2d: // Allegrex min
-                out << reg(rd) << " = as_s32(" << reg(rs) << ") < as_s32("
-                    << reg(rt) << ") ? " << reg(rs) << " : " << reg(rt) << ";";
+                if (rd == 0)
+                {
+                    out << "/* nop */";
+                }
+                else
+                {
+                    out << reg(rd) << " = as_s32(" << reg(rs) << ") < as_s32("
+                        << reg(rt) << ") ? " << reg(rs) << " : " << reg(rt) << ";";
+                }
                 break;
             case 0x2e:
             { // msub
@@ -514,18 +679,46 @@ namespace psprecomp::detail
             switch (function)
             {
             case 0x20: // clz
-                out << reg(rd) << " = std::countl_zero(" << reg(rs) << ");";
+                if (rd == 0)
+                {
+                    out << "/* nop */";
+                }
+                else
+                {
+                    out << reg(rd) << " = std::countl_zero(" << reg(rs) << ");";
+                }
                 break;
             case 0x21: // clo
-                out << reg(rd) << " = std::countl_one(" << reg(rs) << ");";
+                if (rd == 0)
+                {
+                    out << "/* nop */";
+                }
+                else
+                {
+                    out << reg(rd) << " = std::countl_one(" << reg(rs) << ");";
+                }
                 break;
             case 0x2c: // max
-                out << reg(rd) << " = as_s32(" << reg(rs) << ") > as_s32("
-                    << reg(rt) << ") ? " << reg(rs) << " : " << reg(rt) << ";";
+                if (rd == 0)
+                {
+                    out << "/* nop */";
+                }
+                else
+                {
+                    out << reg(rd) << " = as_s32(" << reg(rs) << ") > as_s32("
+                        << reg(rt) << ") ? " << reg(rs) << " : " << reg(rt) << ";";
+                }
                 break;
             case 0x2d: // min
-                out << reg(rd) << " = as_s32(" << reg(rs) << ") < as_s32("
-                    << reg(rt) << ") ? " << reg(rs) << " : " << reg(rt) << ";";
+                if (rd == 0)
+                {
+                    out << "/* nop */";
+                }
+                else
+                {
+                    out << reg(rd) << " = as_s32(" << reg(rs) << ") < as_s32("
+                        << reg(rt) << ") ? " << reg(rs) << " : " << reg(rt) << ";";
+                }
                 break;
             default:
                 return "/* unsupported/reserved PSP word */ "
@@ -534,32 +727,81 @@ namespace psprecomp::detail
             break;
         case 0x08:
         case 0x09:
-            out << reg(rt) << " = " << reg(rs) << signed_imm(instruction, relocated)
-                << ";";
+            if (rt == 0)
+            {
+                out << "/* nop */";
+            }
+            else
+            {
+                out << reg(rt) << " = " << reg(rs) << signed_imm(instruction, relocated)
+                    << ";";
+            }
             break;
         case 0x0a:
-            out << reg(rt) << " = as_s32(" << reg(rs) << ") < "
-                << signed_immediate_s32(instruction, relocated) << ";";
+            if (rt == 0)
+            {
+                out << "/* nop */";
+            }
+            else
+            {
+                out << reg(rt) << " = as_s32(" << reg(rs) << ") < "
+                    << signed_immediate_s32(instruction, relocated) << ";";
+            }
             break;
         case 0x0b:
-            out << reg(rt) << " = " << reg(rs) << " < "
-                << signed_immediate(instruction, relocated) << ";";
+            if (rt == 0)
+            {
+                out << "/* nop */";
+            }
+            else
+            {
+                out << reg(rt) << " = " << reg(rs) << " < "
+                    << signed_immediate(instruction, relocated) << ";";
+            }
             break;
         case 0x0c:
-            out << reg(rt) << " = " << reg(rs) << " & "
-                << immediate(instruction, relocated) << ";";
+            if (rt == 0)
+            {
+                out << "/* nop */";
+            }
+            else
+            {
+                out << reg(rt) << " = " << reg(rs) << " & "
+                    << immediate(instruction, relocated) << ";";
+            }
             break;
         case 0x0d:
-            out << reg(rt) << " = " << reg(rs) << " | "
-                << immediate(instruction, relocated) << ";";
+            if (rt == 0)
+            {
+                out << "/* nop */";
+            }
+            else
+            {
+                out << reg(rt) << " = " << reg(rs) << " | "
+                    << immediate(instruction, relocated) << ";";
+            }
             break;
         case 0x0e:
-            out << reg(rt) << " = " << reg(rs) << " ^ "
-                << immediate(instruction, relocated) << ";";
+            if (rt == 0)
+            {
+                out << "/* nop */";
+            }
+            else
+            {
+                out << reg(rt) << " = " << reg(rs) << " ^ "
+                    << immediate(instruction, relocated) << ";";
+            }
             break;
         case 0x0f:
-            out << reg(rt) << " = " << immediate(instruction, relocated)
-                << " << 16U;";
+            if (rt == 0)
+            {
+                out << "/* nop */";
+            }
+            else
+            {
+                out << reg(rt) << " = " << immediate(instruction, relocated)
+                    << " << 16U;";
+            }
             break;
         case 0x11:
         {
@@ -569,11 +811,22 @@ namespace psprecomp::detail
             const auto fd = shift;
             if (fmt == 0x00)
             {
-                out << reg(rt) << " = state.fpr[" << fs << "];";
+                if (rt == 0)
+                {
+                    out << "/* nop */";
+                }
+                else
+                {
+                    out << reg(rt) << " = state.fpr[" << fs << "];";
+                }
             }
             else if (fmt == 0x02)
             {
-                if (fs == 0)
+                if (rt == 0)
+                {
+                    out << "/* nop */";
+                }
+                else if (fs == 0)
                 {
                     out << reg(rt) << " = 0x00003351U;";
                 }
@@ -713,36 +966,92 @@ namespace psprecomp::detail
             break;
         }
         case 0x20:
-            out << reg(rt)
-                << " = static_cast<std::uint32_t>(static_cast<std::int32_t>("
-                   "static_cast<std::int8_t>(PSPRECOMP_LOAD8(state, "
-                << reg(rs) << signed_imm(instruction, relocated) << "))));";
+            if (rt == 0)
+            {
+                out << "static_cast<void>(PSPRECOMP_LOAD8(state, "
+                    << reg(rs) << signed_imm(instruction, relocated) << "));";
+            }
+            else
+            {
+                out << reg(rt)
+                    << " = static_cast<std::uint32_t>(static_cast<std::int32_t>("
+                       "static_cast<std::int8_t>(PSPRECOMP_LOAD8(state, "
+                    << reg(rs) << signed_imm(instruction, relocated) << "))));";
+            }
             break;
         case 0x21:
-            out << reg(rt)
-                << " = static_cast<std::uint32_t>(static_cast<std::int32_t>("
-                   "static_cast<std::int16_t>(PSPRECOMP_LOAD16(state, "
-                << reg(rs) << signed_imm(instruction, relocated) << "))));";
+            if (rt == 0)
+            {
+                out << "static_cast<void>(PSPRECOMP_LOAD16(state, "
+                    << reg(rs) << signed_imm(instruction, relocated) << "));";
+            }
+            else
+            {
+                out << reg(rt)
+                    << " = static_cast<std::uint32_t>(static_cast<std::int32_t>("
+                       "static_cast<std::int16_t>(PSPRECOMP_LOAD16(state, "
+                    << reg(rs) << signed_imm(instruction, relocated) << "))));";
+            }
             break;
         case 0x22:
-            out << reg(rt) << " = load_word_left(state, " << reg(rs)
-                << signed_imm(instruction, relocated) << ", " << reg(rt) << ");";
+            if (rt == 0)
+            {
+                out << "static_cast<void>(load_word_left(state, " << reg(rs)
+                    << signed_imm(instruction, relocated) << ", 0));";
+            }
+            else
+            {
+                out << reg(rt) << " = load_word_left(state, " << reg(rs)
+                    << signed_imm(instruction, relocated) << ", " << reg(rt) << ");";
+            }
             break;
         case 0x23:
-            out << reg(rt) << " = PSPRECOMP_LOAD32(state, " << reg(rs)
-                << signed_imm(instruction, relocated) << ");";
+            if (rt == 0)
+            {
+                out << "static_cast<void>(PSPRECOMP_LOAD32(state, " << reg(rs)
+                    << signed_imm(instruction, relocated) << "));";
+            }
+            else
+            {
+                out << reg(rt) << " = PSPRECOMP_LOAD32(state, " << reg(rs)
+                    << signed_imm(instruction, relocated) << ");";
+            }
             break;
         case 0x24:
-            out << reg(rt) << " = PSPRECOMP_LOAD8(state, " << reg(rs)
-                << signed_imm(instruction, relocated) << ");";
+            if (rt == 0)
+            {
+                out << "static_cast<void>(PSPRECOMP_LOAD8(state, " << reg(rs)
+                    << signed_imm(instruction, relocated) << "));";
+            }
+            else
+            {
+                out << reg(rt) << " = PSPRECOMP_LOAD8(state, " << reg(rs)
+                    << signed_imm(instruction, relocated) << ");";
+            }
             break;
         case 0x25:
-            out << reg(rt) << " = PSPRECOMP_LOAD16(state, " << reg(rs)
-                << signed_imm(instruction, relocated) << ");";
+            if (rt == 0)
+            {
+                out << "static_cast<void>(PSPRECOMP_LOAD16(state, " << reg(rs)
+                    << signed_imm(instruction, relocated) << "));";
+            }
+            else
+            {
+                out << reg(rt) << " = PSPRECOMP_LOAD16(state, " << reg(rs)
+                    << signed_imm(instruction, relocated) << ");";
+            }
             break;
         case 0x26:
-            out << reg(rt) << " = load_word_right(state, " << reg(rs)
-                << signed_imm(instruction, relocated) << ", " << reg(rt) << ");";
+            if (rt == 0)
+            {
+                out << "static_cast<void>(load_word_right(state, " << reg(rs)
+                    << signed_imm(instruction, relocated) << ", 0));";
+            }
+            else
+            {
+                out << reg(rt) << " = load_word_right(state, " << reg(rs)
+                    << signed_imm(instruction, relocated) << ", " << reg(rt) << ");";
+            }
             break;
         case 0x28:
             out << "PSPRECOMP_STORE8(state, " << reg(rs)
@@ -770,13 +1079,24 @@ namespace psprecomp::detail
             out << "/* cache: no generated-runtime cache */";
             break;
         case 0x30: // ll - load linked (treat as lw on PSP user-mode)
-            out << reg(rt) << " = PSPRECOMP_LOAD32(state, " << reg(rs)
-                << signed_imm(instruction, relocated) << ");";
+            if (rt == 0)
+            {
+                out << "static_cast<void>(PSPRECOMP_LOAD32(state, " << reg(rs)
+                    << signed_imm(instruction, relocated) << "));";
+            }
+            else
+            {
+                out << reg(rt) << " = PSPRECOMP_LOAD32(state, " << reg(rs)
+                    << signed_imm(instruction, relocated) << ");";
+            }
             break;
         case 0x38: // sc - store conditional (always succeeds on PSP user-mode)
             out << "PSPRECOMP_STORE32(state, " << reg(rs)
-                << signed_imm(instruction, relocated) << ", " << reg(rt) << "); "
-                << reg(rt) << " = 1U;";
+                << signed_imm(instruction, relocated) << ", " << reg(rt) << ");";
+            if (rt != 0)
+            {
+                out << " " << reg(rt) << " = 1U;";
+            }
             break;
         case 0x31:
             out << "state.fpr[" << rt << "] = PSPRECOMP_LOAD32(state, " << reg(rs)
@@ -792,55 +1112,102 @@ namespace psprecomp::detail
             if (function == 0x20 && shift == 0x14)
             {
                 // bitrev
-                out << reg(rd) << " = reverse_bits(" << reg(rt) << ");";
+                if (rd == 0)
+                {
+                    out << "/* nop */";
+                }
+                else
+                {
+                    out << reg(rd) << " = reverse_bits(" << reg(rt) << ");";
+                }
                 break;
             }
             if (function == 0x20 && shift == 0x02)
             {
                 // wsbh - swap bytes within halfwords
-                out << reg(rd) << " = ((" << reg(rt)
-                    << " & 0xff00ff00U) >> 8U) | ((" << reg(rt)
-                    << " & 0x00ff00ffU) << 8U);";
+                if (rd == 0)
+                {
+                    out << "/* nop */";
+                }
+                else
+                {
+                    out << reg(rd) << " = ((" << reg(rt)
+                        << " & 0xff00ff00U) >> 8U) | ((" << reg(rt)
+                        << " & 0x00ff00ffU) << 8U);";
+                }
                 break;
             }
             if (function == 0x20 && shift == 0x03)
             {
                 // wsbw - full byte swap
-                out << reg(rd) << " = byte_swap(" << reg(rt) << ");";
+                if (rd == 0)
+                {
+                    out << "/* nop */";
+                }
+                else
+                {
+                    out << reg(rd) << " = byte_swap(" << reg(rt) << ");";
+                }
                 break;
             }
             if (function == 0x20 && shift == 0x10)
             {
-                out << reg(rd)
-                    << " = static_cast<std::uint32_t>(static_cast<std::int32_t>("
-                       "static_cast<std::int8_t>("
-                    << reg(rt) << ")));";
+                if (rd == 0)
+                {
+                    out << "/* nop */";
+                }
+                else
+                {
+                    out << reg(rd)
+                        << " = static_cast<std::uint32_t>(static_cast<std::int32_t>("
+                           "static_cast<std::int8_t>("
+                        << reg(rt) << ")));";
+                }
                 break;
             }
             if (function == 0x20 && shift == 0x18)
             {
-                out << reg(rd)
-                    << " = static_cast<std::uint32_t>(static_cast<std::int32_t>("
-                       "static_cast<std::int16_t>("
-                    << reg(rt) << ")));";
+                if (rd == 0)
+                {
+                    out << "/* nop */";
+                }
+                else
+                {
+                    out << reg(rd)
+                        << " = static_cast<std::uint32_t>(static_cast<std::int32_t>("
+                           "static_cast<std::int16_t>("
+                        << reg(rt) << ")));";
+                }
                 break;
             }
             if (function != 0)
             {
                 if (function == 4 && rd >= shift)
                 {
-                    const auto position = shift;
-                    const auto width = rd - shift + 1U;
-                    const auto mask = width == 32 ? 0xffffffffU
-                                                  : (1U << width) - 1U;
-                    const auto positioned_mask = mask << position;
-                    out << reg(rt) << " = (" << reg(rt) << " & ~"
-                        << hex(positioned_mask) << ") | ((" << reg(rs) << " << "
-                        << position << "U) & " << hex(positioned_mask) << ");";
+                    if (rt == 0)
+                    {
+                        out << "/* nop */";
+                    }
+                    else
+                    {
+                        const auto position = shift;
+                        const auto width = rd - shift + 1U;
+                        const auto mask = width == 32 ? 0xffffffffU
+                                                      : (1U << width) - 1U;
+                        const auto positioned_mask = mask << position;
+                        out << reg(rt) << " = (" << reg(rt) << " & ~"
+                            << hex(positioned_mask) << ") | ((" << reg(rs) << " << "
+                            << position << "U) & " << hex(positioned_mask) << ");";
+                    }
                     break;
                 }
                 return "/* unsupported/reserved PSP word */ "
                        "state.stop_reason = StopReason::invalid_pc;";
+            }
+            if (rt == 0)
+            {
+                out << "/* nop */";
+                break;
             }
             const auto position = shift;
             const auto width = rd + 1U;

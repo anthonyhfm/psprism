@@ -2,6 +2,7 @@
 
 void sceAudioChangeChannelVolume(Implementation& implementation, psprecomp::State& state) {
 #if !defined(__PSP__)
+  (void)implementation;
   static_cast<void>(implementation);
   state.gpr[2] = audio_state::change_volume(
       state.gpr[4], static_cast<std::int32_t>(state.gpr[5]),

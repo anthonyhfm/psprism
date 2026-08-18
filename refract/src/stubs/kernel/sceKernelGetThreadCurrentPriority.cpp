@@ -1,5 +1,6 @@
 void sceKernelGetThreadCurrentPriority(Implementation& implementation, psprecomp::State& state) {
 #if !defined(__PSP__)
+  (void)implementation;
   state.gpr[2] = 32U;
   return;
 #else

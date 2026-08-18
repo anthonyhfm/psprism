@@ -1,5 +1,6 @@
 void sceKernelReferSystemStatus(Implementation& implementation, psprecomp::State& state) {
 #if !defined(__PSP__)
+  (void)implementation;
   constexpr std::uint32_t system_status_size = 28U;
   auto* output = psprecomp::mapped_address(state, state.gpr[4],
                                            system_status_size);
