@@ -7,9 +7,15 @@ void sceGeSetCallback(Implementation& implementation, psprecomp::State& state) {
   }
   std::uint32_t words[4]{};
   std::memcpy(words, data, sizeof(words));
-  const auto uid = implementation.allocate_uid();
+  int uid{};
   {
     std::lock_guard lock(implementation.objects_mutex);
+    while (implementation.ge_callbacks.contains(uid))
+      ++uid;
+    if (uid >= 16) {
+      state.gpr[2] = static_cast<std::uint32_t>(-1);
+      return;
+    }
     implementation.ge_callbacks.emplace(
         uid, Implementation::GeCallback{words[0], words[1], words[2],
                                         words[3]});

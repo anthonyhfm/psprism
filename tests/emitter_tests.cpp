@@ -38,6 +38,7 @@ int main() {
     append_word(section.bytes, 0x00400001U); // reserved SPECIAL
     append_word(section.bytes, 0xffffffffU); // excluded data
     append_word(section.bytes, 0x60000000U); // vadd.s: guarded native
+    append_word(section.bytes, 0x63c06000U); // vdiv.s: runtime fallback
     image.executable_sections.push_back(std::move(section));
 
     psprecomp::CodeMap map;
@@ -47,11 +48,11 @@ int main() {
     const auto text = report.str();
     CHECK(text.find("translated_words=1\n") != std::string::npos);
     CHECK(text.find("excluded_words=1\n") != std::string::npos);
-    CHECK(text.find("fallback_words=1\n") != std::string::npos);
+    CHECK(text.find("fallback_words=2\n") != std::string::npos);
     CHECK(text.find("guarded_native_words=1\n") != std::string::npos);
     CHECK(text.find("guarded_native vadd count=1") != std::string::npos);
     CHECK(text.find("invalid_words=1\n") != std::string::npos);
-    CHECK(text.find("fallback vfpu count=1") != std::string::npos);
+    CHECK(text.find("fallback vfpu count=2") != std::string::npos);
 
     map.excluded_ranges = {{0x1008U, 0x1010U}};
     std::ostringstream clean_report;
@@ -75,6 +76,8 @@ int main() {
     CHECK(generated.find("vfpu_prefixes_identity(state)") !=
           std::string::npos);
     CHECK(generated.find("note_vfpu_helper_fallback(state)") !=
+          std::string::npos);
+    CHECK(generated.find("execute_vfpu(state, 0x63c06000U") !=
           std::string::npos);
 
     const auto project = std::filesystem::temp_directory_path() /
@@ -103,5 +106,7 @@ int main() {
           std::string::npos);
     CHECK(dispatch.find("state.fault_pc = current_pc") != std::string::npos);
     CHECK(platform.find("note_cpu_import_dispatch(state)") !=
+          std::string::npos);
+    CHECK(platform.find("generated::run(state, 0xfffffff0U, 4096ULL)") !=
           std::string::npos);
 }

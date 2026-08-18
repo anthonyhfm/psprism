@@ -36,7 +36,8 @@ class AudioEngine {
   SubmitResult submit(const std::int16_t* interleaved_stereo,
                       std::uint32_t frame_count, std::uint32_t channel,
                       bool blocking,
-                      std::chrono::microseconds timeout);
+                      std::chrono::microseconds timeout,
+                      bool recover_on_timeout = false);
   std::uint32_t consume(std::int16_t* interleaved_stereo,
                         std::uint32_t frame_count) noexcept;
   [[nodiscard]] std::uint32_t queued_frames(std::uint32_t channel) const;

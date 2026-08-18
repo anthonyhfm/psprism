@@ -51,7 +51,8 @@ inline constexpr bool vfpu_opcode_supported(std::uint32_t instruction) {
         return rs == 3 || rs == 7 || rs == 8;
     }
     if (op == 0x18) {
-        return sub3 == 0 || sub3 == 1 || sub3 == 2 || sub3 == 3;
+        return sub3 == 0 || sub3 == 1 || sub3 == 2 || sub3 == 3 ||
+               sub3 == 7;
     }
     if (op == 0x19) {
         return sub3 <= 2 || sub3 == 4 || sub3 == 6 ||
@@ -469,7 +470,9 @@ inline void execute_vfpu(State& state, std::uint32_t instruction,
             }
         } else {
             const bool subtract = type == 1;
-            const bool divide = type == 3;
+            // VDIV uses type 7 (0x63800000).  Type 3 is retained for the
+            // existing Allegrex fallback path used by older generated maps.
+            const bool divide = type == 3 || type == 7;
             for (int i = 0; i < size; ++i) {
                 result[i] = divide ? source[i] / target[i] : (subtract ? source[i] - target[i] : source[i] + target[i]);
             }
@@ -754,8 +757,16 @@ inline void execute_vfpu(State& state, std::uint32_t instruction,
         } else if (group >= 16 && group <= 19) {
             const auto scale = std::ldexp(1.0F, static_cast<int>(type));
             for (int i = 0; i < size; ++i) {
-                const auto scaled = std::trunc(static_cast<double>(source[i]) * scale);
-                const auto value = std::clamp(scaled, -2147483648.0, 2147483647.0);
+                const auto scaled = static_cast<double>(source[i]) * scale;
+                double rounded{};
+                switch (group) {
+                case 16: rounded = std::nearbyint(scaled); break; // VF2IN
+                case 17: rounded = std::trunc(scaled); break;     // VF2IZ
+                case 18: rounded = std::ceil(scaled); break;      // VF2IU
+                default: rounded = std::floor(scaled); break;     // VF2ID
+                }
+                const auto value =
+                    std::clamp(rounded, -2147483648.0, 2147483647.0);
                 result[i] = std::bit_cast<float>(
                     static_cast<std::uint32_t>(static_cast<std::int32_t>(value)));
             }

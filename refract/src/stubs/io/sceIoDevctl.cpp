@@ -30,6 +30,21 @@ void sceIoDevctl(Implementation& implementation, psprecomp::State& state) {
     state.gpr[2] = 0U;
     return;
   }
+  if (io_state::equals_case_insensitive(device_name, "mscmhc0:") &&
+      state.gpr[5] == 0x02025806U) {
+    // PSP syscall import stubs are bare syscalls.  The o32 call site leaves
+    // arguments 5-8 in $t0-$t3 rather than spilling them to the stack.
+    const auto output_address = state.gpr[8];
+    const auto output_size = state.gpr[9];
+    auto* inserted = guest_pointer<std::uint32_t>(state, output_address);
+    if (inserted == nullptr || output_size < sizeof(*inserted)) {
+      state.gpr[2] = io_error;
+      return;
+    }
+    *inserted = devctl_state::memory_stick_inserted_status();
+    state.gpr[2] = 0U;
+    return;
+  }
   state.gpr[2] = io_error;
   return;
 #else

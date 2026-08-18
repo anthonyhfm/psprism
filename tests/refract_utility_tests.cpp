@@ -24,6 +24,7 @@ int main() {
   CHECK(mpeg_state::atrac_es_size == 2112U);
   CHECK(mpeg_state::atrac_es_output_size == 8192U);
   CHECK(mpeg_state::required_memory_size == 0xb3dbU);
+  CHECK(sizeof(mpeg_state::Ringbuffer) == 44U);
   CHECK(mpeg_state::ringbuffer_memory_size(8U) == 17216U);
   CHECK(mpeg_state::ringbuffer_memory_size(UINT32_MAX) > UINT32_MAX);
   constexpr std::uint32_t mpeg_memory_base = 0x08800000U;
@@ -91,6 +92,13 @@ int main() {
   CHECK(io_state::is_raw_disc_path("DISC0:/SCE_LBN0x10_SIZE0x20"));
   CHECK((io_state::parse_raw_disc_view("DISC0:/SCE_LBN0x10_SIZE0x20") ==
          io_state::FileView{0x8000U, 0x20U}));
+  const auto open_ended_view = io_state::parse_raw_disc_view(
+      "disc0:/sce_lbn0x60D40_size0x0");
+  CHECK(open_ended_view.has_value());
+  CHECK(io_state::complete_file_view(*open_ended_view, 0x40000000U) ==
+        std::optional<io_state::FileView>(
+            {0x306a0000U, 0x0f960000U}));
+  CHECK(!io_state::complete_file_view(*open_ended_view, 0x1000U));
   CHECK(io_state::error_from_errno(ENOENT) == 0x80010002U);
   CHECK(io_state::error_from_errno(EIO) == 0x80010005U);
   CHECK(io_state::error_from_errno(0) == io_state::generic_io_error);
@@ -100,6 +108,7 @@ int main() {
   CHECK(memory_stick.maximum_sectors == memory_stick.maximum_clusters);
   CHECK(memory_stick.sector_size == 512U);
   CHECK(memory_stick.sectors_per_cluster == 64U);
+  CHECK(devctl_state::memory_stick_inserted_status() == 1U);
   std::deque<mailbox_state::Message> fifo_mailbox;
   CHECK(mailbox_state::enqueue(fifo_mailbox, 0U, 0x08801000U, 7U));
   CHECK(mailbox_state::enqueue(fifo_mailbox, 0U, 0x08802000U, 1U));

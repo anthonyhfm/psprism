@@ -22,4 +22,6 @@ constexpr DeviceCapacity memory_stick_capacity() {
   return {clusters, clusters, clusters, sector_size, sectors_per_cluster};
 }
 
+constexpr std::uint32_t memory_stick_inserted_status() { return 1U; }
+
 } // namespace devctl_state

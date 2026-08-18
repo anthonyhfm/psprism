@@ -179,6 +179,28 @@ int main() {
     CHECK(engine.telemetry().consumed_frames == clock_before_reset + 100U);
   }
 
+  {
+    refract::host::AudioEngine engine;
+    std::array<std::int16_t, 200U> stale{};
+    stale.fill(111);
+    std::array<std::int16_t, 200U> replacement{};
+    replacement.fill(222);
+    CHECK(engine.submit(stale.data(), 100U, 0U, false,
+                        std::chrono::microseconds(0)) ==
+          refract::host::AudioEngine::SubmitResult::submitted);
+    CHECK(engine.submit(replacement.data(), 100U, 0U, true,
+                        std::chrono::microseconds(0), true) ==
+          refract::host::AudioEngine::SubmitResult::submitted);
+    CHECK(engine.queued_frames(0U) == 100U);
+    std::array<std::int16_t, 200U> recovered{};
+    CHECK(engine.consume(recovered.data(), 100U) == 100U);
+    CHECK(recovered == replacement);
+    const auto telemetry = engine.telemetry();
+    CHECK(telemetry.submitted_frames == 200U);
+    CHECK(telemetry.overrun_submissions == 1U);
+    CHECK(telemetry.dropped_frames == 100U);
+  }
+
   std::array<std::uint8_t, 16> vag_block{};
   vag_block[1] = 1U;
   std::fill(vag_block.begin() + 2, vag_block.end(), 0x21U);

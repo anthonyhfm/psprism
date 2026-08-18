@@ -98,5 +98,9 @@ std::shared_ptr<MediaEngine> create_media_engine(std::uint32_t mpeg_address,
 std::shared_ptr<MediaEngine> find_media_engine(std::uint32_t mpeg_address);
 void delete_media_engine(std::uint32_t mpeg_address);
 void reset_media_engines();
+void remember_ringbuffer_gp(std::uint32_t ringbuffer_address,
+                            std::uint32_t gp);
+std::uint32_t ringbuffer_gp(std::uint32_t ringbuffer_address);
+void forget_ringbuffer_gp(std::uint32_t ringbuffer_address);
 
 } // namespace mpeg_state

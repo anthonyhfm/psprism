@@ -11,7 +11,8 @@ AudioEngine::AudioEngine()
 
 AudioEngine::SubmitResult AudioEngine::submit(
     const std::int16_t* interleaved_stereo, std::uint32_t frame_count,
-    std::uint32_t channel, bool blocking, std::chrono::microseconds timeout) {
+    std::uint32_t channel, bool blocking, std::chrono::microseconds timeout,
+    bool recover_on_timeout) {
   if (interleaved_stereo == nullptr || frame_count == 0U ||
       channel >= channels_->size() ||
       frame_count > maximum_frames_per_channel) {
@@ -33,8 +34,20 @@ AudioEngine::SubmitResult AudioEngine::submit(
     }
     if (!target.space_available.wait_for(lock, timeout, can_submit)) {
       overrun_submissions_.fetch_add(1U, std::memory_order_relaxed);
-      dropped_frames_.fetch_add(frame_count, std::memory_order_relaxed);
-      return SubmitResult::timeout;
+      if (!recover_on_timeout) {
+        dropped_frames_.fetch_add(frame_count, std::memory_order_relaxed);
+        return SubmitResult::timeout;
+      }
+
+      // PSP blocking audio writes do not report a transient busy result.  If
+      // the host device stalls, discard the stale queue and accept the new
+      // buffer so a guest cannot turn a host callback race into a permanent
+      // retry loop while holding one of its own locks.
+      const auto discarded = target.queued_frames;
+      target.read_frame = 0U;
+      target.queued_frames = 0U;
+      queued_frames_.fetch_sub(discarded, std::memory_order_relaxed);
+      dropped_frames_.fetch_add(discarded, std::memory_order_relaxed);
     }
   }
 

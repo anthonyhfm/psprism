@@ -10,7 +10,7 @@ void sceIoOpen(Implementation& implementation, psprecomp::State& state) {
       }
       const auto raw_disc = io_state::is_raw_disc_path(psp_path);
       const auto whole_disc = io_state::is_whole_disc_path(psp_path);
-      const auto raw_disc_view = io_state::parse_raw_disc_view(psp_path);
+      auto raw_disc_view = io_state::parse_raw_disc_view(psp_path);
       if (raw_disc && !raw_disc_view) {
         state.gpr[2] = io_error;
         return;
@@ -25,11 +25,19 @@ void sceIoOpen(Implementation& implementation, psprecomp::State& state) {
       auto descriptor =
           ::open(resolved.c_str(), host_open_flags(state.gpr[5]),
                  static_cast<mode_t>(state.gpr[6]));
-      if (descriptor >= 0 && raw_disc &&
-          ::lseek(descriptor, static_cast<off_t>(raw_disc_view->base),
-                  SEEK_SET) < 0) {
-        ::close(descriptor);
-        descriptor = -1;
+      if (descriptor >= 0 && raw_disc) {
+        const auto end = ::lseek(descriptor, 0, SEEK_END);
+        raw_disc_view = end < 0
+                            ? std::nullopt
+                            : io_state::complete_file_view(
+                                  *raw_disc_view,
+                                  static_cast<std::uint64_t>(end));
+        if (!raw_disc_view ||
+            ::lseek(descriptor, static_cast<off_t>(raw_disc_view->base),
+                    SEEK_SET) < 0) {
+          ::close(descriptor);
+          descriptor = -1;
+        }
       }
       if (descriptor < 0) {
         state.gpr[2] = io_state::error_from_errno(errno);

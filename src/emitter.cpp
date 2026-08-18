@@ -2650,7 +2650,7 @@ void emit_project(const ElfImage& image, const std::filesystem::path& directory,
             << "U;\n"
                "  configuration.guest_executor = [](State& state) {\n"
                "    generated::run(state, 0xfffffff0U, "
-               "0x7fffffffffffffffULL);\n"
+               "4096ULL);\n"
                "  };\n"
                "  refract::Runtime::instance().configure(memory, size, base, "
                "std::move(configuration));\n"
