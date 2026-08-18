@@ -28,6 +28,16 @@ struct FileView {
   bool operator==(const FileView&) const = default;
 };
 
+inline std::optional<FileView> complete_file_view(FileView view,
+                                                  std::uint64_t file_size) {
+  if (view.size != 0U)
+    return view;
+  if (view.base > file_size)
+    return std::nullopt;
+  view.size = file_size - view.base;
+  return view;
+}
+
 constexpr char ascii_lower(char value) {
   return value >= 'A' && value <= 'Z'
              ? static_cast<char>(value + ('a' - 'A'))

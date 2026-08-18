@@ -891,26 +891,30 @@ void execute_ge_list(Implementation& implementation, psprecomp::State& state,
         program_counter = relative_address(argument & 0x00fffffcU);
         continue;
       } else if (command == 0x0aU) {
-        if (call_stack.size() >= 64U)
-          break;
-        call_stack.push_back({next, graphics.offset_address});
-        program_counter = relative_address(argument & 0x00fffffcU);
-        if (implementation.verbose && submission == 0U)
-          std::fprintf(
-              stderr, "[psprism:ge] call from=%08x target=%08x return=%08x\n",
-              next - 4U, program_counter, next);
-        continue;
+        // Hardware ignores a CALL when the display-list stack is full.
+        if (call_stack.size() < 64U) {
+          call_stack.push_back({next, graphics.offset_address});
+          program_counter = relative_address(argument & 0x00fffffcU);
+          if (implementation.verbose && submission == 0U)
+            std::fprintf(stderr,
+                         "[psprism:ge] call from=%08x target=%08x "
+                         "return=%08x\n",
+                         next - 4U, program_counter, next);
+          continue;
+        }
       } else if (command == 0x0bU) {
-        if (call_stack.empty())
-          break;
-        const auto frame = call_stack.back();
-        call_stack.pop_back();
-        program_counter = frame.return_address;
-        graphics.offset_address = frame.offset_address;
-        if (implementation.verbose && submission == 0U)
-          std::fprintf(stderr, "[psprism:ge] return target=%08x\n",
-                       program_counter);
-        continue;
+        // RET with an empty stack is ignored by the GE and execution
+        // continues with the following top-level display-list fragment.
+        if (!call_stack.empty()) {
+          const auto frame = call_stack.back();
+          call_stack.pop_back();
+          program_counter = frame.return_address;
+          graphics.offset_address = frame.offset_address;
+          if (implementation.verbose && submission == 0U)
+            std::fprintf(stderr, "[psprism:ge] return target=%08x\n",
+                         program_counter);
+          continue;
+        }
       } else if (command == 0x0eU || command == 0x0fU) {
         const auto active_callback_id = static_cast<int>(callback_id);
         std::lock_guard callback_lock(implementation.objects_mutex);

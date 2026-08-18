@@ -232,6 +232,39 @@ int main() {
            psprecomp::VfpuStaticOperation::dot>(0x64800000U)));
     CHECK((vfpu_static_matches_all_sizes<
            psprecomp::VfpuStaticOperation::move>(0xd0000000U, 0U)));
+
+    // This scalar VDIV encoding must remain a VFPU fallback rather than being
+    // rejected as invalid code.
+    constexpr std::uint32_t vdiv_s = 0x63c06000U;
+    CHECK(psprecomp::vfpu_opcode_supported(vdiv_s));
+    CHECK(psprecomp::decode_allegrex(vdiv_s).lowering ==
+          psprecomp::InstructionLowering::runtime_fallback);
+    state.vfpu[psprecomp::vfpu_index((vdiv_s >> 8U) & 0x7fU, 1)] =
+        std::bit_cast<std::uint32_t>(6.0F);
+    state.vfpu[psprecomp::vfpu_index((vdiv_s >> 16U) & 0x7fU, 1)] =
+        std::bit_cast<std::uint32_t>(2.0F);
+    psprecomp::execute_vfpu(state, vdiv_s, 0x1000U);
+    CHECK(psprecomp::vfpu_float(
+              state, psprecomp::vfpu_index(vdiv_s & 0x7fU, 1)) == 3.0F);
+
+    constexpr std::uint32_t vf2in_s = 0xd2000000U;
+    constexpr std::uint32_t vf2iz_s = 0xd2200000U;
+    constexpr std::uint32_t vf2iu_s = 0xd2400000U;
+    constexpr std::uint32_t vf2id_s = 0xd2600000U;
+    const auto vfpu_conversion_result = [&](std::uint32_t instruction,
+                                            float input) {
+        state.vfpu[psprecomp::vfpu_index(0, 1)] =
+            std::bit_cast<std::uint32_t>(input);
+        psprecomp::execute_vfpu(state, instruction, 0x1000U);
+        return std::bit_cast<std::int32_t>(
+            state.vfpu[psprecomp::vfpu_index(0, 1)]);
+    };
+    CHECK(vfpu_conversion_result(vf2in_s, -1.6F) == -2);
+    CHECK(vfpu_conversion_result(vf2iz_s, -1.6F) == -1);
+    CHECK(vfpu_conversion_result(vf2iu_s, -1.6F) == -1);
+    CHECK(vfpu_conversion_result(vf2id_s, -1.6F) == -2);
+    CHECK(vfpu_conversion_result(vf2id_s, -0.25F) == -1);
+
     auto prefixed_state = state;
     prefixed_state.vfpu_ctrl[0] = 0x0000001bU;
     CHECK(!psprecomp::vfpu_prefixes_identity(prefixed_state));
