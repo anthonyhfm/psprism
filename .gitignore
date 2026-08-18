@@ -17,6 +17,8 @@ PARAM.SFO
 
 # Game dumps, extracted discs and reverse-engineering projects
 /daxter/
+/mostwanted/
+/legobatman/
 /tetris/
 /god_of_war_ghost_of_sparta/
 /PSP_GAME/
@@ -30,10 +32,21 @@ PARAM.SFO
 
 # Generated recompiler payloads and diagnostics
 guest_image.bin
+native_guest_image.bin
 relocations.bin
+native_relocations.bin
 imports.tsv
+imports.S
+psp_entry.S
+psp_overlays.S
+generated.hpp
 generated_sources.cmake
 *.log
+
+# Temporary export staging and local analysis data
+/.psprecomp/
+.psprecomp-*/
+*.dSYM/
 
 # Editor and operating-system noise
 .DS_Store

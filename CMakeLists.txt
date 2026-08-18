@@ -27,12 +27,23 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 add_executable(psprism
     src/main.cpp
     src/decrypt.cpp
-    src/elf.cpp
-    src/emitter.cpp
+    src/elf/loader.cpp
+    src/elf/code_map.cpp
+    src/elf/image.cpp
+    src/emitter/relocations.cpp
+    src/emitter/format.cpp
+    src/emitter/analysis.cpp
+    src/emitter/instruction.cpp
+    src/emitter/cpp_output.cpp
+    src/emitter/project_output.cpp
+    src/emitter/coverage.cpp
     src/iso.cpp
     src/iso_patch.cpp
     src/nids.cpp
-    src/project.cpp
+    src/project/input.cpp
+    src/project/templates.cpp
+    src/project/iso_patch_template.cpp
+    src/project/export.cpp
 )
 target_compile_definitions(psprism PRIVATE
     PSPRECOMP_SOURCE_INCLUDE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/include"
@@ -75,15 +86,27 @@ if(BUILD_TESTING)
     target_link_libraries(iso_tests PRIVATE ${CMAKE_DL_LIBS})
     add_test(NAME iso_tests COMMAND iso_tests)
 
-    add_executable(elf_tests tests/elf_tests.cpp src/elf.cpp)
+    add_executable(elf_tests
+        tests/elf_tests.cpp
+        src/elf/loader.cpp
+        src/elf/code_map.cpp
+        src/elf/image.cpp)
     target_include_directories(elf_tests PRIVATE src)
     target_compile_options(elf_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
     add_test(NAME elf_tests COMMAND elf_tests)
 
     add_executable(emitter_tests
         tests/emitter_tests.cpp
-        src/emitter.cpp
-        src/elf.cpp
+        src/emitter/relocations.cpp
+        src/emitter/format.cpp
+        src/emitter/analysis.cpp
+        src/emitter/instruction.cpp
+        src/emitter/cpp_output.cpp
+        src/emitter/project_output.cpp
+        src/emitter/coverage.cpp
+        src/elf/loader.cpp
+        src/elf/code_map.cpp
+        src/elf/image.cpp
         src/nids.cpp)
     target_include_directories(emitter_tests PRIVATE src include)
     target_compile_options(emitter_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)

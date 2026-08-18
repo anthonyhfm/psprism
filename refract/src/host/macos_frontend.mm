@@ -1219,7 +1219,13 @@ void initialize_frontend() {
                             NSWindowStyleMaskResizable
                     backing:NSBackingStoreBuffered
                       defer:NO];
-    window.title = @"psprism";
+    NSString *window_title =
+        [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleDisplayName"];
+    if (window_title.length == 0) {
+      window_title =
+          [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleName"];
+    }
+    window.title = window_title.length > 0 ? window_title : @"psprism";
     window.contentAspectRatio = NSMakeSize(480, 272);
     window.delegate = application_delegate;
     window.acceptsMouseMovedEvents = YES;
