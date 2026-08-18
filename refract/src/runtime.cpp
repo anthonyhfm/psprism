@@ -560,6 +560,9 @@ struct Runtime::Implementation {
     std::uint32_t tls_address{};
     std::shared_ptr<psprecomp::State> state;
     std::thread host_thread;
+    std::mutex sleep_mutex;
+    std::condition_variable sleep_changed;
+    std::uint32_t wakeup_count{};
     std::atomic<bool> finished{};
     std::int32_t result{};
   };
@@ -636,6 +639,29 @@ struct Runtime::Implementation {
     std::uint32_t finish_argument{};
   };
 
+  struct Alarm {
+    std::mutex mutex;
+    std::condition_variable changed;
+    std::uint32_t handler{};
+    std::uint32_t common{};
+    std::uint32_t firings{};
+    bool cancelled{};
+    std::jthread host_thread;
+  };
+
+  struct SubInterrupt {
+    std::mutex mutex;
+    std::condition_variable changed;
+    std::uint32_t interrupt_number{};
+    std::uint32_t sub_interrupt_number{};
+    std::uint32_t handler{};
+    std::uint32_t argument{};
+    std::uint32_t firings{};
+    bool enabled{};
+    bool cancelled{};
+    std::jthread host_thread;
+  };
+
   struct Module {
     std::filesystem::path path;
     bool started{};
@@ -678,6 +704,9 @@ struct Runtime::Implementation {
   std::unordered_map<int, std::shared_ptr<VariablePool>> variable_pools;
   std::unordered_map<int, Callback> callbacks;
   std::unordered_map<int, GeCallback> ge_callbacks;
+  std::unordered_map<int, std::shared_ptr<Alarm>> alarms;
+  std::unordered_map<std::uint64_t, std::shared_ptr<SubInterrupt>>
+      sub_interrupts;
   ge::Scheduler ge_scheduler;
   std::unordered_map<int, Module> modules;
   int next_file{3};
@@ -831,6 +860,18 @@ void request_guest_exit(Implementation& implementation) {
     static_cast<void>(uid);
     pool->changed.notify_all();
   }
+  for (const auto& [uid, thread] : implementation.threads) {
+    static_cast<void>(uid);
+    thread->sleep_changed.notify_all();
+  }
+  for (const auto& [uid, alarm] : implementation.alarms) {
+    static_cast<void>(uid);
+    alarm->changed.notify_all();
+  }
+  for (const auto& [key, interrupt] : implementation.sub_interrupts) {
+    static_cast<void>(key);
+    interrupt->changed.notify_all();
+  }
 }
 
 bool acquire_guest_execution(Implementation& implementation) {
@@ -897,12 +938,23 @@ private:
 };
 
 void execute_guest(Implementation& implementation, psprecomp::State& state) {
-  GuestExecutionLock execution_lock(implementation);
-  if (!execution_lock.locked()) {
-    state.stop_reason = psprecomp::StopReason::returned;
-    return;
+  for (;;) {
+    {
+      GuestExecutionLock execution_lock(implementation);
+      if (!execution_lock.locked()) {
+        state.stop_reason = psprecomp::StopReason::returned;
+        return;
+      }
+      implementation.configuration.guest_executor(state);
+    }
+    if (state.stop_reason != psprecomp::StopReason::step_limit)
+      return;
+    // Generated executors use a finite dispatch budget.  Releasing the guest
+    // execution lock between slices gives a PSP thread made runnable by a
+    // blocking HLE call a chance to resume instead of letting a guest-side
+    // polling loop monopolize the emulated CPU.
+    state.stop_reason = psprecomp::StopReason::running;
   }
-  implementation.configuration.guest_executor(state);
 }
 
 void yield_guest(Implementation& implementation) {
@@ -955,7 +1007,14 @@ bool dispatch_guest_callback(Implementation& implementation,
   callback_state.fault_address = 0U;
   callback_state.fault_instruction = 0U;
   callback_state.fault_pc = 0U;
-  implementation.configuration.guest_executor(callback_state);
+  do {
+    implementation.configuration.guest_executor(callback_state);
+    if (callback_state.stop_reason == psprecomp::StopReason::step_limit) {
+      callback_state.stop_reason = psprecomp::StopReason::running;
+      yield_guest(implementation);
+    }
+  } while (callback_state.stop_reason == psprecomp::StopReason::running &&
+           !implementation.exit_requested.load(std::memory_order_relaxed));
   if (result != nullptr) *result = callback_state.gpr[2];
   {
     std::lock_guard lock(implementation.objects_mutex);
