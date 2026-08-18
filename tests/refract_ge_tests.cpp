@@ -2,6 +2,7 @@
 #include <refract/refract.hpp>
 
 #include "host/host.hpp"
+#include "stubs/mpeg/mpeg_state.hpp"
 #include "ge/ge_command.hpp"
 #include "ge/ge_cache.hpp"
 #include "ge/ge_draw_packet.hpp"
@@ -14,12 +15,15 @@
 #include <atomic>
 #include <bit>
 #include <cmath>
+#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <iterator>
 #include <memory>
 #include <optional>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -50,6 +54,12 @@ std::uint32_t end_count{};
 std::uint32_t present_count{};
 std::atomic<std::uint32_t> observed_thread_gp{};
 std::atomic<std::uint32_t> observed_thread_pc{};
+std::atomic<bool> sleeping_thread_entered{};
+std::atomic<bool> sleeping_thread_resumed{};
+std::atomic<std::uint32_t> alarm_callback_count{};
+std::atomic<std::uint32_t> alarm_callback_argument{};
+std::atomic<std::uint32_t> vblank_callback_count{};
+std::atomic<std::uint32_t> vblank_callback_argument{};
 
 void reset_capture() {
   building_primitives.clear();
@@ -323,10 +333,43 @@ int main() {
   std::memcpy(memory.data() + texture_address - memory_base, texture.data(),
               texture.size());
 
+  constexpr std::uint32_t sliced_execution_address = memory_base + 0x7000U;
+  constexpr std::uint32_t sleeping_thread_entry = memory_base + 0x7100U;
+  constexpr std::uint32_t alarm_callback_entry = memory_base + 0x7180U;
+  constexpr std::uint32_t vblank_callback_entry = memory_base + 0x71c0U;
+  std::atomic<std::uint32_t> execution_slices{};
   refract::Configuration configuration;
   configuration.disc_root = std::filesystem::temp_directory_path();
   configuration.writable_root = std::filesystem::temp_directory_path();
-  configuration.guest_executor = [](psprecomp::State& guest_state) {
+  configuration.guest_executor = [&](psprecomp::State& guest_state) {
+    if (guest_state.pc == sliced_execution_address) {
+      guest_state.stop_reason = ++execution_slices < 3U
+                                    ? psprecomp::StopReason::step_limit
+                                    : psprecomp::StopReason::returned;
+      return;
+    }
+    if (guest_state.pc == sleeping_thread_entry) {
+      sleeping_thread_entered.store(true);
+      sleeping_thread_entered.notify_one();
+      refract::pspsdk::sceKernelSleepThread(guest_state);
+      sleeping_thread_resumed.store(true);
+      guest_state.stop_reason = psprecomp::StopReason::returned;
+      return;
+    }
+    if (guest_state.pc == alarm_callback_entry) {
+      alarm_callback_argument.store(guest_state.gpr[4]);
+      ++alarm_callback_count;
+      guest_state.gpr[2] = 0U;
+      guest_state.stop_reason = psprecomp::StopReason::returned;
+      return;
+    }
+    if (guest_state.pc == vblank_callback_entry) {
+      vblank_callback_argument.store(guest_state.gpr[5]);
+      ++vblank_callback_count;
+      guest_state.gpr[2] = 0U;
+      guest_state.stop_reason = psprecomp::StopReason::returned;
+      return;
+    }
     observed_thread_gp.store(guest_state.gpr[28]);
     observed_thread_pc.store(guest_state.pc);
     guest_state.gpr[2] = 1U;
@@ -341,12 +384,147 @@ int main() {
   state.memory_base = memory_base;
   refract::Runtime::instance().prepare_state(state);
 
+  constexpr std::uint32_t memory_stick_device = memory_base + 0x7500U;
+  constexpr std::uint32_t memory_stick_status = memory_base + 0x7540U;
+  constexpr std::uint32_t stack_decoy_status = memory_base + 0x7550U;
+  constexpr std::uint32_t devctl_stack = memory_base + 0x7800U;
+  constexpr char memory_stick_controller[] = "mscmhc0:";
+  std::memcpy(memory.data() + memory_stick_device - memory_base,
+              memory_stick_controller, sizeof(memory_stick_controller));
+  psprecomp::store32(state, devctl_stack + 16U, stack_decoy_status);
+  psprecomp::store32(state, devctl_stack + 20U, 4U);
+  state.gpr[4] = memory_stick_device;
+  state.gpr[5] = 0x02025806U;
+  state.gpr[6] = 0U;
+  state.gpr[7] = 0U;
+  state.gpr[8] = memory_stick_status;
+  state.gpr[9] = 4U;
+  state.gpr[29] = devctl_stack;
+  refract::pspsdk::sceIoDevctl(state);
+  CHECK(state.gpr[2] == 0U);
+  CHECK(psprecomp::load32(state, memory_stick_status) == 1U);
+  CHECK(psprecomp::load32(state, stack_decoy_status) == 0U);
+  state.gpr[29] = 0U;
+
+  auto sliced_state = state;
+  sliced_state.pc = sliced_execution_address;
+  refract::Runtime::instance().execute_guest(sliced_state);
+  CHECK(sliced_state.stop_reason == psprecomp::StopReason::returned);
+  CHECK(execution_slices.load() == 3U);
+
+  constexpr std::uint32_t sleeper_name_address = memory_base + 0x7200U;
+  constexpr char sleeper_name[] = "sleep-regression";
+  std::memcpy(memory.data() + sleeper_name_address - memory_base, sleeper_name,
+              sizeof(sleeper_name));
+  state.gpr[4] = sleeper_name_address;
+  state.gpr[5] = sleeping_thread_entry;
+  state.gpr[6] = 32U;
+  state.gpr[7] = 0x4000U;
+  state.gpr[8] = 0U;
+  refract::pspsdk::sceKernelCreateThread(state);
+  const auto sleeping_thread_id = state.gpr[2];
+  CHECK(sleeping_thread_id >= 0x100U);
+  state.gpr[4] = sleeping_thread_id;
+  state.gpr[5] = 0U;
+  state.gpr[6] = 0U;
+  refract::pspsdk::sceKernelStartThread(state);
+  CHECK(state.gpr[2] == 0U);
+  sleeping_thread_entered.wait(false);
+  CHECK(!sleeping_thread_resumed.load());
+  state.gpr[4] = sleeping_thread_id;
+  refract::pspsdk::sceKernelWakeupThread(state);
+  CHECK(state.gpr[2] == 0U);
+  refract::Runtime::instance().wait_for_guest_threads();
+  CHECK(sleeping_thread_resumed.load());
+
+  constexpr std::uint32_t alarm_argument = 0x12345678U;
+  state.gpr[4] = 100U;
+  state.gpr[5] = alarm_callback_entry;
+  state.gpr[6] = alarm_argument;
+  refract::pspsdk::sceKernelSetAlarm(state);
+  CHECK(state.gpr[2] >= 0x100U);
+  for (int attempt = 0; attempt < 1000 && alarm_callback_count.load() == 0U;
+       ++attempt)
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  CHECK(alarm_callback_count.load() == 1U);
+  CHECK(alarm_callback_argument.load() == alarm_argument);
+
+  constexpr std::uint32_t vblank_argument = 0x87654321U;
+  state.gpr[4] = 30U;
+  state.gpr[5] = 0U;
+  state.gpr[6] = vblank_callback_entry;
+  state.gpr[7] = vblank_argument;
+  refract::pspsdk::sceKernelRegisterSubIntrHandler(state);
+  CHECK(state.gpr[2] == 0U);
+  state.gpr[4] = 30U;
+  state.gpr[5] = 0U;
+  refract::pspsdk::sceKernelEnableSubIntr(state);
+  CHECK(state.gpr[2] == 0U);
+  for (int attempt = 0; attempt < 1000 && vblank_callback_count.load() == 0U;
+       ++attempt)
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  CHECK(vblank_callback_count.load() != 0U);
+  CHECK(vblank_callback_argument.load() == vblank_argument);
+  state.gpr[4] = 30U;
+  state.gpr[5] = 0U;
+  refract::pspsdk::sceKernelReleaseSubIntrHandler(state);
+  CHECK(state.gpr[2] == 0U);
+
+  constexpr std::uint32_t ge_callback_data = memory_base + 0x7300U;
+  std::fill_n(memory.data() + ge_callback_data - memory_base, 16U, 0U);
+  state.gpr[4] = ge_callback_data;
+  refract::pspsdk::sceGeSetCallback(state);
+  CHECK(state.gpr[2] == 0U);
+  state.gpr[4] = state.gpr[2];
+  refract::pspsdk::sceGeUnsetCallback(state);
+  CHECK(state.gpr[2] == 0U);
+
+  constexpr char module_name[] = "psprism-load-module-by-id-test.prx";
+  const auto module_path =
+      std::filesystem::temp_directory_path() / module_name;
+  {
+    std::ofstream module(module_path, std::ios::binary | std::ios::trunc);
+    module.put('\0');
+  }
+  constexpr std::uint32_t module_name_address = memory_base + 0x7400U;
+  std::memcpy(memory.data() + module_name_address - memory_base, module_name,
+              sizeof(module_name));
+  state.gpr[4] = module_name_address;
+  state.gpr[5] = 1U;
+  state.gpr[6] = 0U;
+  refract::pspsdk::sceIoOpen(state);
+  const auto module_file_uid = state.gpr[2];
+  CHECK(module_file_uid >= 3U);
+  state.gpr[4] = module_file_uid;
+  state.gpr[5] = 0U;
+  state.gpr[6] = 0U;
+  refract::pspsdk::sceKernelLoadModuleByID(state);
+  const auto module_uid = state.gpr[2];
+  CHECK(module_uid >= 0x100U);
+  state.gpr[4] = module_uid;
+  state.gpr[5] = 0U;
+  state.gpr[6] = 0U;
+  state.gpr[7] = 0U;
+  refract::pspsdk::sceKernelStartModule(state);
+  CHECK(state.gpr[2] == 0U);
+  state.gpr[4] = module_uid;
+  refract::pspsdk::sceKernelUnloadModule(state);
+  CHECK(state.gpr[2] == 0U);
+  state.gpr[4] = module_file_uid;
+  refract::pspsdk::sceIoClose(state);
+  CHECK(state.gpr[2] == 0U);
+  std::filesystem::remove(module_path);
+
   constexpr std::uint32_t ringbuffer_address = memory_base + 0x800U;
   constexpr std::uint32_t ringbuffer_data = memory_base + 0xa000U;
   constexpr std::uint32_t ringbuffer_callback = memory_base + 0x6000U;
   constexpr std::uint32_t ringbuffer_gp = 0x08987640U;
   constexpr std::uint32_t mpeg_address = memory_base + 0x9000U;
   constexpr std::uint32_t mpeg_memory = memory_base + 0x10000U;
+  constexpr std::uint32_t ringbuffer_owner_canary = 0x51ceba11U;
+  store_word(memory, memory_base,
+             ringbuffer_address + sizeof(mpeg_state::Ringbuffer),
+             ringbuffer_owner_canary);
   state.gpr[4] = ringbuffer_address;
   state.gpr[5] = 2U;
   state.gpr[6] = ringbuffer_data;
@@ -356,6 +534,12 @@ int main() {
   state.gpr[28] = ringbuffer_gp;
   refract::pspsdk::sceMpegRingbufferConstruct(state);
   CHECK(state.gpr[2] == 0U);
+  std::uint32_t observed_ringbuffer_owner{};
+  std::memcpy(&observed_ringbuffer_owner,
+              memory.data() + ringbuffer_address - memory_base +
+                  sizeof(mpeg_state::Ringbuffer),
+              sizeof(observed_ringbuffer_owner));
+  CHECK(observed_ringbuffer_owner == ringbuffer_owner_canary);
   state.gpr[4] = mpeg_address;
   state.gpr[5] = mpeg_memory;
   state.gpr[6] = 0x10000U;
@@ -503,6 +687,17 @@ int main() {
     CHECK(!primitive.state.alpha_test);
     CHECK(primitive.state.color_write_mask == 0x0fU);
   }
+
+  // With no active CALL, the GE ignores RET and continues with the following
+  // top-level display-list fragment.
+  reset_capture();
+  constexpr std::uint32_t empty_ret_address = list_address + 0x100U;
+  store_word(memory, memory_base, empty_ret_address, command(0x0bU, 0U));
+  (void)write_display_list(memory, memory_base, empty_ret_address + 4U,
+                           vertex_address, texture_address, 0x701U, 1U);
+  enqueue(state, {empty_ret_address, 0U});
+  CHECK(present_count == 1U);
+  CHECK(presented_primitives.size() == 1U);
 
   reset_capture();
   const auto alpha_depth_clear = write_display_list(
@@ -750,8 +945,8 @@ int main() {
   CHECK(std::abs(presented_primitives[0].first_texture[2] - 2.75F) <
         0.0001F);
 
-  // Daxter uses fully masked color draws to populate depth/stencil for
-  // camera-dependent occlusion.  These must remain invisible.
+  // Fully masked color draws may still populate depth/stencil for
+  // camera-dependent occlusion.  They must remain invisible.
   constexpr std::uint32_t masked_setup_address = memory_base + 0xa400U;
   execute_command_list(
       state, memory, memory_base, masked_setup_address,
