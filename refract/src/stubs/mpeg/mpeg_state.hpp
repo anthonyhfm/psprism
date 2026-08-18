@@ -39,14 +39,41 @@ struct Ringbuffer {
 };
 
 struct AccessUnit {
-  std::int64_t presentation_timestamp{};
-  std::int64_t decode_timestamp{};
+  // SceMpegAu stores each 64-bit timestamp as two words in MSB/LSB order.
+  // A native int64_t has the opposite word order on little-endian hosts.
+  std::uint32_t presentation_timestamp_msb{};
+  std::uint32_t presentation_timestamp_lsb{};
+  std::uint32_t decode_timestamp_msb{};
+  std::uint32_t decode_timestamp_lsb{};
   std::uint32_t elementary_stream_buffer{};
   std::uint32_t elementary_stream_size{};
 };
 
 static_assert(sizeof(Ringbuffer) == 44U);
 static_assert(sizeof(AccessUnit) == 24U);
+static_assert(offsetof(AccessUnit, presentation_timestamp_msb) == 0U);
+static_assert(offsetof(AccessUnit, presentation_timestamp_lsb) == 4U);
+static_assert(offsetof(AccessUnit, decode_timestamp_msb) == 8U);
+static_assert(offsetof(AccessUnit, decode_timestamp_lsb) == 12U);
+
+inline void write_timestamp(std::uint32_t& msb, std::uint32_t& lsb,
+                            std::int64_t value) {
+  const auto bits = static_cast<std::uint64_t>(value);
+  msb = static_cast<std::uint32_t>(bits >> 32U);
+  lsb = static_cast<std::uint32_t>(bits);
+}
+
+inline void write_presentation_timestamp(AccessUnit& access_unit,
+                                         std::int64_t value) {
+  write_timestamp(access_unit.presentation_timestamp_msb,
+                  access_unit.presentation_timestamp_lsb, value);
+}
+
+inline void write_decode_timestamp(AccessUnit& access_unit,
+                                   std::int64_t value) {
+  write_timestamp(access_unit.decode_timestamp_msb,
+                  access_unit.decode_timestamp_lsb, value);
+}
 
 template <typename T>
 T* guest_pointer(psprecomp::State& state, std::uint32_t address) {

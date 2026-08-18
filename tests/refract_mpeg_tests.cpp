@@ -1,4 +1,5 @@
 #include "stubs/mpeg/media_engine.hpp"
+#include "stubs/mpeg/mpeg_state.hpp"
 
 #include <algorithm>
 #include <array>
@@ -58,6 +59,15 @@ std::vector<std::uint8_t> pes(std::uint8_t stream,
 } // namespace
 
 int main(int argc, char** argv) {
+  mpeg_state::AccessUnit guest_access_unit{};
+  mpeg_state::write_presentation_timestamp(guest_access_unit,
+                                           0x123456789abcdefLL);
+  mpeg_state::write_decode_timestamp(guest_access_unit, -1);
+  CHECK(guest_access_unit.presentation_timestamp_msb == 0x01234567U);
+  CHECK(guest_access_unit.presentation_timestamp_lsb == 0x89abcdefU);
+  CHECK(guest_access_unit.decode_timestamp_msb == 0xffffffffU);
+  CHECK(guest_access_unit.decode_timestamp_lsb == 0xffffffffU);
+
   std::array<std::uint8_t, 144> header{};
   std::copy_n("PSMF0015", 8U, header.begin());
   write_be32(header.data() + 8U, 2048U);
@@ -158,6 +168,8 @@ int main(int argc, char** argv) {
   CHECK(!framed_engine.next_access_unit(framed_video));
   CHECK(framed_engine.queue_stats().video_staging_bytes ==
         sentinel_au.size());
+  CHECK(framed_engine.buffered_bytes() == sentinel_au.size());
+  CHECK(framed_engine.packets_in_use(2048U) == 0U);
 
   // The byte capacity is the lossless backpressure boundary.  A unit-count
   // limit must not silently discard later PES packets before the guest asks
@@ -175,6 +187,8 @@ int main(int argc, char** argv) {
   CHECK(queued_engine.append_packets(queued_packets));
   CHECK(queued_engine.queue_stats().video_units == 64U);
   CHECK(queued_engine.queue_stats().encoded_bytes != 0U);
+  CHECK(queued_engine.packets_in_use(2048U) ==
+        (queued_engine.buffered_bytes() + 2047U) / 2048U);
   for (std::size_t index = 0U; index < queued_unit_count; ++index) {
     const auto unit = queued_engine.next_access_unit(queued_video);
     CHECK(unit.has_value());

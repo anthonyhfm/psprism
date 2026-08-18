@@ -12,8 +12,9 @@ void sceMpegGetAvcAu(Implementation& implementation, psprecomp::State& state) {
   const auto next = engine->next_access_unit(state.gpr[5]);
   if (!next) {
     const auto last_pts = engine->last_video_pts();
-    access_unit->presentation_timestamp = last_pts >= 0 ? last_pts : 0;
-    access_unit->decode_timestamp = -1;
+    mpeg_state::write_presentation_timestamp(
+        *access_unit, last_pts >= 0 ? last_pts : 0);
+    mpeg_state::write_decode_timestamp(*access_unit, -1);
     state.gpr[2] = mpeg_state::no_data;
     const auto trace_index =
         traced_access_units.fetch_add(1U, std::memory_order_relaxed);
@@ -33,8 +34,8 @@ void sceMpegGetAvcAu(Implementation& implementation, psprecomp::State& state) {
     }
     return;
   }
-  access_unit->presentation_timestamp = next->pts;
-  access_unit->decode_timestamp = next->dts;
+  mpeg_state::write_presentation_timestamp(*access_unit, next->pts);
+  mpeg_state::write_decode_timestamp(*access_unit, next->dts);
   access_unit->elementary_stream_buffer = state.gpr[5];
   access_unit->elementary_stream_size =
       static_cast<std::uint32_t>(next->bytes.size());

@@ -868,7 +868,18 @@ std::size_t MediaEngine::buffered_bytes() const {
 
 std::size_t MediaEngine::packets_in_use(std::size_t packet_size) const {
   if (packet_size == 0U) return 0U;
-  const auto bytes = buffered_bytes();
+  const auto& impl = *implementation_;
+  std::lock_guard lock(impl.mutex);
+  // Preserve full byte-capacity backpressure while access units are waiting;
+  // otherwise the producer can outrun the 64-unit queues and fill video
+  // staging until append_packets() rejects every ringbuffer callback.  Once
+  // the final AU has been handed to the guest, the remaining Annex-B tail is
+  // only a private demuxer copy and must not keep a PSP ringbuffer packet busy
+  // forever at EOF.
+  if (impl.units.empty()) return 0U;
+  std::size_t bytes = (impl.encoded.size() - impl.encoded_offset) +
+                      impl.video_bytes.size() + impl.audio_staging_size();
+  for (const auto& item : impl.units) bytes += item.second.source_bytes;
   return (bytes + packet_size - 1U) / packet_size;
 }
 

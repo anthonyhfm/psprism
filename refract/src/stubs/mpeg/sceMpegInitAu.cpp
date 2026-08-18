@@ -7,8 +7,9 @@ void sceMpegInitAu(Implementation& implementation, psprecomp::State& state) {
     state.gpr[2] = 0xffffffffU;
     return;
   }
-  access_unit->presentation_timestamp = 0;
-  access_unit->decode_timestamp = state.gpr[5] <= 2U ? 0 : -1;
+  mpeg_state::write_presentation_timestamp(*access_unit, 0);
+  mpeg_state::write_decode_timestamp(*access_unit,
+                                     state.gpr[5] <= 2U ? 0 : -1);
   access_unit->elementary_stream_buffer = 0U;
   access_unit->elementary_stream_size =
       state.gpr[5] <= 2U ? mpeg_state::avc_es_size
