@@ -68,6 +68,10 @@ class MediaEngine {
   bool set_video_mode(std::uint32_t pixel_format);
   std::uint32_t video_pixel_format() const;
   VideoFrameInfo last_video_frame() const;
+  [[nodiscard]] std::int64_t last_video_pts() const;
+  [[nodiscard]] std::int64_t last_audio_pts() const;
+  [[nodiscard]] bool is_video_end() const;
+  [[nodiscard]] bool is_audio_end() const;
 
   bool decode_video(const MediaAccessUnit& access_unit,
                     std::span<std::uint8_t> output,

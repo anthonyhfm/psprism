@@ -11,7 +11,8 @@ void sceMpegGetAtracAu(Implementation& implementation, psprecomp::State& state) 
   }
   const auto next = engine->next_access_unit(state.gpr[5]);
   if (!next) {
-    access_unit->presentation_timestamp = 0;
+    const auto last_pts = engine->last_audio_pts();
+    access_unit->presentation_timestamp = last_pts >= 0 ? last_pts : 0;
     access_unit->decode_timestamp = -1;
     state.gpr[2] = mpeg_state::no_data;
     return;

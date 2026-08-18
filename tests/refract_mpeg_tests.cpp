@@ -282,6 +282,35 @@ int main(int argc, char** argv) {
                      benchmark_end - benchmark_start)
                      .count()
               << '\n';
+    CHECK(real_engine.last_video_pts() > 0);
+    CHECK(real_engine.last_audio_pts() > 0);
+  }
+
+  // Verify that MediaEngine tracks PTS across stream lifecycle and preserves last PTS at EOF
+  {
+    mpeg_state::MediaEngine eof_engine(8192U);
+    const auto vid = eof_engine.register_stream(0U, 0U);
+    const auto aud = eof_engine.register_stream(1U, 0U);
+    static_cast<void>(aud);
+    CHECK(eof_engine.last_video_pts() == -1);
+    CHECK(eof_engine.last_audio_pts() == -1);
+    CHECK(eof_engine.is_video_end());
+    CHECK(eof_engine.is_audio_end());
+
+    const std::array<std::uint8_t, 3> payload{0x12U, 0x34U, 0x56U};
+    const auto video_pkt = pes(0xe0U, payload, 90000);
+    CHECK(eof_engine.append_packets(video_pkt));
+    CHECK(!eof_engine.is_video_end());
+
+    const auto au = eof_engine.next_access_unit(vid);
+    CHECK(au.has_value());
+    CHECK(au->pts == 90000);
+    CHECK(eof_engine.last_video_pts() == 90000);
+    CHECK(eof_engine.is_video_end());
+
+    // When no more access units exist, last_video_pts remains 90000 (not reset to 0)
+    CHECK(!eof_engine.next_access_unit(vid));
+    CHECK(eof_engine.last_video_pts() == 90000);
   }
 
   return 0;

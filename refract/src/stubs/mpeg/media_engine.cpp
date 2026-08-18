@@ -220,6 +220,7 @@ struct MediaEngine::Implementation {
       unit.pts = video_next_pts;
       unit.dts = video_next_pts;
       unit.source_bytes = static_cast<std::uint32_t>(unit.bytes.size());
+      last_video_pts = unit.pts;
       units.push_back({StreamKind::video, std::move(unit)});
       if (video_next_pts >= 0) video_next_pts += 3003;
       cursor += *next;
@@ -324,6 +325,7 @@ struct MediaEngine::Implementation {
       unit.source_bytes = static_cast<std::uint32_t>(frame_size);
       unit.channel = normalized_audio_channel(channel);
       unit.channels = code1 == 0x24U ? 1U : 2U;
+      last_audio_pts = unit.pts;
       units.push_back({StreamKind::audio, std::move(unit)});
       if (staging.next_pts >= 0) staging.next_pts += 4180;
       cursor += frame_size;
@@ -425,6 +427,8 @@ struct MediaEngine::Implementation {
   std::optional<MediaAccessUnit> pending_video;
   std::optional<MediaAccessUnit> pending_audio;
   std::int64_t video_next_pts{-1};
+  std::int64_t last_video_pts{-1};
+  std::int64_t last_audio_pts{-1};
   ATRAC3PContext* audio_decoder{};
   std::size_t audio_block_align{};
   std::uint8_t audio_channels{};
@@ -556,6 +560,32 @@ VideoFrameInfo MediaEngine::last_video_frame() const {
   return impl.last_frame;
 }
 
+std::int64_t MediaEngine::last_video_pts() const {
+  const auto& impl = *implementation_;
+  std::lock_guard lock(impl.mutex);
+  return impl.last_video_pts;
+}
+
+std::int64_t MediaEngine::last_audio_pts() const {
+  const auto& impl = *implementation_;
+  std::lock_guard lock(impl.mutex);
+  return impl.last_audio_pts;
+}
+
+bool MediaEngine::is_video_end() const {
+  const auto& impl = *implementation_;
+  std::lock_guard lock(impl.mutex);
+  return impl.units.empty() && impl.video_bytes.empty() &&
+         (impl.encoded.size() <= impl.encoded_offset);
+}
+
+bool MediaEngine::is_audio_end() const {
+  const auto& impl = *implementation_;
+  std::lock_guard lock(impl.mutex);
+  return impl.units.empty() && impl.audio_staging_size() == 0U &&
+         (impl.encoded.size() <= impl.encoded_offset);
+}
+
 std::optional<MediaAccessUnit> MediaEngine::next_access_unit(
     std::uint32_t uid) {
   auto& impl = *implementation_;
@@ -573,8 +603,10 @@ std::optional<MediaAccessUnit> MediaEngine::next_access_unit(
   impl.units.erase(found);
   if (stream->second.kind == StreamKind::video) {
     impl.pending_video = result;
+    if (result.pts >= 0) impl.last_video_pts = result.pts;
   } else if (stream->second.kind == StreamKind::audio) {
     impl.pending_audio = result;
+    if (result.pts >= 0) impl.last_audio_pts = result.pts;
   }
   impl.demux();
   return result;
@@ -815,6 +847,8 @@ void MediaEngine::flush() {
   impl.pending_video.reset();
   impl.pending_audio.reset();
   impl.video_next_pts = -1;
+  impl.last_video_pts = -1;
+  impl.last_audio_pts = -1;
   if (impl.audio_decoder != nullptr) atrac3p_flush_buffers(impl.audio_decoder);
   impl.frame_number = 0U;
   impl.last_frame = {};
