@@ -202,6 +202,27 @@ if(BUILD_TESTING)
         add_test(NAME refract_frontend_tests COMMAND refract_frontend_tests)
     endif()
 
+    option(REFRACT_DESKTOP_DIALOGS "Build Qt system dialogs for desktop targets" ON)
+    if(REFRACT_DESKTOP_DIALOGS)
+        find_package(Qt6 6.5 COMPONENTS Widgets HINTS "/opt/homebrew/opt/qtbase")
+        if(Qt6_FOUND)
+            add_executable(refract_dialog_tests
+                tests/refract_dialog_tests.cpp
+                refract/src/host/desktop_dialogs.cpp)
+            target_include_directories(refract_dialog_tests PRIVATE
+                include
+                refract/src)
+            target_compile_features(refract_dialog_tests PRIVATE cxx_std_20)
+            target_compile_options(refract_dialog_tests PRIVATE
+                -Wall -Wextra -Wpedantic -Werror)
+            get_filename_component(REFRACT_QT_PREFIX "${Qt6_DIR}/../../.." ABSOLUTE)
+            target_compile_definitions(refract_dialog_tests PRIVATE
+                "REFRACT_QT_PLATFORM_PLUGIN_PATH=\"${REFRACT_QT_PREFIX}/share/qt/plugins/platforms\"")
+            target_link_libraries(refract_dialog_tests PRIVATE Qt6::Widgets)
+            add_test(NAME refract_dialog_tests COMMAND refract_dialog_tests)
+        endif()
+    endif()
+
     find_program(PSP_GCC psp-gcc HINTS "$ENV{PSPDEV}/bin")
     find_program(PSP_LD psp-ld HINTS "$ENV{PSPDEV}/bin")
     find_program(PSP_GXX psp-g++ HINTS "$ENV{PSPDEV}/bin")
