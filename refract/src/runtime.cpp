@@ -564,6 +564,8 @@ struct Runtime::Implementation {
     std::string name;
     int count{};
     int maximum{};
+    std::uint64_t next_wait_ticket{};
+    std::deque<std::uint64_t> waiting_tickets;
   };
 
   struct Mutex {

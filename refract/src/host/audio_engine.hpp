@@ -35,14 +35,13 @@ class AudioEngine {
   SubmitResult submit(const std::int16_t* interleaved_stereo,
                       std::uint32_t frame_count, std::uint32_t channel,
                       bool blocking,
-                      std::chrono::microseconds timeout,
-                      bool recover_on_timeout = false);
+                      std::chrono::microseconds timeout);
   std::uint32_t consume(std::int16_t* interleaved_stereo,
                         std::uint32_t frame_count) noexcept;
   [[nodiscard]] std::uint32_t queued_frames(std::uint32_t channel) const noexcept;
   [[nodiscard]] AudioTelemetry telemetry() const noexcept;
   [[nodiscard]] std::uint64_t clock_frames() const noexcept {
-    return consumed_frames_.load(std::memory_order_relaxed);
+    return rendered_frames_.load(std::memory_order_relaxed);
   }
   void reset_channel(std::uint32_t channel);
   // A host-device reset discards queued data while preserving the monotonic
@@ -60,8 +59,11 @@ class AudioEngine {
   };
 
   std::unique_ptr<std::array<Channel, channel_count>> channels_;
+  std::unique_ptr<std::array<std::int32_t,
+                             maximum_frames_per_channel * 2U>> mix_samples_;
   std::atomic<std::uint64_t> submitted_frames_{};
   std::atomic<std::uint64_t> consumed_frames_{};
+  std::atomic<std::uint64_t> rendered_frames_{};
   std::atomic<std::uint64_t> queued_frames_{};
   std::atomic<std::uint64_t> peak_queued_frames_{};
   std::atomic<std::uint64_t> callback_count_{};

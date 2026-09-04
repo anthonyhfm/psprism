@@ -7,12 +7,13 @@
 namespace refract::host {
 
 AudioEngine::AudioEngine()
-    : channels_(std::make_unique<std::array<Channel, channel_count>>()) {}
+    : channels_(std::make_unique<std::array<Channel, channel_count>>()),
+      mix_samples_(std::make_unique<std::array<
+                       std::int32_t, maximum_frames_per_channel * 2U>>()) {}
 
 AudioEngine::SubmitResult AudioEngine::submit(
     const std::int16_t* interleaved_stereo, std::uint32_t frame_count,
-    std::uint32_t channel, bool blocking, std::chrono::microseconds timeout,
-    bool recover_on_timeout) {
+    std::uint32_t channel, bool blocking, std::chrono::microseconds timeout) {
   if (interleaved_stereo == nullptr || frame_count == 0U ||
       channel >= channels_->size() ||
       frame_count > maximum_frames_per_channel) {
@@ -22,41 +23,46 @@ AudioEngine::SubmitResult AudioEngine::submit(
 
   auto& target = (*channels_)[channel];
   std::unique_lock lock(target.submit_mutex);
-  const auto can_submit = [&target] {
+  const auto wait_until = [&target, &lock, timeout](const auto& predicate) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (!predicate()) {
+      const auto now = std::chrono::steady_clock::now();
+      if (now >= deadline) return false;
+      // The audio callback deliberately never takes submit_mutex. Polling at
+      // PSP audio-tick granularity closes the condition-variable lost-wakeup
+      // window without introducing a real-time priority inversion.
+      const auto remaining = deadline - now;
+      const auto poll_interval =
+          std::chrono::duration_cast<decltype(remaining)>(
+              std::chrono::milliseconds(1));
+      target.space_available.wait_for(
+          lock, std::min(remaining, poll_interval));
+    }
+    return true;
+  };
+  const auto queued = [&target] {
     const auto w = target.write_index_.load(std::memory_order_relaxed);
     const auto r = target.read_index_.load(std::memory_order_acquire);
-    return w == r;
+    return w - r;
   };
-  if (!can_submit()) {
-    if (!blocking) {
-      overrun_submissions_.fetch_add(1U, std::memory_order_relaxed);
-      dropped_frames_.fetch_add(frame_count, std::memory_order_relaxed);
-      return SubmitResult::busy;
-    }
-    if (!target.space_available.wait_for(lock, timeout, can_submit)) {
-      overrun_submissions_.fetch_add(1U, std::memory_order_relaxed);
-      if (!recover_on_timeout) {
-        dropped_frames_.fetch_add(frame_count, std::memory_order_relaxed);
-        return SubmitResult::timeout;
-      }
+  const auto queued_before = queued();
+  if (!blocking && queued_before != 0U) {
+    overrun_submissions_.fetch_add(1U, std::memory_order_relaxed);
+    dropped_frames_.fetch_add(frame_count, std::memory_order_relaxed);
+    return SubmitResult::busy;
+  }
 
-      // PSP blocking audio writes do not report a transient busy result. If
-      // the host device stalls, discard the stale queue and accept the new
-      // buffer so a guest cannot turn a host callback race into a permanent
-      // retry loop while holding one of its own locks.
-      const auto cur_w = target.write_index_.load(std::memory_order_relaxed);
-      const auto cur_r = target.read_index_.load(std::memory_order_relaxed);
-      const auto discarded = cur_w - cur_r;
-      target.read_index_.store(cur_w, std::memory_order_release);
-      if (discarded != 0U) {
-        queued_frames_.fetch_sub(discarded, std::memory_order_relaxed);
-        dropped_frames_.fetch_add(discarded, std::memory_order_relaxed);
-      }
-    }
+  constexpr std::size_t cap = maximum_frames_per_channel;
+  const auto has_capacity = [&queued, frame_count] {
+    return queued() <= cap - frame_count;
+  };
+  if (!has_capacity() && (!blocking || !wait_until(has_capacity))) {
+    overrun_submissions_.fetch_add(1U, std::memory_order_relaxed);
+    dropped_frames_.fetch_add(frame_count, std::memory_order_relaxed);
+    return blocking ? SubmitResult::timeout : SubmitResult::busy;
   }
 
   const auto w = target.write_index_.load(std::memory_order_relaxed);
-  constexpr std::size_t cap = maximum_frames_per_channel;
   constexpr std::size_t mask = cap - 1U;
   const auto start_frame = w & mask;
   const auto frames_to_end = cap - start_frame;
@@ -82,15 +88,32 @@ AudioEngine::SubmitResult AudioEngine::submit(
              peak, depth, std::memory_order_relaxed,
              std::memory_order_relaxed)) {
   }
+
+  // The PSP queues a blocking write immediately, then keeps the caller asleep
+  // until the audio that was already queued has drained. Waiting before the
+  // copy leaves a host-callback-sized hole between every pair of guest blocks.
+  if (blocking && queued_before != 0U) {
+    const auto started_playing = [&target, w] {
+      return target.read_index_.load(std::memory_order_acquire) >= w;
+    };
+    // Once accepted, a PSP blocking write remains asleep until the samples
+    // that preceded it have drained. A timeout based only on the newly
+    // submitted buffer lets a queued stream run ahead and eventually loses
+    // its pacing. Polling also closes the callback's lost-notification window.
+    while (!started_playing())
+      target.space_available.wait_for(lock, std::chrono::milliseconds(1));
+  }
   return SubmitResult::submitted;
 }
 
 std::uint32_t AudioEngine::consume(std::int16_t* interleaved_stereo,
                                    std::uint32_t frame_count) noexcept {
   if (interleaved_stereo == nullptr || frame_count == 0U) return 0U;
-  std::fill_n(interleaved_stereo, static_cast<std::size_t>(frame_count) * 2U,
-              static_cast<std::int16_t>(0));
+  if (frame_count > maximum_frames_per_channel) return 0U;
+  const auto sample_count = static_cast<std::size_t>(frame_count) * 2U;
+  std::fill_n(mix_samples_->data(), sample_count, 0);
   callback_count_.fetch_add(1U, std::memory_order_relaxed);
+  rendered_frames_.fetch_add(frame_count, std::memory_order_relaxed);
 
   std::uint32_t maximum_consumed = 0U;
   constexpr std::size_t cap = maximum_frames_per_channel;
@@ -109,22 +132,22 @@ std::uint32_t AudioEngine::consume(std::int16_t* interleaved_stereo,
       const auto source_frame = (r + frame) & mask;
       for (std::size_t side = 0U; side < 2U; ++side) {
         const auto output_index = frame * 2U + side;
-        const auto mixed =
-            static_cast<std::int32_t>(interleaved_stereo[output_index]) +
+        (*mix_samples_)[output_index] +=
             source.samples[source_frame * 2U + side];
-        interleaved_stereo[output_index] = static_cast<std::int16_t>(
-            std::clamp<std::int32_t>(mixed,
-                                     std::numeric_limits<std::int16_t>::min(),
-                                     std::numeric_limits<std::int16_t>::max()));
       }
     }
 
     source.read_index_.store(r + consumed, std::memory_order_release);
     queued_frames_.fetch_sub(consumed, std::memory_order_relaxed);
 
-    if (r + consumed == w) {
-      source.space_available.notify_all();
-    }
+    source.space_available.notify_all();
+  }
+
+  for (std::size_t sample = 0U; sample < sample_count; ++sample) {
+    interleaved_stereo[sample] = static_cast<std::int16_t>(
+        std::clamp<std::int32_t>((*mix_samples_)[sample],
+                                 std::numeric_limits<std::int16_t>::min(),
+                                 std::numeric_limits<std::int16_t>::max()));
   }
 
   consumed_frames_.fetch_add(maximum_consumed, std::memory_order_relaxed);

@@ -10,6 +10,8 @@
 #include <chrono>
 #include <cstdint>
 #include <cstring>
+#include <future>
+#include <thread>
 #include <vector>
 
 #define CHECK(expression)                                                      \
@@ -150,6 +152,7 @@ int main() {
     telemetry = engine.telemetry();
     CHECK(telemetry.underrun_callbacks == 1U);
     CHECK(telemetry.underrun_frames == 257U);
+    CHECK(engine.clock_frames() == telemetry.consumed_frames + 257U);
 
     CHECK(engine.submit(source.data(), 100U, 0U, false,
                         std::chrono::microseconds(0)) ==
@@ -157,16 +160,15 @@ int main() {
     CHECK(engine.submit(source.data(), 100U, 0U, false,
                         std::chrono::microseconds(0)) ==
           refract::host::AudioEngine::SubmitResult::busy);
-    CHECK(engine.submit(source.data(), 100U, 0U, true,
-                        std::chrono::microseconds(0)) ==
-          refract::host::AudioEngine::SubmitResult::timeout);
-    const auto clock_before_reset = engine.telemetry().consumed_frames;
+    const auto consumed_before_reset = engine.telemetry().consumed_frames;
+    const auto clock_before_reset = engine.clock_frames();
     engine.device_reset();
     telemetry = engine.telemetry();
-    CHECK(telemetry.consumed_frames == clock_before_reset);
+    CHECK(telemetry.consumed_frames == consumed_before_reset);
+    CHECK(engine.clock_frames() == clock_before_reset);
     CHECK(telemetry.queued_frames == 0U);
-    CHECK(telemetry.overrun_submissions == 2U);
-    CHECK(telemetry.dropped_frames == 300U);
+    CHECK(telemetry.overrun_submissions == 1U);
+    CHECK(telemetry.dropped_frames == 200U);
     CHECK(telemetry.device_resets == 1U);
 
     CHECK(engine.submit(source.data(), 100U, 0U, false,
@@ -176,7 +178,8 @@ int main() {
                         std::chrono::microseconds(0)) ==
           refract::host::AudioEngine::SubmitResult::submitted);
     CHECK(engine.consume(output.data(), 100U) == 100U);
-    CHECK(engine.telemetry().consumed_frames == clock_before_reset + 100U);
+    CHECK(engine.telemetry().consumed_frames == consumed_before_reset + 100U);
+    CHECK(engine.clock_frames() == clock_before_reset + 100U);
   }
 
   {
@@ -188,17 +191,49 @@ int main() {
     CHECK(engine.submit(stale.data(), 100U, 0U, false,
                         std::chrono::microseconds(0)) ==
           refract::host::AudioEngine::SubmitResult::submitted);
-    CHECK(engine.submit(replacement.data(), 100U, 0U, true,
-                        std::chrono::microseconds(0), true) ==
+    auto pending = std::async(std::launch::async, [&] {
+      return engine.submit(replacement.data(), 100U, 0U, true,
+                           std::chrono::milliseconds(1));
+    });
+    for (std::uint32_t attempt = 0U;
+         attempt < 10000U && engine.queued_frames(0U) != 200U; ++attempt)
+      std::this_thread::yield();
+    CHECK(engine.queued_frames(0U) == 200U);
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    CHECK(pending.wait_for(std::chrono::microseconds(0)) ==
+          std::future_status::timeout);
+    std::array<std::int16_t, 200U> recovered{};
+    CHECK(engine.consume(recovered.data(), 100U) == 100U);
+    CHECK(recovered == stale);
+    CHECK(pending.wait_for(std::chrono::milliseconds(100)) ==
+          std::future_status::ready);
+    CHECK(pending.get() ==
           refract::host::AudioEngine::SubmitResult::submitted);
     CHECK(engine.queued_frames(0U) == 100U);
-    std::array<std::int16_t, 200U> recovered{};
     CHECK(engine.consume(recovered.data(), 100U) == 100U);
     CHECK(recovered == replacement);
     const auto telemetry = engine.telemetry();
     CHECK(telemetry.submitted_frames == 200U);
-    CHECK(telemetry.overrun_submissions == 1U);
-    CHECK(telemetry.dropped_frames == 100U);
+    CHECK(telemetry.overrun_submissions == 0U);
+    CHECK(telemetry.dropped_frames == 0U);
+  }
+
+  {
+    refract::host::AudioEngine engine;
+    constexpr std::array<std::int16_t, 2> loud_positive{30000, 30000};
+    constexpr std::array<std::int16_t, 2> loud_negative{-30000, -30000};
+    CHECK(engine.submit(loud_positive.data(), 1U, 0U, false,
+                        std::chrono::microseconds(0)) ==
+          refract::host::AudioEngine::SubmitResult::submitted);
+    CHECK(engine.submit(loud_positive.data(), 1U, 1U, false,
+                        std::chrono::microseconds(0)) ==
+          refract::host::AudioEngine::SubmitResult::submitted);
+    CHECK(engine.submit(loud_negative.data(), 1U, 2U, false,
+                        std::chrono::microseconds(0)) ==
+          refract::host::AudioEngine::SubmitResult::submitted);
+    std::array<std::int16_t, 2> mixed{};
+    CHECK(engine.consume(mixed.data(), 1U) == 1U);
+    CHECK(mixed == loud_positive);
   }
 
   std::array<std::uint8_t, 16> vag_block{};
@@ -234,6 +269,10 @@ int main() {
   CHECK(sas_state::walk_envelope_curve(
             sas_state::max_envelope_height / 2U,
             sas_state::EnvelopeCurve::direct, 12345U) == 12345U);
+  CHECK(sas_state::walk_envelope_curve(
+            sas_state::max_envelope_height / 2U,
+            sas_state::EnvelopeCurve::exponent_decrease, 0x10000000U) ==
+        503316480U);
 
   constexpr std::uint32_t memory_base = 0x08800000U;
   constexpr std::uint32_t core_address = memory_base + 0x100U;
@@ -344,7 +383,7 @@ int main() {
   CHECK(sas_state::set_voice_pcm(core_address, 1, state, pcm_voice_address,
                                  static_cast<std::int32_t>(pcm_voice.size()),
                                  -1) == 0U);
-  CHECK((sas_state::end_flags(core_address) & (1U << 1U)) != 0U);
+  CHECK((sas_state::end_flags(core_address) & (1U << 1U)) == 0U);
   CHECK(sas_state::set_volume(core_address, 1,
                               static_cast<std::int32_t>(sas_state::max_volume),
                               static_cast<std::int32_t>(sas_state::max_volume /
@@ -358,6 +397,56 @@ int main() {
   CHECK(read_sample(memory, output_offset + 4U) == 3000);
   CHECK(read_sample(memory, output_offset + 6U) == 1500);
   CHECK((sas_state::end_flags(core_address) & (1U << 1U)) != 0U);
+
+  sas_state::reset_for_tests();
+  CHECK(sas_state::initialize(state, core_address, 64U, 32U, 0U, 44100U) ==
+        0U);
+  CHECK(sas_state::set_volume(core_address, 0, 123, 456, 789, 1000) == 0U);
+  CHECK(sas_state::set_pitch(core_address, 0, 0x0800U) == 0U);
+  CHECK(sas_state::set_adsr_rates(
+            core_address, 0, 0xfU,
+            std::array<std::uint32_t, 4>{11U, 22U, 33U, 44U}) == 0U);
+  CHECK(sas_state::set_voice(core_address, 0, state, source_address,
+                             static_cast<std::int32_t>(vag_block.size()), 0) ==
+        0U);
+  bool voice_controls_preserved = false;
+  CHECK(sas_state::update_voice(core_address, 0, [&](sas_state::Voice& voice) {
+          voice_controls_preserved =
+              voice.left_volume == 123 && voice.right_volume == 456 &&
+              voice.effect_left_volume == 789 &&
+              voice.effect_right_volume == 1000 && voice.pitch == 0x0800U &&
+              voice.attack_rate == 11U && voice.decay_rate == 22U &&
+              voice.sustain_rate == 33U && voice.release_rate == 44U;
+          return 0U;
+        }) == 0U);
+  CHECK(voice_controls_preserved);
+
+  std::memcpy(memory.data() + (source_address - memory_base),
+              looping_vag.data(), looping_vag.size());
+  sas_state::reset_for_tests();
+  CHECK(sas_state::initialize(state, core_address, 64U, 32U, 0U, 44100U) ==
+        0U);
+  CHECK(sas_state::set_voice(core_address, 0, state, source_address,
+                             static_cast<std::int32_t>(looping_vag.size()),
+                             1) == 0U);
+  CHECK(sas_state::key_on(core_address, 0) == 0U);
+  CHECK(sas_state::mix(state, core_address, output_address, false) == 0U);
+  std::uint64_t position_before_same_source{};
+  CHECK(sas_state::update_voice(core_address, 0, [&](sas_state::Voice& voice) {
+          position_before_same_source = voice.position;
+          return 0U;
+        }) == 0U);
+  CHECK(position_before_same_source != 0U);
+  CHECK(sas_state::set_voice(core_address, 0, state, source_address,
+                             static_cast<std::int32_t>(looping_vag.size()),
+                             1) == 0U);
+  bool same_source_kept_position = false;
+  CHECK(sas_state::update_voice(core_address, 0, [&](sas_state::Voice& voice) {
+          same_source_kept_position =
+              voice.position == position_before_same_source;
+          return 0U;
+        }) == 0U);
+  CHECK(same_source_kept_position);
 
   const std::array<std::int16_t, 64> constant_pcm = [] {
     std::array<std::int16_t, 64> result{};

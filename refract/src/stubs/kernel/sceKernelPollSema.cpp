@@ -18,7 +18,11 @@ void sceKernelPollSema(Implementation& implementation, psprecomp::State& state) 
                         (logged_polls < 8U ||
                          (logged_polls & 0xffffU) == 0U);
   ++logged_polls;
-  if (requested <= 0 || requested > semaphore->count) {
+  // A signal on the PSP reserves capacity for already blocked threads before
+  // a polling thread can acquire it. Without this guard, a fast producer can
+  // repeatedly steal the token it just signaled and starve the woken thread.
+  if (requested <= 0 || requested > semaphore->count ||
+      !semaphore->waiting_tickets.empty()) {
     if (log_poll)
       std::fprintf(stderr,
                    "[psprism:sema] poll thread=%d uid=%u name=%s "
