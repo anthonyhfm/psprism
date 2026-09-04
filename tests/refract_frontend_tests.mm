@@ -64,12 +64,54 @@ int main() {
   CHECK(render_target_geometry_scale(false, 256U, 512U) == 1.0F);
   CHECK(std::abs(render_target_geometry_scale(true, 256U, 512U) - 0.5F) <
         0.0001F);
+  {
+    const auto exact = render_target_address_offset(
+        0x04000000U, 0x04000000U, 512U, 480U, 272U, 3U, 3U);
+    CHECK(exact.has_value());
+    CHECK(exact->x == 0U);
+    CHECK(exact->y == 0U);
+    const auto daxter_shadow = render_target_address_offset(
+        0x040041c0U, 0x04000000U, 512U, 480U, 272U, 3U, 3U);
+    CHECK(daxter_shadow.has_value());
+    CHECK(daxter_shadow->x == 112U);
+    CHECK(daxter_shadow->y == 8U);
+    CHECK(!render_target_address_offset(
+               0x040041c0U, 0x04000000U, 512U, 480U, 272U, 3U, 2U)
+               .has_value());
+    CHECK(!render_target_address_offset(
+               0x040ff000U, 0x04000000U, 512U, 480U, 272U, 3U, 3U)
+               .has_value());
+  }
   CHECK(refract::host::color_write_mask(0U, 0U) == 0x0fU);
   CHECK(refract::host::color_write_mask(0x00ffffffU, 0xffU) == 0U);
   CHECK(refract::host::color_write_mask(0x0000ffU, 0U) == 0x0eU);
   CHECK(psp_compare_function(6U) == MTLCompareFunctionGreater);
   CHECK(psp_stencil_operation(2U) == MTLStencilOperationReplace);
   CHECK(psp_stencil_operation(4U) == MTLStencilOperationIncrementClamp);
+  CHECK(depth_target_cache_key(0x04118000U, 480U, 272U) !=
+        depth_target_cache_key(0x04118000U, 64U, 64U));
+  CHECK(depth_target_cache_key(0x04118000U, 480U, 272U) ==
+        depth_target_cache_key(0x04118000U, 480U, 272U));
+  {
+    refract::host::GeometryState state;
+    state.render_target_format = 3U;
+    state.color_write_mask = 0x0fU;
+    state.stencil_test = true;
+    state.stencil_write_mask = 0xffU;
+    state.stencil_depth_pass = 0U;
+    CHECK(geometry_color_write_mask(state) == 0x07U);
+    state.stencil_depth_pass = 1U;
+    CHECK(geometry_color_write_mask(state) == 0x0fU);
+    state.stencil_depth_pass = 2U;
+    CHECK(geometry_color_write_mask(state) == 0x0fU);
+    state.stencil_write_mask = 0x7fU;
+    CHECK(geometry_color_write_mask(state) == 0x07U);
+    state.stencil_write_mask = 0xffU;
+    state.stencil_depth_pass = 3U;
+    CHECK(geometry_color_write_mask(state) == 0x07U);
+    state.render_target_format = 2U;
+    CHECK(geometry_color_write_mask(state) == 0x0fU);
+  }
 
   id<MTLDevice> test_device = MTLCreateSystemDefaultDevice();
   CHECK(test_device != nil);
@@ -161,6 +203,14 @@ int main() {
 
   refract::host::begin_ge_frame();
   submit_test_primitive(0x04000000U, 3.0F);
+  refract::host::end_ge_frame();
+  refract::host::present_ge_frame();
+  CHECK(pending_geometry_batches.empty());
+  CHECK(presented_geometry_batches.size() == 1U);
+  CHECK(presented_geometry_batches[0].vertices[0].position[0] == 3.0F);
+
+  refract::host::begin_ge_frame();
+  submit_test_primitive(0x04000000U, 4.0F);
   refract::host::begin_ge_frame();
   refract::host::end_ge_frame();
   CHECK(building_geometry_batches.empty());

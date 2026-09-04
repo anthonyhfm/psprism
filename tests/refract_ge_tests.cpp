@@ -150,6 +150,10 @@ void execute_command_list(
 }
 
 int ge_component_tests() {
+  CHECK(refract::host::normalized_viewport_depth(-1.0F) == 0.0F);
+  CHECK(refract::host::normalized_viewport_depth(65535.0F) == 1.0F);
+  CHECK(refract::host::normalized_viewport_depth(65535.5F) == 1.0F);
+
   CHECK(refract::ge::command_metadata(0x04U).flow ==
         refract::ge::CommandFlow::draw);
   CHECK(refract::ge::command_metadata(0x0aU).name == "CALL");
@@ -765,6 +769,20 @@ int main() {
                  normal_first_position[0]) < 0.0001F);
   CHECK(std::abs(clipped_primitive.first_position[1] -
                  normal_first_position[1]) < 0.0001F);
+
+  constexpr std::uint32_t shadow_list_address = list_address + 0x780U;
+  const auto shadow_target = write_display_list(
+      memory, memory_base, shadow_list_address, vertex_address,
+      texture_address, 0x201U, 1U);
+  // Daxter clears a 64-pixel-stride shadow framebuffer while the full-display
+  // scissor is still active.  It remains a 64x64 render target.
+  store_word(memory, memory_base, shadow_list_address + 3U * 4U,
+             command(0x9dU, 64U));
+  reset_capture();
+  enqueue(state, shadow_target);
+  CHECK(presented_primitives.size() == 1U);
+  CHECK(presented_primitives[0].state.render_target_width == 64U);
+  CHECK(presented_primitives[0].state.render_target_height == 64U);
 
   constexpr std::uint32_t dxt_list_address = list_address + 0x800U;
   const auto dxt = write_display_list(

@@ -105,15 +105,20 @@ For native execution on host platforms, `psprism` implements native host bridges
 git clone https://github.com/anthonyhfm/psprism.git
 cd psprism
 
-cmake -S . -B build
-cmake --build build -j
+make -j
+make test
 ```
 
 ### 2. Recompile a PSP Executable
 ```bash
-./build/psprism game.iso
+./build/bin/psprism game.iso
 ```
-The interactive wizard parses executable relocations, extracts disc assets, and generates a standalone C++ CMake project.
+The interactive wizard parses executable relocations, extracts disc assets, and generates a standalone C++ project.
+
+Game functions can be replaced directly from recovered Ghidra prototypes,
+original translated functions can be called safely, and reverse-engineered
+globals can be read or overwritten through the generated project's patch
+framework. See [Game-function patching](docs/game-patching.md).
 
 ### 3. Build the Generated Project
 ```bash

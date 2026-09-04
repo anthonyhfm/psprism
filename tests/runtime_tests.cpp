@@ -1,13 +1,126 @@
 #include <psprecomp/overlay.hpp>
 #include <psprecomp/allegrex_decoder.hpp>
 #include <psprecomp/interpreter.hpp>
+#include <psprecomp/patch.hpp>
 #include <psprecomp/relocation.hpp>
 #include <psprecomp/runtime.hpp>
 #include <psprecomp/vfpu.hpp>
 
 #include <array>
+#include <atomic>
+#include <functional>
+#include <thread>
+
+namespace psprecomp::patch::bridge {
+bool execute_function_at(State& state, std::uint32_t address,
+                         std::uint64_t max_blocks) {
+    static_cast<void>(max_blocks);
+    if (const auto* patch = find_patch(state, address)) {
+        return invoke_patch(*patch, state, address);
+    }
+    if (address == 0x08803000U) {
+        state.gpr[2] = state.gpr[4] * state.gpr[5];
+        state.pc = state.gpr[31];
+        return true;
+    }
+    if (address == 0x08803020U) {
+        state.gpr[2] = 0;
+        for (std::size_t index = 0; index < 8; ++index) {
+            state.gpr[2] += state.gpr[4 + index];
+        }
+        state.gpr[2] += load32(state, state.gpr[29]);
+        state.pc = state.gpr[31];
+        return true;
+    }
+    if (address == 0x08803040U) {
+        state.gpr[2] = state.gpr[4] + state.gpr[5];
+        state.pc = state.gpr[31];
+        return true;
+    }
+    if (address == 0x08803060U) {
+        const auto value = load32(state, state.gpr[4]) + state.gpr[5];
+        store32(state, state.gpr[4], value);
+        state.gpr[2] = state.gpr[4];
+        state.pc = state.gpr[31];
+        return true;
+    }
+    if (address == 0x08803080U) {
+        state.gpr[2] = 0x09900000U;
+        state.pc = state.gpr[31];
+        return true;
+    }
+    return false;
+}
+} // namespace psprecomp::patch::bridge
 
 namespace {
+
+int custom_test_add(int a, int b) {
+    return a + b + 10;
+}
+float custom_test_calc(float a, float b) {
+    return a * b + 1.5f;
+}
+std::uint64_t custom_test_u64(std::uint64_t a, std::uint32_t b) {
+    return a + b;
+}
+int custom_test_nine_ints(int a, int b, int c, int d, int e, int f, int g,
+                          int h, int i) {
+    return a + b * 2 + c * 3 + d * 4 + e * 5 + f * 6 + g * 7 + h * 8 + i * 9;
+}
+float custom_test_nine_floats(float a, float b, float c, float d, float e,
+                              float f, float g, float h, float i) {
+    return a + b + c + d + e + f + g + h + i;
+}
+double custom_test_double(double value, int addend) {
+    return value + static_cast<double>(addend);
+}
+int* custom_test_pointer(int* value, int delta) {
+    *value += delta;
+    return value;
+}
+float custom_test_mixed(int a, float af, int b, float bf, int c, float cf,
+                        int d, float df, int e, float ef, int f, float ff,
+                        int g, float gf, int h, float hf, int i, float inf) {
+    return static_cast<float>(a + b + c + d + e + f + g + h + i) +
+           af + bf + cf + df + ef + ff + gf + hf + inf;
+}
+std::uint64_t custom_test_wide_spill(
+    int a, int b, int c, int d, int e, int f, int g, int h, int i,
+    std::uint64_t wide, int j) {
+    return wide + static_cast<std::uint64_t>(
+        a + b + c + d + e + f + g + h + i + j);
+}
+int custom_test_original(int a, int b) {
+    return psprecomp::patch::call_original<int>(a, b) + 10;
+}
+int ghidra_call_total{};
+void FUN_00053ba8(int param_1, int param_2) {
+    ghidra_call_total = param_1 + param_2;
+}
+bool dax_initialized{};
+void DaxRenderWorld_Initialize() {
+    dax_initialized = true;
+}
+int initializer_calls{};
+void patch_test_initializer() {
+    ++initializer_calls;
+}
+
+RECOMP_PATCH_FUNCTION(0x08801000U, custom_test_add);
+RECOMP_PATCH_FUNCTION(0x08801020U, custom_test_calc);
+RECOMP_PATCH_FUNCTION(0x08801040U, custom_test_u64);
+RECOMP_PATCH_FUNCTION(0x08801060U, custom_test_nine_ints);
+RECOMP_PATCH_FUNCTION(0x08801080U, custom_test_nine_floats);
+RECOMP_PATCH_FUNCTION(0x088010a0U, custom_test_double);
+RECOMP_PATCH_FUNCTION(0x088010c0U, custom_test_pointer);
+RECOMP_PATCH_FUNCTION(0x088010e0U, custom_test_mixed);
+RECOMP_PATCH_FUNCTION(0x08801100U, custom_test_wide_spill);
+RECOMP_PATCH_FUNCTION(0x08803040U, custom_test_original);
+RECOMP_PATCH_GHIDRA(FUN_00053ba8);
+RECOMP_PATCH_FUNCTION_BY_NAME("DaxRenderWorld_Initialize",
+                              DaxRenderWorld_Initialize);
+RECOMP_PATCH_INITIALIZER(patch_test_initializer);
 
 constexpr std::uint32_t vector_word(std::uint32_t base, int size,
                                     std::uint32_t vd, std::uint32_t vs,
@@ -387,4 +500,275 @@ int main() {
           0x08800001U);
     CHECK(psprecomp::detail::read_u32(repeated_relocated.data(), 32) ==
           0x08800002U);
+
+    // Patch system verification
+    {
+        alignas(16) std::array<std::uint8_t, 1024> ram{};
+        psprecomp::State state;
+        state.memory = ram.data();
+        state.memory_size = ram.size();
+        state.memory_base = 0x08800000U;
+
+        // 1. Integer function replacement
+        const auto* patch_add = psprecomp::patch::find_patch(0x08801000U);
+        CHECK(patch_add != nullptr);
+        state.gpr[4] = 15;
+        state.gpr[5] = 25;
+        state.gpr[31] = 0x08809999U;
+        CHECK(patch_add->hook(state));
+        CHECK(state.gpr[2] == 50);
+        CHECK(state.pc == 0x08809999U);
+
+        // 2. Float function replacement
+        const auto* patch_calc = psprecomp::patch::find_patch(0x08801020U);
+        CHECK(patch_calc != nullptr);
+        psprecomp::set_f32(state, 12, 3.0f);
+        psprecomp::set_f32(state, 13, 4.0f);
+        state.gpr[31] = 0x08809999U;
+        CHECK(patch_calc->hook(state));
+        CHECK(psprecomp::f32(state, 0) == 13.5f);
+        CHECK(state.pc == 0x08809999U);
+
+        // 3. 64-bit int replacement
+        const auto* patch_u64 = psprecomp::patch::find_patch(0x08801040U);
+        CHECK(patch_u64 != nullptr);
+        state.gpr[4] = 0x00000005U;
+        state.gpr[5] = 0x00000001U; // 0x100000005
+        state.gpr[6] = 10;
+        state.gpr[31] = 0x08809999U;
+        CHECK(patch_u64->hook(state));
+        CHECK(state.gpr[2] == 0x0000000fU);
+        CHECK(state.gpr[3] == 0x00000001U);
+
+        // 4. Memory helper functions
+        psprecomp::patch::write_guest<std::uint32_t>(state, 0x08800100U, 0xdeadbeefU);
+        CHECK(psprecomp::patch::read_guest<std::uint32_t>(state, 0x08800100U) == 0xdeadbeefU);
+        psprecomp::patch::write_guest<float>(state, 0x08800104U, 123.456f);
+        CHECK(psprecomp::patch::read_guest<float>(state, 0x08800104U) == 123.456f);
+
+        // 5. Calling game functions with typed arguments
+        psprecomp::patch::StateGuard guard(state);
+        const auto mul_result = psprecomp::patch::call_game_function<int>(0x08803000U, 7, 8);
+        CHECK(mul_result == 56);
+
+        // 6. PSP EABI uses eight integer and eight float argument registers.
+        state.gpr[29] = 0x08800300U;
+        for (std::uint32_t index = 0; index < 8; ++index) {
+            state.gpr[4 + index] = index + 1U;
+        }
+        psprecomp::store32(state, state.gpr[29], 9U);
+        state.gpr[31] = 0x08809999U;
+        const auto* patch_nine_ints =
+            psprecomp::patch::find_patch(state, 0x08801060U);
+        CHECK(patch_nine_ints != nullptr);
+        CHECK(psprecomp::patch::invoke_patch(
+            *patch_nine_ints, state, 0x08801060U));
+        CHECK(state.gpr[2] == 285U);
+
+        for (std::uint32_t index = 0; index < 8; ++index) {
+            psprecomp::set_f32(state, 12U + index,
+                               static_cast<float>(index + 1U));
+        }
+        psprecomp::patch::write_guest<float>(state, state.gpr[29], 9.0f);
+        state.gpr[31] = 0x08809999U;
+        const auto* patch_nine_floats =
+            psprecomp::patch::find_patch(state, 0x08801080U);
+        CHECK(patch_nine_floats != nullptr);
+        CHECK(psprecomp::patch::invoke_patch(
+            *patch_nine_floats, state, 0x08801080U));
+        CHECK(psprecomp::f32(state, 0) == 45.0f);
+
+        // 7. PSP doubles are passed and returned in aligned GPR pairs.
+        const auto double_bits = psprecomp::patch::detail::to_wide_word(2.5);
+        state.gpr[4] = static_cast<std::uint32_t>(double_bits);
+        state.gpr[5] = static_cast<std::uint32_t>(double_bits >> 32U);
+        state.gpr[6] = 4U;
+        state.gpr[31] = 0x08809999U;
+        const auto* patch_double =
+            psprecomp::patch::find_patch(state, 0x088010a0U);
+        CHECK(patch_double != nullptr);
+        CHECK(psprecomp::patch::invoke_patch(
+            *patch_double, state, 0x088010a0U));
+        const auto returned_double =
+            psprecomp::patch::detail::from_wide_word<double>(
+                static_cast<std::uint64_t>(state.gpr[2]) |
+                (static_cast<std::uint64_t>(state.gpr[3]) << 32U));
+        CHECK(returned_double == 6.5);
+
+        // Pointer parameters are translated between 32-bit guest addresses
+        // and native pointers, including pointer return values.
+        psprecomp::store32(state, 0x08800120U, 37U);
+        state.gpr[4] = 0x08800120U;
+        state.gpr[5] = 5U;
+        state.gpr[31] = 0x08809999U;
+        const auto* patch_pointer =
+            psprecomp::patch::find_patch(state, 0x088010c0U);
+        CHECK(patch_pointer != nullptr);
+        CHECK(psprecomp::patch::invoke_patch(
+            *patch_pointer, state, 0x088010c0U));
+        CHECK(psprecomp::load32(state, 0x08800120U) == 42U);
+        CHECK(state.gpr[2] == 0x08800120U);
+
+        // The same pointer translation applies to outbound typed calls.
+        {
+            psprecomp::patch::StateGuard pointer_guard(state);
+            auto* const host_value =
+                reinterpret_cast<int*>(ram.data() + 0x120U);
+            auto* const returned = psprecomp::patch::call_game_function<int*>(
+                0x08803060U, host_value, 8);
+            CHECK(returned == host_value);
+            CHECK(psprecomp::load32(state, 0x08800120U) == 50U);
+
+            int unmapped_host_value{};
+            CHECK(psprecomp::patch::call_game_function<int>(
+                      0x08803000U, &unmapped_host_value) == 0);
+            CHECK(psprecomp::patch::last_call_error() ==
+                  psprecomp::patch::CallError::unmapped_pointer);
+
+            state.stop_reason = psprecomp::StopReason::running;
+            CHECK(psprecomp::patch::call_game_function<int*>(
+                      0x08803080U) == nullptr);
+            CHECK(psprecomp::patch::last_call_error() ==
+                  psprecomp::patch::CallError::unmapped_pointer);
+            CHECK(state.stop_reason == psprecomp::StopReason::memory_fault);
+            state.stop_reason = psprecomp::StopReason::running;
+            state.fault_address = 0;
+            state.fault_pc = 0;
+        }
+
+        // Invalid guest pointers stop before the replacement can dereference
+        // them and are reported as guest memory faults.
+        state.stop_reason = psprecomp::StopReason::running;
+        state.gpr[4] = 0x09900000U;
+        state.gpr[5] = 1U;
+        CHECK(psprecomp::patch::invoke_patch(
+            *patch_pointer, state, 0x088010c0U));
+        CHECK(state.stop_reason == psprecomp::StopReason::memory_fault);
+        CHECK(state.fault_address == 0x09900000U);
+        state.stop_reason = psprecomp::StopReason::running;
+        state.fault_address = 0;
+        state.fault_pc = 0;
+
+        // Integer and float register banks spill into one ordered stack area.
+        for (std::uint32_t index = 0; index < 8; ++index) {
+            state.gpr[4U + index] = index + 1U;
+            psprecomp::set_f32(state, 12U + index,
+                               static_cast<float>(index + 1U));
+        }
+        psprecomp::store32(state, state.gpr[29], 9U);
+        psprecomp::patch::write_guest<float>(
+            state, state.gpr[29] + 4U, 9.0F);
+        state.gpr[31] = 0x08809999U;
+        const auto* patch_mixed =
+            psprecomp::patch::find_patch(state, 0x088010e0U);
+        CHECK(patch_mixed != nullptr);
+        CHECK(psprecomp::patch::invoke_patch(
+            *patch_mixed, state, 0x088010e0U));
+        CHECK(psprecomp::f32(state, 0) == 90.0F);
+
+        // A spilled 64-bit argument starts on an aligned stack pair. The
+        // compiler leaves stack word 1 unused after the ninth integer.
+        for (std::uint32_t index = 0; index < 8; ++index)
+            state.gpr[4U + index] = index + 1U;
+        constexpr std::uint64_t spilled_wide = 0x1122334455667788ULL;
+        psprecomp::store32(state, state.gpr[29], 9U);
+        psprecomp::store32(state, state.gpr[29] + 4U, 0xdeadbeefU);
+        psprecomp::store32(state, state.gpr[29] + 8U,
+                          static_cast<std::uint32_t>(spilled_wide));
+        psprecomp::store32(state, state.gpr[29] + 12U,
+                          static_cast<std::uint32_t>(spilled_wide >> 32U));
+        psprecomp::store32(state, state.gpr[29] + 16U, 10U);
+        state.gpr[31] = 0x08809999U;
+        const auto* patch_wide_spill =
+            psprecomp::patch::find_patch(state, 0x08801100U);
+        CHECK(patch_wide_spill != nullptr);
+        CHECK(psprecomp::patch::invoke_patch(
+            *patch_wide_spill, state, 0x08801100U));
+        const auto wide_spill_result =
+            static_cast<std::uint64_t>(state.gpr[2]) |
+            (static_cast<std::uint64_t>(state.gpr[3]) << 32U);
+        CHECK(wide_spill_result == spilled_wide + 55U);
+
+        // 8. Ghidra FUN_ names resolve as offsets; descriptive names use the
+        // generated code-map symbol passed by the dispatcher.
+        const auto* ghidra_patch = psprecomp::patch::find_patch(
+            state, state.memory_base + 0x00053ba8U);
+        CHECK(ghidra_patch != nullptr);
+        state.gpr[4] = 12U;
+        state.gpr[5] = 30U;
+        state.gpr[31] = 0x08809999U;
+        CHECK(psprecomp::patch::invoke_patch(
+            *ghidra_patch, state, state.memory_base + 0x00053ba8U));
+        CHECK(ghidra_call_total == 42);
+
+        const auto* named_patch = psprecomp::patch::find_patch(
+            state, 0x08802000U, "DaxRenderWorld_Initialize");
+        CHECK(named_patch != nullptr);
+        state.gpr[31] = 0x08809999U;
+        CHECK(psprecomp::patch::invoke_patch(
+            *named_patch, state, 0x08802000U));
+        CHECK(dax_initialized);
+
+        // 9. Typed globals accept image offsets and can be overwritten by a
+        // startup initializer or any active hook.
+        psprecomp::patch::GameGlobal<std::uint32_t> test_global(
+            psprecomp::patch::image_offset(0x100U));
+        test_global = 0xcafebabeU;
+        CHECK(test_global.get() == 0xcafebabeU);
+        CHECK(test_global.pointer() ==
+              reinterpret_cast<std::uint32_t*>(ram.data() + 0x100U));
+        psprecomp::patch::GameGlobal<int*> test_pointer_global(
+            psprecomp::patch::image_offset(0x130U));
+        auto* const mapped_value =
+            reinterpret_cast<int*>(ram.data() + 0x120U);
+        test_pointer_global = mapped_value;
+        CHECK(psprecomp::load32(state, 0x08800130U) == 0x08800120U);
+        CHECK(test_pointer_global.get() == mapped_value);
+        CHECK(psprecomp::patch::run_initializers(state));
+        CHECK(initializer_calls == 1);
+
+        // 10. Outbound calls use the same eight-register ABI and reserve a
+        // temporary outgoing stack area for spilled arguments.
+        state.gpr[29] = 0x088003c0U;
+        const auto sum_nine = psprecomp::patch::call_game_function<int>(
+            0x08803020U, 1, 2, 3, 4, 5, 6, 7, 8, 9);
+        CHECK(sum_nine == 45);
+        CHECK(state.gpr[29] == 0x088003c0U);
+        CHECK(psprecomp::patch::last_call_error() ==
+              psprecomp::patch::CallError::none);
+
+        // 11. A replacement can call the translated original at the same
+        // address without recursively entering itself.
+        const auto hooked_original = psprecomp::patch::call_game_function<int>(
+            0x08803040U, 7, 8);
+        CHECK(hooked_original == 25);
+    }
+
+    // Active patch state is isolated between concurrently executing guest
+    // threads.
+    {
+        psprecomp::State first;
+        psprecomp::State second;
+        std::atomic<int> ready{};
+        std::atomic<bool> first_ok{};
+        std::atomic<bool> second_ok{};
+        auto check_thread_state = [&](psprecomp::State& state,
+                                      std::atomic<bool>& result) {
+            psprecomp::patch::StateGuard guard(state);
+            ready.fetch_add(1, std::memory_order_release);
+            while (ready.load(std::memory_order_acquire) != 2) {
+                std::this_thread::yield();
+            }
+            result.store(psprecomp::patch::active_state() == &state,
+                         std::memory_order_release);
+        };
+        std::thread first_thread(check_thread_state, std::ref(first),
+                                 std::ref(first_ok));
+        std::thread second_thread(check_thread_state, std::ref(second),
+                                  std::ref(second_ok));
+        first_thread.join();
+        second_thread.join();
+        CHECK(first_ok.load(std::memory_order_acquire));
+        CHECK(second_ok.load(std::memory_order_acquire));
+    }
 }

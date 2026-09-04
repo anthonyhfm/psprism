@@ -175,19 +175,29 @@ void execute_ge_list(Implementation& implementation, psprecomp::State& state,
             (graphics.commands[0xd5U] & 0x3ffU) + 1U;
         const auto scissor_bottom =
             ((graphics.commands[0xd5U] >> 10U) & 0x3ffU) + 1U;
+        constexpr std::uint32_t display_width = 480U;
+        constexpr std::uint32_t display_height = 272U;
+        // Small-stride framebuffers are normally texture-sized render
+        // targets.  Games can leave the display scissor active while
+        // clearing them, so the scissor must not inflate a 64x64 target to
+        // 480x272 (Daxter's character-shadow mask does exactly this).
+        const auto offscreen_target =
+            framebuffer_stride != 0U && framebuffer_stride < display_width;
         const auto render_target_width = std::clamp(
-            std::max(framebuffer_stride, scissor_right), 1U, 1024U);
+            offscreen_target ? framebuffer_stride
+                             : std::max(framebuffer_stride, scissor_right),
+            1U, 1024U);
         // A narrow scissor clips draws inside a display framebuffer; it does
         // not redefine that framebuffer's coordinate system.  Keep standard
         // PSP display targets at least 272 pixels tall while still allowing
         // genuinely smaller off-screen targets.
-        constexpr std::uint32_t display_width = 480U;
-        constexpr std::uint32_t display_height = 272U;
-        const auto minimum_target_height =
-            framebuffer_stride >= display_width ? display_height : 1U;
-        const auto render_target_height =
-            std::clamp(std::max(scissor_bottom, minimum_target_height), 1U,
-                       1024U);
+        const auto render_target_height = offscreen_target
+                                              ? std::clamp(scissor_bottom, 1U,
+                                                           framebuffer_stride)
+                                              : std::clamp(
+                                                    std::max(scissor_bottom,
+                                                             display_height),
+                                                    1U, 1024U);
         if (layout.stride != 0 && primitive_type <= 6U) {
           const auto index_size = ge::component_size(index_type);
           const auto index_byte_count =
@@ -386,7 +396,12 @@ void execute_ge_list(Implementation& implementation, psprecomp::State& state,
                              (static_cast<float>(render_target_height) *
                               0.5F)) *
                         clip_w;
-                    output.position[2] = screen_z / 65535.0F * clip_w;
+                    // PSP viewport depth is clamped to its 16-bit range.
+                    // Floating-point reconstruction can otherwise put values
+                    // just beyond the far plane (for example 1.00001), which
+                    // Metal clips even when the PSP depth test is disabled.
+                    output.position[2] =
+                        host::normalized_viewport_depth(screen_z) * clip_w;
                   }
                 }
                 float model_normal[3]{0.0F, 0.0F, 1.0F};

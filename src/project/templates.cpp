@@ -98,19 +98,60 @@ namespace psprecomp::project_detail
 	{
 		std::ostringstream out;
 		out << "PPSSPP ?= ppsspp\n"
-			   "CMAKE ?= cmake\n"
-			   "CXX ?= c++\n"
+			   "CXX ?= clang++\n"
+			   "OBJCXX ?= clang++\n"
 			   "PSP_RECOMPILE_MODE := "
 			<< psp_recompile_mode
 			<< "\n"
 			   "MACOS_BUILD_TYPE ?= Release\n"
-			   "MACOS_RUN_ARGS ?=\n"
-			   "\n"
-			   ".PHONY: all psp-recompile-check psp-binary psp psp-run macos "
-			   "macos-debug macos-run "
-			   "clean rebuild "
-			   "ppsspp "
-			   "disc-tree help\n\n"
+			   "MACOS_RUN_ARGS ?=\n\n"
+			   "MACOS_APP_DIR := build/macos/"
+			<< config.project_name
+			<< ".app\n"
+			   "MACOS_BIN_DIR := $(MACOS_APP_DIR)/Contents/MacOS\n"
+			   "MACOS_RES_DIR := $(MACOS_APP_DIR)/Contents/Resources\n"
+			   "MACOS_OBJ_DIR := build/macos/obj\n\n"
+			   "ifeq ($(MACOS_BUILD_TYPE),Debug)\n"
+			   "  MACOS_CXXFLAGS := -std=c++20 -g -O0 -Wno-tautological-compare\n"
+			   "else\n"
+			   "  MACOS_CXXFLAGS := -std=c++20 -O3 -Wno-tautological-compare\n"
+			   "endif\n\n"
+			   "# Auto-detect multimedia dependencies\n"
+			   "FFMPEG_PREFIX ?= $(shell if [ -d /opt/homebrew/opt/ffmpeg ]; then echo /opt/homebrew/opt/ffmpeg; elif [ -d /usr/local/opt/ffmpeg ]; then echo /usr/local/opt/ffmpeg; fi)\n"
+			   "ifneq ($(FFMPEG_PREFIX),)\n"
+			   "  FFMPEG_CFLAGS := -DREFRACT_HAS_FFMPEG=1 -I$(FFMPEG_PREFIX)/include\n"
+			   "  FFMPEG_LIBS := -L$(FFMPEG_PREFIX)/lib -lavcodec -lavformat -lavutil -lswscale\n"
+			   "endif\n\n"
+			   "QT_PREFIX ?= $(shell if [ -d /opt/homebrew/opt/qtbase ]; then echo /opt/homebrew/opt/qtbase; elif [ -d /usr/local/opt/qtbase ]; then echo /usr/local/opt/qtbase; fi)\n"
+			   "ifneq ($(QT_PREFIX),)\n"
+			   "  QT_CFLAGS := -F$(QT_PREFIX)/lib -I$(QT_PREFIX)/lib/QtWidgets.framework/Headers -I$(QT_PREFIX)/lib/QtCore.framework/Headers -I$(QT_PREFIX)/lib/QtGui.framework/Headers\n"
+			   "  QT_DEFS := -DREFRACT_HAS_DESKTOP_DIALOGS=1 -DREFRACT_QT_PLATFORM_PLUGIN_PATH=\\\"$(QT_PREFIX)/share/qt/plugins/platforms\\\"\n"
+			   "  QT_LIBS := -L$(QT_PREFIX)/lib -F$(QT_PREFIX)/lib -framework QtWidgets -framework QtGui -framework QtCore\n"
+			   "  REFRACT_DIALOG_SRCS := refract/src/host/desktop_dialogs.cpp\n"
+			   "endif\n\n"
+			   "REFRACT_SRCS := \\\n"
+			   "  refract/src/runtime.cpp \\\n"
+			   "  refract/src/utility_data.cpp \\\n"
+			   "  refract/src/psp_sdk_bridge.cpp \\\n"
+			   "  refract/src/host/audio_engine.cpp \\\n"
+			   "  refract/src/host/macos.cpp \\\n"
+			   "  refract/src/stubs/mpeg/media_engine.cpp \\\n"
+			   "  refract/third_party/at3_standalone/atrac.cpp \\\n"
+			   "  refract/third_party/at3_standalone/atrac3.cpp \\\n"
+			   "  refract/third_party/at3_standalone/atrac3plus.cpp \\\n"
+			   "  refract/third_party/at3_standalone/atrac3plusdec.cpp \\\n"
+			   "  refract/third_party/at3_standalone/atrac3plusdsp.cpp \\\n"
+			   "  refract/third_party/at3_standalone/get_bits.cpp \\\n"
+			   "  refract/third_party/at3_standalone/compat.cpp \\\n"
+			   "  refract/third_party/at3_standalone/fft.cpp \\\n"
+			   "  refract/third_party/at3_standalone/mem.cpp \\\n"
+			   "  $(REFRACT_DIALOG_SRCS)\n\n"
+			   "GENERATED_SRCS := $(wildcard src/generated/func_*.cpp src/generated/shard_*.cpp) src/generated/dispatch.cpp\n"
+			   "PATCH_SRCS := $(wildcard patches/*.cpp)\n"
+			   "PLATFORM_SRCS := platform/macos/main.cpp platform/macos/platform.cpp\n\n"
+			   "MACOS_INCLUDES := -I. -Iinclude -Isrc/generated -Ipatches -Irefract/include -Irefract/include/pspsdk -Irefract/src -Irefract/third_party/at3_standalone $(FFMPEG_CFLAGS) $(QT_CFLAGS) $(QT_DEFS)\n\n"
+			   "MACOS_LIBS := -framework AppKit -framework AudioToolbox -framework GameController -framework Metal -framework MetalKit $(FFMPEG_LIBS) $(QT_LIBS)\n\n"
+			   ".PHONY: all psp-recompile-check psp-binary psp psp-run macos macos-debug macos-run clean rebuild ppsspp disc-tree help\n\n"
 			   "all: psp\n\n"
 			   "psp-recompile-check:\n"
 			   "\t@echo \"PSP recompile mode: $(PSP_RECOMPILE_MODE)\"\n\n"
@@ -145,23 +186,34 @@ namespace psprecomp::project_detail
 				   "psp-run: psp\n"
 				   "\t$(PPSSPP) \"$(CURDIR)/src/generated/EBOOT.PBP\"\n\n";
 		}
-		out << "macos:\n"
-			   "\t$(CMAKE) -S . -B build/macos "
-			   "-DCMAKE_BUILD_TYPE=$(MACOS_BUILD_TYPE)\n"
-			   "\t$(CMAKE) --build build/macos -j\n\n"
+		out << "macos: $(MACOS_BIN_DIR)/" << config.project_name << "\n\n"
+			   "$(MACOS_BIN_DIR)/" << config.project_name << ": $(GENERATED_SRCS) $(PATCH_SRCS) $(PLATFORM_SRCS) $(REFRACT_SRCS) refract/src/host/macos_frontend.mm\n"
+			   "\t@mkdir -p $(MACOS_BIN_DIR) $(MACOS_RES_DIR) $(MACOS_OBJ_DIR)\n"
+			   "\t@echo \"Compiling native macOS application (" << config.project_name << ")...\"\n"
+			   "\t@$(OBJCXX) $(MACOS_CXXFLAGS) -fobjc-arc $(MACOS_INCLUDES) -c refract/src/host/macos_frontend.mm -o $(MACOS_OBJ_DIR)/macos_frontend.o\n"
+			   "\t@$(CXX) $(MACOS_CXXFLAGS) $(MACOS_INCLUDES) $(GENERATED_SRCS) $(PATCH_SRCS) $(PLATFORM_SRCS) $(REFRACT_SRCS) $(MACOS_OBJ_DIR)/macos_frontend.o $(MACOS_LIBS) -o $@\n"
+			   "\t@cp -f src/generated/guest_image.bin src/generated/relocations.bin $(MACOS_RES_DIR)/ 2>/dev/null || true\n"
+			   "\t@printf '<?xml version=\"1.0\" encoding=\"UTF-8\"?>\\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\\n<plist version=\"1.0\">\\n<dict>\\n  <key>CFBundleExecutable</key>\\n  <string>"
+			<< config.project_name
+			<< "</string>\\n  <key>CFBundleIdentifier</key>\\n  <string>dev.psprecomp."
+			<< config.project_name
+			<< "</string>\\n  <key>CFBundleName</key>\\n  <string>"
+			<< toml_string(config.display_name)
+			<< "</string>\\n  <key>CFBundlePackageType</key>\\n  <string>APPL</string>\\n</dict>\\n</plist>\\n' > $(MACOS_APP_DIR)/Contents/Info.plist\n"
+			   "\t@echo \"Built $(MACOS_APP_DIR)\"\n\n"
 			   "macos-debug:\n"
 			   "\t$(MAKE) macos MACOS_BUILD_TYPE=Debug\n\n"
 			   "macos-run: macos\n"
-			   "\tREFRACT_DISC_ROOT=\"$(CURDIR)/disc\" "
-			   "REFRACT_DISC_IMAGE=\"$(CURDIR)/original/disc.iso\" "
-			   "REFRACT_WRITABLE_ROOT=\"$(CURDIR)/.refract/ms0\" "
-			   "\"$(CURDIR)/build/macos/"
-			<< config.project_name << ".app/Contents/MacOS/" << config.project_name
+			   "\tREFRACT_DISC_ROOT=\"$(CURDIR)/disc\" \\\n"
+			   "\tREFRACT_DISC_IMAGE=\"$(CURDIR)/original/disc.iso\" \\\n"
+			   "\tREFRACT_WRITABLE_ROOT=\"$(CURDIR)/.refract/ms0\" \\\n"
+			   "\t\"$(CURDIR)/$(MACOS_BIN_DIR)/"
+			<< config.project_name
 			<< "\" $(MACOS_RUN_ARGS)\n\n"
 			   "ppsspp: psp-run\n\n"
 			   "clean:\n"
 			   "\t$(MAKE) -C src/generated clean\n"
-			   "\t$(CMAKE) -E rm -rf build/macos\n\n"
+			   "\trm -rf build/macos dist .psprecomp\n\n"
 			   "rebuild: clean all\n\n";
 		if (has_disc)
 		{
@@ -195,76 +247,85 @@ namespace psprecomp::project_detail
 		return out.str();
 	}
 
-	//
-	// Source for a small, dependency-free host tool that rebuilds the PSP disc
-	// image while preserving the logical block address (LBA) of every file that
-	// is not being replaced.
-	//
-	// A naive from-scratch ISO repack (mkisofs/xorriso/hdiutil on the extracted
-	// tree) lays every file out again using its own ordering rules. Several PSP
-	// games (observed with Need for Speed: Most Wanted) resolve large assets
-	// through raw sector addressing baked into their own code
-	// (`disc0:/sce_lbnXXXXX_sizeYYY`), bypassing the filesystem entirely. A
-	// repack silently relocates that data, so those games load garbage/corrupted
-	// modules instead of the real ones and crash or hang instead of booting.
-	// Copying the original image and only relocating the handful of files that
-	// changed (patching just their directory record) keeps every untouched
-	// asset's LBA byte-identical to the retail disc.
-
-	std::string macos_cmake(const ExportConfig &config)
+	std::string patch_template_source()
 	{
-		std::ostringstream out;
-		out << "cmake_minimum_required(VERSION 3.20)\n"
-			   "project("
-			<< config.project_name
-			<< " LANGUAGES CXX)\n\n"
-			   "set(CMAKE_CXX_STANDARD 20)\n"
-			   "set(CMAKE_CXX_STANDARD_REQUIRED ON)\n"
-			   "set(CMAKE_CXX_EXTENSIONS OFF)\n"
-			   "include(CheckIPOSupported)\n"
-			   "check_ipo_supported(RESULT PSPRECOMP_IPO_SUPPORTED)\n"
-			   "include(src/generated/generated_sources.cmake)\n\n"
-			   "add_subdirectory(refract)\n\n"
-			   "add_executable("
-			<< config.project_name
-			<< " MACOSX_BUNDLE\n"
-			   "  ${PSPRECOMP_GENERATED_SOURCES}\n"
-			   "  platform/macos/main.cpp\n"
-			   "  platform/macos/platform.cpp\n"
-			   "  src/generated/guest_image.bin\n"
-			   "  src/generated/relocations.bin\n"
-			   ")\n"
-			   "target_include_directories("
-			<< config.project_name
-			<< " PRIVATE . include src/generated)\n"
-			   "target_link_libraries("
-			<< config.project_name
-			<< " PRIVATE refract)\n"
-			   "target_compile_options("
-			<< config.project_name
-			<< " PRIVATE -Wno-tautological-compare)\n"
-			   "if(PSPRECOMP_IPO_SUPPORTED)\n"
-			   "  set_property(TARGET refract PROPERTY "
-			   "INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)\n"
-			   "  set_property(TARGET "
-			<< config.project_name
-			<< " PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)\n"
-			   "endif()\n"
-			   "set_source_files_properties(\n"
-			   "  src/generated/guest_image.bin src/generated/relocations.bin\n"
-			   "  PROPERTIES MACOSX_PACKAGE_LOCATION Resources\n"
-			   ")\n"
-			   "set_target_properties("
-			<< config.project_name
-			<< " PROPERTIES\n"
-			   "  MACOSX_BUNDLE_BUNDLE_NAME "
-			<< toml_string(config.display_name)
-			<< "\n"
-			   "  MACOSX_BUNDLE_GUI_IDENTIFIER \"dev.psprecomp."
-			<< config.project_name
-			<< "\"\n"
-			   ")\n";
-		return out.str();
+		return
+			"// PSP game-function patches\n"
+			"//\n"
+			"// Write C++ replacements and reverse-engineered game declarations here.\n"
+			"// Any .cpp files in patches/ are compiled and linked for PSP and macOS.\n"
+			"// See patches/README.md for detailed documentation and examples.\n"
+			"//\n"
+			"#include <psprecomp/patch.hpp>\n\n"
+			"namespace {\n\n"
+			"// A default Ghidra name carries its image-relative address.\n"
+			"// void FUN_00053ba8(int param_1, int param_2) {\n"
+			"//     // This body replaces the original game function.\n"
+			"// }\n"
+			"// RECOMP_PATCH_GHIDRA(FUN_00053ba8);\n\n"
+			"// Descriptive names resolve through symbols in the project's code map.\n"
+			"// void DaxRenderWorld_Initialize() {\n"
+			"// }\n"
+			"// RECOMP_PATCH_GHIDRA(DaxRenderWorld_Initialize);\n\n"
+			"} // namespace\n";
+	}
+
+	std::string patch_tutorial_readme()
+	{
+		return
+			"# PSP Game Patching Framework\n\n"
+			"All `.cpp` files in `patches/` are automatically compiled into both target builds:\n"
+			"- PSP PRX / EBOOT (`make psp`)\n"
+			"- Native macOS executable (`make macos`)\n\n"
+			"## Patch a function copied from Ghidra\n\n"
+			"Keep the return type and parameters from the recovered prototype. A `FUN_` name contains its own image offset:\n\n"
+			"```cpp\n"
+			"#include <psprecomp/patch.hpp>\n\n"
+			"void FUN_00053ba8(int param_1, int param_2) {\n"
+			"    // replacement\n"
+			"}\n\n"
+			"RECOMP_PATCH_GHIDRA(FUN_00053ba8);\n"
+			"```\n\n"
+			"For a descriptive name, export that symbol in the code map and register the same name:\n\n"
+			"```cpp\n"
+			"void DaxRenderWorld_Initialize() {\n"
+			"    // replacement\n"
+			"}\n\n"
+			"RECOMP_PATCH_GHIDRA(DaxRenderWorld_Initialize);\n"
+			"```\n\n"
+			"You can always register explicitly. Use `image_offset()` for relocatable PRXs and `absolute_address()` for fixed PSP addresses:\n\n"
+			"```cpp\n"
+			"int calculate_damage(int type, int amount) { return amount * 3; }\n"
+			"RECOMP_PATCH_FUNCTION(psprecomp::patch::image_offset(0x4200), calculate_damage);\n"
+			"```\n\n"
+			"The typed bridge follows the PSP EABI: eight integer registers (`$a0`-`$a3`, `$t0`-`$t3`), eight float registers (`$f12`-`$f19`), aligned 64-bit values, stack arguments, and the correct integer/float/double return registers. Data pointers are translated between guest and host memory. Represent guest callback/function pointers as `uint32_t` addresses.\n\n"
+			"## Call reverse-engineered game code and the original\n\n"
+			"Declare a strongly typed callable. The parameter list contains types only:\n\n"
+			"```cpp\n"
+			"DEFINE_GAME_FUNCTION(original_FUN_00053ba8,\n"
+			"                     psprecomp::patch::image_offset(0x53ba8),\n"
+			"                     void, int, int);\n\n"
+			"void FUN_00053ba8(int param_1, int param_2) {\n"
+			"    // Bypasses this hook and runs the translated original until it returns.\n"
+			"    original_FUN_00053ba8.original(param_1, param_2);\n"
+			"}\n\n"
+			"RECOMP_PATCH_GHIDRA(FUN_00053ba8);\n"
+			"```\n\n"
+			"Calling `original_FUN_00053ba8(...)` normally honors patches. Calling `.original(...)` bypasses the patch at that address. Inside any replacement, `psprecomp::patch::call_original<Return>(args...)` is the shorthand for the currently replaced function. Check `last_call_error()` when a defensive failure path matters; unmapped non-null pointers are rejected instead of being passed as null.\n\n"
+			"## Globals and startup overwrites\n\n"
+			"```cpp\n"
+			"DEFINE_GAME_GLOBAL(g_player_health,\n"
+			"                   psprecomp::patch::image_offset(0x195010),\n"
+			"                   std::uint32_t);\n\n"
+			"void apply_initial_values() {\n"
+			"    g_player_health = 999;\n"
+			"}\n"
+			"RECOMP_PATCH_INITIALIZER(apply_initial_values);\n"
+			"```\n\n"
+			"A `GameGlobal<T>` supports `get()`, `set()`, assignment, and `pointer()`. For `GameGlobal<T*>`, use `get()`/`set()`; `pointer()` cannot expose a 32-bit PSP pointer slot as a native pointer-to-pointer. Initializers run after the guest image is relocated and imports are patched. Low-level access remains available through `read_guest<T>`, `write_guest<T>`, `guest_to_host`, and `host_to_guest`.\n\n"
+			"## Raw hooks\n\n"
+			"Use `RECOMP_PATCH_RAW(address, hook)` only when the recovered prototype is unknown and direct `State` register access is required. Set the result registers and `state.pc = state.gpr[31]` yourself. Typed hooks are safer for normal game functions.\n\n"
+			"Patches replace function entries. Full original calls and startup initializers require normal full-recompile mode; hybrid PSP overlay mode currently supports replacement hooks only.\n";
 	}
 
 } // namespace psprecomp::project_detail

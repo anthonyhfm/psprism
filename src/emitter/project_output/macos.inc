@@ -204,6 +204,7 @@
                "memory.size(), guest_base);\n"
                "  state.gpr[28] = psprecomp::platform::guest_gp_value();\n"
                "  if (!psprecomp::platform::patch_imports(state)) return 3;\n"
+               "  if (!psprecomp::patch::run_initializers(state)) return 4;\n"
                "  std::fprintf(stderr, "
                "\"[psprecomp:macos] entering module_start\\n\");\n"
                "  refract::Runtime::instance().execute_guest(state);\n"

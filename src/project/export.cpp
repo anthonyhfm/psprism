@@ -286,7 +286,9 @@ namespace psprecomp
 			write_text(staging / "Makefile",
 					   root_makefile(config, has_disc, info.executable_path,
 									 info.sfo_path, psp_recompile_mode));
-			write_text(staging / "CMakeLists.txt", macos_cmake(config));
+			std::filesystem::create_directories(staging / "patches");
+			write_text(staging / "patches" / "patches.cpp", patch_template_source());
+			write_text(staging / "patches" / "README.md", patch_tutorial_readme());
 			if (has_disc)
 			{
 				write_text(staging / "tools" / "iso_patch.cpp", iso_patch_tool_source());

@@ -2,6 +2,7 @@
 
 #include "ge/ge_cache.hpp"
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <atomic>
@@ -13,6 +14,10 @@
 namespace refract::host {
 
 constexpr std::uint32_t audio_master_clock_sample_rate = 44100U;
+
+constexpr float normalized_viewport_depth(float screen_depth) {
+  return std::clamp(screen_depth / 65535.0F, 0.0F, 1.0F);
+}
 
 struct AudioTelemetry {
   std::uint64_t submitted_frames{};

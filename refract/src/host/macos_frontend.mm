@@ -21,6 +21,7 @@
 #include <cstdio>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <vector>
 
 constexpr std::uint32_t psp_select = 0x000001U;
@@ -58,6 +59,39 @@ float render_target_geometry_scale(bool through_coordinates,
              : 1.0F;
 }
 
+struct RenderTargetAddressOffset {
+  std::uint32_t x{};
+  std::uint32_t y{};
+};
+
+std::optional<RenderTargetAddressOffset> render_target_address_offset(
+    std::uint32_t texture_address, std::uint32_t target_address,
+    std::uint32_t target_stride, std::size_t target_width,
+    std::size_t target_height, std::uint32_t target_format,
+    std::uint32_t texture_format) {
+  if (target_stride == 0U || target_format != texture_format ||
+      texture_address < target_address)
+    return std::nullopt;
+  const std::uint32_t bytes_per_pixel = target_format == 3U ? 4U : 2U;
+  const auto row_bytes = target_stride * bytes_per_pixel;
+  const auto byte_offset = texture_address - target_address;
+  const auto x_bytes = byte_offset % row_bytes;
+  if (x_bytes % bytes_per_pixel != 0U) return std::nullopt;
+  const RenderTargetAddressOffset result{x_bytes / bytes_per_pixel,
+                                         byte_offset / row_bytes};
+  if (result.x >= target_width || result.y >= target_height)
+    return std::nullopt;
+  return result;
+}
+
+std::uint64_t depth_target_cache_key(std::uint32_t depth_target_address,
+                                     std::uint32_t width,
+                                     std::uint32_t height) {
+  return (static_cast<std::uint64_t>(depth_target_address) << 32U) |
+         (static_cast<std::uint64_t>(width & 0xffffU) << 16U) |
+         (height & 0xffffU);
+}
+
 struct GeometryBatch {
   MTLPrimitiveType type;
   std::vector<refract::host::GeometryVertex> vertices;
@@ -80,7 +114,24 @@ struct FragmentState {
   std::uint32_t texture_alpha_used{1};
   std::uint32_t texture_color_double{};
   std::uint32_t texture_environment_color{};
+  std::uint32_t stencil_alpha_operation{};
+  std::uint32_t stencil_reference{};
 };
+
+std::uint8_t geometry_color_write_mask(
+    const refract::host::GeometryState& state) {
+  auto mask = state.color_write_mask;
+  if (state.render_target_format != 3U ||
+      (!state.stencil_test && !state.clear_stencil))
+    return mask;
+
+  const auto operation =
+      state.clear_stencil ? 2U : state.stencil_depth_pass;
+  if ((operation != 1U && operation != 2U) ||
+      state.stencil_write_mask != 0xffU)
+    mask &= static_cast<std::uint8_t>(~0x08U);
+  return mask;
+}
 
 MTLBlendFactor psp_blend_factor(std::uint32_t factor,
                                 std::uint32_t fixed_color, bool source) {
@@ -229,6 +280,7 @@ refract::desktop::DialogFrame current_dialog_frame();
 @property(nonatomic, strong) id<MTLRenderPipelineState> dialogPipeline;
 @property(nonatomic, strong) id<MTLRenderPipelineState> geometryPipeline;
 @property(nonatomic, strong) id<MTLRenderPipelineState> texturedGeometryPipeline;
+@property(nonatomic, strong) id<MTLRenderPipelineState> framebufferGeometryPipeline;
 @property(nonatomic, strong) id<MTLRenderPipelineState> blendedGeometryPipeline;
 @property(nonatomic, strong) id<MTLRenderPipelineState> blendedTexturedGeometryPipeline;
 @property(nonatomic, strong) id<MTLLibrary> shaderLibrary;
@@ -239,8 +291,12 @@ refract::desktop::DialogFrame current_dialog_frame();
 @property(nonatomic, strong) NSMutableDictionary<NSNumber*, id<MTLDepthStencilState>>* stencilStates;
 @property(nonatomic, strong) NSArray<id<MTLSamplerState>>* samplerStates;
 @property(nonatomic, strong) NSMutableDictionary<NSNumber*, id<MTLTexture>>* renderTargets;
+@property(nonatomic, strong) NSMutableDictionary<NSNumber*, NSNumber*>* renderTargetStrides;
+@property(nonatomic, strong) NSMutableDictionary<NSNumber*, NSNumber*>* renderTargetFormats;
+@property(nonatomic, strong) NSMutableDictionary<NSNumber*, NSNumber*>* renderTargetDepthAddresses;
 @property(nonatomic, strong) NSMutableDictionary<NSNumber*, id<MTLTexture>>* cpuFramebuffers;
 @property(nonatomic, strong) NSMutableDictionary<NSNumber*, id<MTLTexture>>* depthTargets;
+@property(nonatomic, strong) NSMutableDictionary<NSNumber*, id<MTLTexture>>* stencilTargetViews;
 @property(nonatomic, strong) NSMutableDictionary<NSString*, id<MTLTexture>>* uploadedTextures;
 @property(nonatomic, strong) NSMutableDictionary<NSString*, NSNumber*>* uploadedTextureHashes;
 - (id<MTLTexture>)uploadedTextureForBatch:(const GeometryBatch&)batch;
@@ -253,8 +309,12 @@ refract::desktop::DialogFrame current_dialog_frame();
   self.device = view.device;
   self.queue = [self.device newCommandQueue];
   self.renderTargets = [NSMutableDictionary dictionary];
+  self.renderTargetStrides = [NSMutableDictionary dictionary];
+  self.renderTargetFormats = [NSMutableDictionary dictionary];
+  self.renderTargetDepthAddresses = [NSMutableDictionary dictionary];
   self.cpuFramebuffers = [NSMutableDictionary dictionary];
   self.depthTargets = [NSMutableDictionary dictionary];
+  self.stencilTargetViews = [NSMutableDictionary dictionary];
   self.stencilStates = [NSMutableDictionary dictionary];
   self.uploadedTextures = [NSMutableDictionary dictionary];
   self.uploadedTextureHashes = [NSMutableDictionary dictionary];
@@ -312,6 +372,8 @@ refract::desktop::DialogFrame current_dialog_frame();
       uint texture_alpha_used;
       uint texture_color_double;
       uint texture_environment_color;
+      uint stencil_alpha_operation;
+      uint stencil_reference;
     };
     bool psprism_compare(uint value, uint reference, uint function) {
       switch (function) {
@@ -343,6 +405,10 @@ refract::desktop::DialogFrame current_dialog_frame();
       if (state.alpha_test != 0 &&
           !psprism_compare(alpha, reference, state.alpha_function))
         discard_fragment();
+      if (state.stencil_alpha_operation == 1)
+        color.a = 0.0;
+      else if (state.stencil_alpha_operation == 2)
+        color.a = float(state.stencil_reference) / 255.0;
       return color;
     }
     float4 psprism_texture_combine(float4 texture_color, float4 primary,
@@ -371,16 +437,17 @@ refract::desktop::DialogFrame current_dialog_frame();
     }
     vertex GeometryOut psprism_geometry_vertex(
         uint id [[vertex_id]], device const GeometryVertex* vertices [[buffer(0)]],
-        constant float2& texture_scale [[buffer(1)]],
+        constant float4& texture_transform [[buffer(1)]],
         constant float2& target_scale [[buffer(2)]]) {
       float4 position = vertices[id].position;
       position.x = position.x * target_scale.x +
                    position.w * (target_scale.x - 1.0);
       position.y = position.y * target_scale.y +
                    position.w * (1.0 - target_scale.y);
-      return {position, vertices[id].color,
-              float3(vertices[id].texture.xy * texture_scale,
-                     vertices[id].texture.z)};
+      float3 texture = vertices[id].texture;
+      texture.xy = texture.xy * texture_transform.xy +
+                   texture_transform.zw * texture.z;
+      return {position, vertices[id].color, texture};
     }
     fragment float4 psprism_geometry_fragment(
         GeometryOut in [[stage_in]], constant FragmentState& state [[buffer(1)]]) {
@@ -397,6 +464,19 @@ refract::desktop::DialogFrame current_dialog_frame();
           image.sample(texture_sampler, in.texture.xy / q), in.color, state);
       if (state.texture_color_double != 0)
         color.rgb *= 2.0;
+      return psprism_fragment_tests(color, state);
+    }
+    fragment float4 psprism_framebuffer_geometry_fragment(
+        GeometryOut in [[stage_in]], texture2d<float> image [[texture(0)]],
+        sampler texture_sampler [[sampler(0)]],
+        constant FragmentState& state [[buffer(1)]]) {
+      float q = in.texture.z >= 0.0
+                    ? max(in.texture.z, 0.000001)
+                    : min(in.texture.z, -0.000001);
+      float2 uv = in.texture.xy / q;
+      float4 texture_color = image.sample(texture_sampler, uv);
+      float4 color = psprism_texture_combine(texture_color, in.color, state);
+      if (state.texture_color_double != 0) color.rgb *= 2.0;
       return psprism_fragment_tests(color, state);
     }
   )METAL";
@@ -450,6 +530,12 @@ refract::desktop::DialogFrame current_dialog_frame();
       [self.device newRenderPipelineStateWithDescriptor:descriptor error:&error];
   if (self.texturedGeometryPipeline == nil)
     NSLog(@"psprism: Metal textured pipeline error: %@", error);
+  descriptor.fragmentFunction =
+      [library newFunctionWithName:@"psprism_framebuffer_geometry_fragment"];
+  self.framebufferGeometryPipeline =
+      [self.device newRenderPipelineStateWithDescriptor:descriptor error:&error];
+  if (self.framebufferGeometryPipeline == nil)
+    NSLog(@"psprism: Metal framebuffer pipeline error: %@", error);
   descriptor.colorAttachments[0].blendingEnabled = YES;
   descriptor.colorAttachments[0].sourceRGBBlendFactor =
       MTLBlendFactorSourceAlpha;
@@ -632,6 +718,7 @@ refract::desktop::DialogFrame current_dialog_frame();
 
 - (id<MTLRenderPipelineState>)blendPipelineForView:(MTKView*)view
                                            textured:(BOOL)textured
+                                         framebuffer:(BOOL)framebuffer
                                               state:(const refract::host::GeometryState&)state {
   const auto source_fixed_class = state.blend_source >= 10U
                                       ? (state.blend_fix_a == 0U ? 1U
@@ -644,12 +731,13 @@ refract::desktop::DialogFrame current_dialog_frame();
                                                                                 : 3U)
                                            : 0U;
   const std::uint32_t key = (textured ? 1U : 0U) |
+                            (framebuffer ? (1U << 21U) : 0U) |
                             ((state.blend_source & 0xfU) << 1U) |
                             ((state.blend_destination & 0xfU) << 5U) |
                             ((state.blend_equation & 7U) << 9U) |
                             (source_fixed_class << 12U) |
                             (destination_fixed_class << 14U) |
-                            ((state.color_write_mask & 0xfU) << 16U) |
+                            ((geometry_color_write_mask(state) & 0xfU) << 16U) |
                             (state.alpha_blend ? (1U << 20U) : 0U);
   if (id<MTLRenderPipelineState> cached = self.blendPipelines[@(key)]) {
     ge_cache_counters.record_pipeline(true);
@@ -660,21 +748,23 @@ refract::desktop::DialogFrame current_dialog_frame();
       [[MTLRenderPipelineDescriptor alloc] init];
   descriptor.vertexFunction =
       [self.shaderLibrary newFunctionWithName:@"psprism_geometry_vertex"];
-  descriptor.fragmentFunction = [self.shaderLibrary
-      newFunctionWithName:textured ? @"psprism_textured_geometry_fragment"
-                                   : @"psprism_geometry_fragment"];
+  descriptor.fragmentFunction = [self.shaderLibrary newFunctionWithName:
+      framebuffer ? @"psprism_framebuffer_geometry_fragment"
+                  : (textured ? @"psprism_textured_geometry_fragment"
+                              : @"psprism_geometry_fragment")];
   descriptor.colorAttachments[0].pixelFormat = view.colorPixelFormat;
   descriptor.depthAttachmentPixelFormat = view.depthStencilPixelFormat;
   descriptor.stencilAttachmentPixelFormat = view.depthStencilPixelFormat;
   auto* attachment = descriptor.colorAttachments[0];
+  const auto color_write_mask = geometry_color_write_mask(state);
   attachment.writeMask =
-      ((state.color_write_mask & 0x1U) != 0U ? MTLColorWriteMaskRed
+      ((color_write_mask & 0x1U) != 0U ? MTLColorWriteMaskRed
                                              : MTLColorWriteMaskNone) |
-      ((state.color_write_mask & 0x2U) != 0U ? MTLColorWriteMaskGreen
+      ((color_write_mask & 0x2U) != 0U ? MTLColorWriteMaskGreen
                                              : MTLColorWriteMaskNone) |
-      ((state.color_write_mask & 0x4U) != 0U ? MTLColorWriteMaskBlue
+      ((color_write_mask & 0x4U) != 0U ? MTLColorWriteMaskBlue
                                              : MTLColorWriteMaskNone) |
-      ((state.color_write_mask & 0x8U) != 0U ? MTLColorWriteMaskAlpha
+      ((color_write_mask & 0x8U) != 0U ? MTLColorWriteMaskAlpha
                                              : MTLColorWriteMaskNone);
   attachment.blendingEnabled = state.alpha_blend ? YES : NO;
   attachment.sourceRGBBlendFactor = psp_blend_factor(
@@ -757,7 +847,12 @@ refract::desktop::DialogFrame current_dialog_frame();
             [self.renderTargets objectForKey:target_key];
         const auto depth_address =
             normalized_vram_address(batch.state.depth_target_address);
-        NSNumber* depth_key = @(depth_address);
+        const auto depth_key_width = std::max<NSUInteger>(
+            target.width, batch.state.render_target_width);
+        const auto depth_key_height = std::max<NSUInteger>(
+            target.height, batch.state.render_target_height);
+        NSNumber* depth_key = @(depth_target_cache_key(
+            depth_address, depth_key_width, depth_key_height));
         id<MTLTexture> depth = [self.depthTargets objectForKey:depth_key];
         bool created_target = false;
         if (target == nil || target.width < batch.state.render_target_width ||
@@ -779,6 +874,14 @@ refract::desktop::DialogFrame current_dialog_frame();
           [self.renderTargets setObject:target forKey:target_key];
           created_target = true;
         }
+        [self.renderTargetStrides
+            setObject:@(batch.state.render_target_stride)
+              forKey:target_key];
+        [self.renderTargetFormats
+            setObject:@(batch.state.render_target_format)
+              forKey:target_key];
+        [self.renderTargetDepthAddresses setObject:@(depth_address)
+                                             forKey:target_key];
         bool created_depth = false;
         if (depth == nil || depth.width < batch.state.render_target_width ||
             depth.height < batch.state.render_target_height) {
@@ -791,9 +894,15 @@ refract::desktop::DialogFrame current_dialog_frame();
                                            width:depth_width
                                           height:depth_height
                                        mipmapped:NO];
-          depth_descriptor.usage = MTLTextureUsageRenderTarget;
+          depth_descriptor.usage = MTLTextureUsageRenderTarget |
+                                   MTLTextureUsageShaderRead |
+                                   MTLTextureUsagePixelFormatView;
           depth = [self.device newTextureWithDescriptor:depth_descriptor];
           [self.depthTargets setObject:depth forKey:depth_key];
+          id<MTLTexture> stencil_view =
+              [depth newTextureViewWithPixelFormat:MTLPixelFormatX32_Stencil8];
+          if (stencil_view != nil)
+            [self.stencilTargetViews setObject:stencil_view forKey:depth_key];
           created_depth = true;
         }
         if (encoder == nil || active_target != target_address ||
@@ -862,21 +971,56 @@ refract::desktop::DialogFrame current_dialog_frame();
             batch.state.texture_function,
             batch.state.texture_alpha_used ? 1U : 0U,
             batch.state.texture_color_double ? 1U : 0U,
-            batch.state.texture_environment_color};
+            batch.state.texture_environment_color,
+            batch.state.render_target_format == 3U &&
+                    (batch.state.stencil_test || batch.state.clear_stencil) &&
+                    batch.state.stencil_write_mask == 0xffU
+                ? (batch.state.clear_stencil
+                       ? 2U
+                       : batch.state.stencil_depth_pass)
+                : 0U,
+            batch.state.stencil_reference & 0xffU};
         [encoder setFragmentBytes:&fragment_state
                            length:sizeof(fragment_state)
                           atIndex:1];
         id<MTLTexture> sampled_texture = nil;
-        float geometry_texture_scale[2]{1.0F, 1.0F};
+        bool sampled_framebuffer = false;
+        float geometry_texture_transform[4]{1.0F, 1.0F, 0.0F, 0.0F};
         const auto texture_address =
             normalized_vram_address(batch.state.texture_address);
         if (batch.state.texture_address != 0U) {
-          sampled_texture = [self.renderTargets objectForKey:@(texture_address)];
-          if (sampled_texture != nil) {
-            geometry_texture_scale[0] = render_target_texture_scale(
-                batch.texture_width, sampled_texture.width);
-            geometry_texture_scale[1] = render_target_texture_scale(
-                batch.texture_height, sampled_texture.height);
+          std::uint32_t closest_offset = UINT32_MAX;
+          for (NSNumber* candidate_key in self.renderTargets) {
+            const auto candidate_address = candidate_key.unsignedIntValue;
+            NSNumber* candidate_stride =
+                [self.renderTargetStrides objectForKey:candidate_key];
+            NSNumber* candidate_format =
+                [self.renderTargetFormats objectForKey:candidate_key];
+            id<MTLTexture> candidate =
+                [self.renderTargets objectForKey:candidate_key];
+            if (candidate_stride == nil || candidate_format == nil ||
+                candidate == nil)
+              continue;
+            const auto offset = render_target_address_offset(
+                texture_address, candidate_address,
+                candidate_stride.unsignedIntValue, candidate.width,
+                candidate.height, candidate_format.unsignedIntValue,
+                batch.state.texture_format);
+            const auto byte_offset = texture_address - candidate_address;
+            if (!offset.has_value() || byte_offset >= closest_offset) continue;
+            closest_offset = byte_offset;
+            sampled_texture = candidate;
+            sampled_framebuffer = true;
+            geometry_texture_transform[0] = render_target_texture_scale(
+                batch.texture_width, candidate.width);
+            geometry_texture_transform[1] = render_target_texture_scale(
+                batch.texture_height, candidate.height);
+            geometry_texture_transform[2] =
+                static_cast<float>(offset->x) /
+                static_cast<float>(candidate.width);
+            geometry_texture_transform[3] =
+                static_cast<float>(offset->y) /
+                static_cast<float>(candidate.height);
           }
         }
         if (sampled_texture == nil && batch.texture != nullptr &&
@@ -884,20 +1028,25 @@ refract::desktop::DialogFrame current_dialog_frame();
           sampled_texture = [self uploadedTextureForBatch:batch];
         }
         const auto needs_special_pipeline =
-            batch.state.alpha_blend || batch.state.color_write_mask != 0x0fU;
+            batch.state.alpha_blend ||
+            geometry_color_write_mask(batch.state) != 0x0fU;
         if (!needs_special_pipeline) ge_cache_counters.record_pipeline(true);
         if (sampled_texture == nil) {
           [encoder setRenderPipelineState:
                        needs_special_pipeline
                            ? [self blendPipelineForView:view
                                               textured:NO
+                                           framebuffer:NO
                                                  state:batch.state]
                            : self.geometryPipeline];
         } else {
           [encoder setRenderPipelineState:
-                       needs_special_pipeline
+                       sampled_framebuffer && !needs_special_pipeline
+                           ? self.framebufferGeometryPipeline
+                       : needs_special_pipeline
                            ? [self blendPipelineForView:view
                                               textured:YES
+                                           framebuffer:sampled_framebuffer
                                                  state:batch.state]
                            : self.texturedGeometryPipeline];
           const auto sampler_state =
@@ -936,8 +1085,8 @@ refract::desktop::DialogFrame current_dialog_frame();
                           offset:frame_vertex_offset
                          atIndex:0];
         frame_vertex_offset += vertex_bytes;
-        [encoder setVertexBytes:geometry_texture_scale
-                         length:sizeof(geometry_texture_scale)
+        [encoder setVertexBytes:geometry_texture_transform
+                         length:sizeof(geometry_texture_transform)
                         atIndex:1];
         const float geometry_target_scale[2]{
             render_target_geometry_scale(batch.state.through_coordinates,
@@ -1452,13 +1601,12 @@ void present_ge_frame() {
   {
     std::lock_guard lock(geometry_mutex);
     has_geometry = !pending_geometry_batches.empty();
-    presented_geometry_batches.reserve(presented_geometry_batches.size() +
-                                        pending_geometry_batches.size());
-    presented_geometry_batches.insert(
-        presented_geometry_batches.end(),
-        std::make_move_iterator(pending_geometry_batches.begin()),
-        std::make_move_iterator(pending_geometry_batches.end()));
-    pending_geometry_batches.clear();
+    // The GE can finish frames much faster than the main thread can submit
+    // them to Metal.  Keeping every unpresented frame makes latency and the
+    // vertex upload grow without bound.  A newly completed frame supersedes
+    // an older one that the display thread has not consumed yet.
+    if (has_geometry)
+      presented_geometry_batches = std::move(pending_geometry_batches);
   }
   const auto frame = ge_presented_frames.fetch_add(1U,
                                                     std::memory_order_relaxed);

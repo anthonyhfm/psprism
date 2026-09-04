@@ -191,29 +191,23 @@ inline std::uint8_t* region_address(std::uint8_t* host,
 
 inline std::uint8_t* mapped_address(const State& state, std::uint32_t address,
                                     std::size_t width) {
-    address = canonical_address(address);
-    // Main RAM contains almost every translated-code access.  Keep it as one
-    // predictable region check before using the high-byte page to select a
-    // specialized PSP region.
-    if (state.memory != nullptr && address >= state.memory_base) {
-        const auto offset =
-            static_cast<std::size_t>(address - state.memory_base);
-        if (offset <= state.memory_size &&
-            width <= state.memory_size - offset) {
-            return state.memory + offset;
-        }
+    const std::uint32_t canon = address & 0x1fffffffU;
+    const std::uint32_t offset = canon - state.memory_base;
+    if (state.memory != nullptr && offset <= state.memory_size &&
+        width <= state.memory_size - offset) [[likely]] {
+        return state.memory + offset;
     }
 
-    switch (address >> 24U) {
+    switch (canon >> 24U) {
     case 0x00U:
         return region_address(state.scratchpad, state.scratchpad_size,
-                              0x00010000U, address, width);
+                              0x00010000U, canon, width);
     case 0x04U:
         return region_address(state.video_memory, state.video_memory_size,
-                              0x04000000U, address, width);
+                              0x04000000U, canon, width);
     case 0x08U:
         return region_address(state.volatile_memory, state.volatile_memory_size,
-                              0x08400000U, address, width);
+                              0x08400000U, canon, width);
     default:
         return nullptr;
     }
@@ -266,6 +260,11 @@ inline std::uint8_t load8(State& state, std::uint32_t address) {
             ++state.cpu_profile.memory_reads;
         }
     }
+    const std::uint32_t canon = address & 0x1fffffffU;
+    const std::uint32_t offset = canon - state.memory_base;
+    if (state.memory != nullptr && offset < state.memory_size) [[likely]] {
+        return state.memory[offset];
+    }
     if (auto* pointer = mapped_address(state, address, 1)) {
         return *pointer;
     }
@@ -296,6 +295,16 @@ inline std::uint16_t load16(State& state, std::uint32_t address) {
         if (state.cpu_profile_enabled) {
             ++state.cpu_profile.memory_reads;
         }
+    }
+    const std::uint32_t canon = address & 0x1fffffffU;
+    const std::uint32_t offset = canon - state.memory_base;
+    if (state.memory != nullptr && offset <= state.memory_size - 2U && (address & 1U) == 0U) [[likely]] {
+        std::uint16_t value{};
+        std::memcpy(&value, state.memory + offset, sizeof(value));
+        if constexpr (is_big_endian) {
+            value = byte_swap16(value);
+        }
+        return value;
     }
     if ((address & 1U) != 0U) {
         note_memory_fault(state, address);
@@ -336,6 +345,16 @@ inline std::uint32_t load32(State& state, std::uint32_t address) {
         if (state.cpu_profile_enabled) {
             ++state.cpu_profile.memory_reads;
         }
+    }
+    const std::uint32_t canon = address & 0x1fffffffU;
+    const std::uint32_t offset = canon - state.memory_base;
+    if (state.memory != nullptr && offset <= state.memory_size - 4U && (address & 3U) == 0U) [[likely]] {
+        std::uint32_t value{};
+        std::memcpy(&value, state.memory + offset, sizeof(value));
+        if constexpr (is_big_endian) {
+            value = byte_swap(value);
+        }
+        return value;
     }
     if ((address & 3U) != 0U) {
         note_memory_fault(state, address);
@@ -435,6 +454,12 @@ inline void store8(State& state, std::uint32_t address, std::uint8_t value) {
             ++state.cpu_profile.memory_writes;
         }
     }
+    const std::uint32_t canon = address & 0x1fffffffU;
+    const std::uint32_t offset = canon - state.memory_base;
+    if (state.memory != nullptr && offset < state.memory_size) [[likely]] {
+        state.memory[offset] = value;
+        return;
+    }
     if (auto* pointer = mapped_address(state, address, 1)) {
         *pointer = value;
         return;
@@ -455,6 +480,15 @@ inline void store16(State& state, std::uint32_t address, std::uint16_t value) {
         if (state.cpu_profile_enabled) {
             ++state.cpu_profile.memory_writes;
         }
+    }
+    const std::uint32_t canon = address & 0x1fffffffU;
+    const std::uint32_t offset = canon - state.memory_base;
+    if (state.memory != nullptr && offset <= state.memory_size - 2U && (address & 1U) == 0U) [[likely]] {
+        if constexpr (is_big_endian) {
+            value = byte_swap16(value);
+        }
+        std::memcpy(state.memory + offset, &value, sizeof(value));
+        return;
     }
     if ((address & 1U) != 0U) {
         note_memory_fault(state, address);
@@ -489,6 +523,15 @@ inline void store32(State& state, std::uint32_t address, std::uint32_t value) {
         if (state.cpu_profile_enabled) {
             ++state.cpu_profile.memory_writes;
         }
+    }
+    const std::uint32_t canon = address & 0x1fffffffU;
+    const std::uint32_t offset = canon - state.memory_base;
+    if (state.memory != nullptr && offset <= state.memory_size - 4U && (address & 3U) == 0U) [[likely]] {
+        if constexpr (is_big_endian) {
+            value = byte_swap(value);
+        }
+        std::memcpy(state.memory + offset, &value, sizeof(value));
+        return;
     }
     if ((address & 3U) != 0U) {
         note_memory_fault(state, address);

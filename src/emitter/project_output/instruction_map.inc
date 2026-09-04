@@ -25,41 +25,44 @@
         import_stubs.insert(import.stub_address);
     }
 
-    // A code map lets project mode preserve real Guest function boundaries.
+    // Function discovery partitions the binary into distinct Guest functions.
     // Keeping each Guest function as a separate C++ function gives the host
     // compiler a tractable control-flow graph and lets static J/JAL edges stay
     // on the native call stack. Each discovered Guest function is emitted into
-    // its own source file so generated codebases remain easy to navigate.
-    const bool function_mode =
-        code_map != nullptr && !code_map->function_starts.empty();
+    // its own well-named source file so generated codebases remain easy to navigate and patch.
+    const auto discovered_funcs = discover_functions(image, code_map);
     std::vector<std::uint32_t> mapped_function_starts;
-    std::map<std::uint32_t, std::vector<EmittedInstruction>> functions;
-    if (function_mode) {
-        for (const auto address : code_map->function_starts) {
-            if (is_executable_word(image, address)) {
-                mapped_function_starts.push_back(address);
-            }
+    std::map<std::uint32_t, std::string> function_filenames;
+    std::map<std::uint32_t, std::string> function_symbols;
+    for (const auto& df : discovered_funcs) {
+        mapped_function_starts.push_back(df.start);
+        function_filenames[df.start] = df.filename;
+        if (!df.symbol.empty()) {
+            function_symbols[df.start] = df.symbol;
         }
-        std::sort(mapped_function_starts.begin(), mapped_function_starts.end());
-        mapped_function_starts.erase(std::unique(mapped_function_starts.begin(),
-                                                 mapped_function_starts.end()),
-                                     mapped_function_starts.end());
-        for (const auto& [unused_shard, instructions] : shards) {
-            static_cast<void>(unused_shard);
-            for (const auto& emitted : instructions) {
-                const auto after =
-                    std::upper_bound(mapped_function_starts.begin(),
-                                     mapped_function_starts.end(), emitted.pc);
-                if (after == mapped_function_starts.begin()) {
-                    continue;
-                }
-                const auto owner = *std::prev(after);
-                if (!import_stubs.contains(owner)) {
-                    functions[owner].push_back(emitted);
-                }
+    }
+    std::sort(mapped_function_starts.begin(), mapped_function_starts.end());
+    mapped_function_starts.erase(std::unique(mapped_function_starts.begin(),
+                                             mapped_function_starts.end()),
+                                 mapped_function_starts.end());
+
+    std::map<std::uint32_t, std::vector<EmittedInstruction>> functions;
+    for (const auto& [unused_shard, instructions] : shards) {
+        static_cast<void>(unused_shard);
+        for (const auto& emitted : instructions) {
+            const auto after =
+                std::upper_bound(mapped_function_starts.begin(),
+                                 mapped_function_starts.end(), emitted.pc);
+            if (after == mapped_function_starts.begin()) {
+                continue;
+            }
+            const auto owner = *std::prev(after);
+            if (!import_stubs.contains(owner)) {
+                functions[owner].push_back(emitted);
             }
         }
     }
+    const bool function_mode = true;
 
     const auto function_owner =
         [&](std::uint32_t address) -> std::optional<std::uint32_t> {

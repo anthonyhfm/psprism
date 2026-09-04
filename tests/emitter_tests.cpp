@@ -96,9 +96,12 @@ int main() {
                                              .count()));
     image.imports.push_back(
         {"sceUtility", 0x2ad8e239U, 0x3000U, 0U});
+    psprecomp::CodeMap named_map;
+    named_map.function_starts = {0x1000U};
+    named_map.function_symbols.push_back({0x1000U, "player_main"});
     psprecomp::GeneratedProjectOptions options;
     options.platform_directory = project / "platform";
-    psprecomp::emit_project(image, project / "generated", nullptr, options);
+    psprecomp::emit_project(image, project / "generated", &named_map, options);
     std::ifstream dispatch_stream(project / "generated" / "dispatch.cpp");
     const std::string dispatch(
         (std::istreambuf_iterator<char>(dispatch_stream)),
@@ -108,12 +111,34 @@ int main() {
     const std::string platform(
         (std::istreambuf_iterator<char>(platform_stream)),
         std::istreambuf_iterator<char>());
+    std::ifstream func_stream(project / "generated" / "func_00001000_player_main.cpp");
+    const std::string func_src(
+        (std::istreambuf_iterator<char>(func_stream)),
+        std::istreambuf_iterator<char>());
+    std::ifstream gen_header_stream(project / "generated" / "generated.hpp");
+    const std::string gen_header(
+        (std::istreambuf_iterator<char>(gen_header_stream)),
+        std::istreambuf_iterator<char>());
     std::filesystem::remove_all(project);
+
     CHECK(dispatch.find("dispatch_offset >= 0x00003000U && dispatch_offset <= "
                         "0x00003000U") != std::string::npos);
     CHECK(dispatch.find("state.stop_reason == StopReason::running") !=
           std::string::npos);
     CHECK(dispatch.find("state.fault_pc = current_pc") != std::string::npos);
+    CHECK(dispatch.find("psprecomp::patch::find_patch") != std::string::npos);
+    CHECK(dispatch.find("function_symbol(dispatch_offset)") !=
+          std::string::npos);
+    CHECK(dispatch.find("state.pc == CALL_RETURN_SENTINEL") !=
+          std::string::npos);
+    CHECK(dispatch.find("dispatch_cache") != std::string::npos);
+    CHECK(func_src.find("Function: player_main (0x00001000)") != std::string::npos);
+    CHECK(func_src.find("entry_pc == state.memory_base + 0x00001000U ? "
+                        "\"player_main\" : nullptr") !=
+          std::string::npos);
+    CHECK(func_src.find("patch::invoke_patch") != std::string::npos);
+    CHECK(gen_header.find("bool run_function_00001000") != std::string::npos);
+    CHECK(gen_header.find("const char* function_symbol") != std::string::npos);
     CHECK(platform.find("note_cpu_import_dispatch(state)") !=
           std::string::npos);
     CHECK(platform.find("generated::run(state, 0xfffffff0U, 4096ULL)") !=

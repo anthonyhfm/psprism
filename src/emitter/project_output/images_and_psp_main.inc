@@ -134,6 +134,8 @@
                    "psprecomp::platform::guest_gp_value();\n"
                    "  if (!psprecomp::platform::patch_imports(state)) "
                    "return -3;\n"
+                   "  if (!psprecomp::patch::run_initializers(state)) "
+                   "return -4;\n"
                    "  sceKernelPrintf(\"[psprecomp] entering "
                    "module_start\\n\");\n"
                    "  psprecomp::generated::run(state, return_address, "

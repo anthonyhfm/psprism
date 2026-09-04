@@ -159,34 +159,98 @@ decode_allegrex(std::uint32_t word) {
     }
 
     if (result.op == 0U) {
-        if (const auto* pattern =
-                detail::find_pattern(word, detail::special_patterns)) {
-            result.lowering = InstructionLowering::native;
-            result.name = pattern->name;
-            if (result.function == 0x08U || result.function == 0x09U) {
-                result.flags = instruction_delayed_branch |
-                               instruction_dynamic_target;
-                if (result.function == 0x09U) {
-                    result.flags |= instruction_call;
-                }
-            }
+        result.lowering = InstructionLowering::native;
+        switch (result.function) {
+        case 0x00:
+            if (result.rs == 0U) { result.name = "sll"; }
+            else { result.lowering = InstructionLowering::invalid; result.name = "invalid"; }
+            break;
+        case 0x02:
+            if (result.rs == 1U) { result.name = "rotr"; }
+            else if (result.rs == 0U) { result.name = "srl"; }
+            else { result.lowering = InstructionLowering::invalid; result.name = "invalid"; }
+            break;
+        case 0x03:
+            if (result.rs == 0U) { result.name = "sra"; }
+            else { result.lowering = InstructionLowering::invalid; result.name = "invalid"; }
+            break;
+        case 0x04:
+            if (result.shift == 0U) { result.name = "sllv"; }
+            else { result.lowering = InstructionLowering::invalid; result.name = "invalid"; }
+            break;
+        case 0x06:
+            if (result.shift == 1U) { result.name = "rotrv"; }
+            else if (result.shift == 0U) { result.name = "srlv"; }
+            else { result.lowering = InstructionLowering::invalid; result.name = "invalid"; }
+            break;
+        case 0x07:
+            if (result.shift == 0U) { result.name = "srav"; }
+            else { result.lowering = InstructionLowering::invalid; result.name = "invalid"; }
+            break;
+        case 0x08:
+            result.name = "jr";
+            result.flags = instruction_delayed_branch | instruction_dynamic_target;
+            break;
+        case 0x09:
+            result.name = "jalr";
+            result.flags = instruction_delayed_branch | instruction_dynamic_target | instruction_call;
+            break;
+        case 0x0a: result.name = "movz"; break;
+        case 0x0b: result.name = "movn"; break;
+        case 0x0c: result.name = "syscall"; break;
+        case 0x0d: result.name = "break"; break;
+        case 0x0f: result.name = "sync"; break;
+        case 0x10: result.name = "mfhi"; break;
+        case 0x11: result.name = "mthi"; break;
+        case 0x12: result.name = "mflo"; break;
+        case 0x13: result.name = "mtlo"; break;
+        case 0x16: result.name = "clz"; break;
+        case 0x17: result.name = "clo"; break;
+        case 0x18: result.name = "mult"; break;
+        case 0x19: result.name = "multu"; break;
+        case 0x1a: result.name = "div"; break;
+        case 0x1b: result.name = "divu"; break;
+        case 0x1c: result.name = "madd"; break;
+        case 0x1d: result.name = "maddu"; break;
+        case 0x20: result.name = "add"; break;
+        case 0x21: result.name = "addu"; break;
+        case 0x22: result.name = "sub"; break;
+        case 0x23: result.name = "subu"; break;
+        case 0x24: result.name = "and"; break;
+        case 0x25: result.name = "or"; break;
+        case 0x26: result.name = "xor"; break;
+        case 0x27: result.name = "nor"; break;
+        case 0x2a: result.name = "slt"; break;
+        case 0x2b: result.name = "sltu"; break;
+        case 0x2c: result.name = "max"; break;
+        case 0x2d: result.name = "min"; break;
+        case 0x2e: result.name = "msub"; break;
+        case 0x2f: result.name = "msubu"; break;
+        default:
+            result.lowering = InstructionLowering::invalid;
+            result.name = "invalid";
+            break;
         }
         return result;
     }
 
     if (result.op == 1U) {
-        if (const auto* pattern =
-                detail::find_pattern(word, detail::regimm_patterns)) {
-            result.lowering = InstructionLowering::native;
-            result.name = pattern->name;
-            result.flags = instruction_delayed_branch;
-            if (result.rt == 2U || result.rt == 3U || result.rt == 0x12U ||
-                result.rt == 0x13U) {
-                result.flags |= instruction_likely;
-            }
-            if (result.rt >= 0x10U) {
-                result.flags |= instruction_call;
-            }
+        result.lowering = InstructionLowering::native;
+        result.flags = instruction_delayed_branch;
+        switch (result.rt) {
+        case 0x00: result.name = "bltz"; break;
+        case 0x01: result.name = "bgez"; break;
+        case 0x02: result.name = "bltzl"; result.flags |= instruction_likely; break;
+        case 0x03: result.name = "bgezl"; result.flags |= instruction_likely; break;
+        case 0x10: result.name = "bltzal"; result.flags |= instruction_call; break;
+        case 0x11: result.name = "bgezal"; result.flags |= instruction_call; break;
+        case 0x12: result.name = "bltzall"; result.flags |= (instruction_call | instruction_likely); break;
+        case 0x13: result.name = "bgezall"; result.flags |= (instruction_call | instruction_likely); break;
+        default:
+            result.lowering = InstructionLowering::invalid;
+            result.name = "invalid";
+            result.flags = instruction_none;
+            break;
         }
         return result;
     }

@@ -140,19 +140,22 @@
                << make_value(psp_sources)
                << " "
                << make_value(refract_sources)
-               << "\n";
+               << "\n"
+                  "PATCH_SRCS := $(wildcard $(PSPRECOMP_PROJECT_ROOT)/patches/*.cpp)\n"
+                  "PATCH_OBJS := $(patsubst $(PSPRECOMP_PROJECT_ROOT)/patches/%.cpp,user_patch_%.o,$(PATCH_SRCS))\n";
         if (psp_overlay_mode) {
             stream << "OBJS = main.o imports.o psp_entry.o";
             if (!psp_overlays.empty()) {
                 stream << " overlay.o psp_overlays.o";
                 for (const auto& overlay : psp_overlays) {
-                    std::ostringstream object;
-                    object << " func_" << std::hex << std::setfill('0')
-                           << std::setw(8) << overlay.start << ".o";
-                    stream << object.str();
+                    const auto fn_it = function_filenames.find(overlay.start);
+                    const auto base_name = fn_it != function_filenames.end()
+                                               ? fn_it->second.substr(0, fn_it->second.size() - 4)
+                                               : ("func_" + hex_address(overlay.start));
+                    stream << " " << base_name << ".o";
                 }
             }
-            stream << " native_guest_image.o\n";
+            stream << " native_guest_image.o $(PATCH_OBJS)\n";
         } else {
             stream << "OBJS = main.o platform.o imports.o dispatch.o "
                       "psp_sdk_stubs.o";
@@ -162,7 +165,7 @@
                     stream << " " << name.substr(0, name.size() - 4) << ".o";
                 }
             }
-            stream << " guest_image.o guest_relocations.o\n";
+            stream << " guest_image.o guest_relocations.o $(PATCH_OBJS)\n";
         }
         stream << "BUILD_PRX = 1\n"
                   "EXTRA_TARGETS = EBOOT.PBP\n"
@@ -174,7 +177,8 @@
                << "\n"
                   "CFLAGS = -O2 -G0 -Wall -I$(PSPRECOMP_INCLUDE) "
                   "-I$(PSPRECOMP_PROJECT_ROOT) "
-                  "-I$(PSPRECOMP_PROJECT_ROOT)/refract/include -I.\n"
+                  "-I$(PSPRECOMP_PROJECT_ROOT)/refract/include "
+                  "-I$(PSPRECOMP_PROJECT_ROOT)/patches -I.\n"
                   "CXXFLAGS = $(CFLAGS) -std=c++20 -fno-exceptions -fno-rtti\n"
                   "ASFLAGS = $(CFLAGS)\n"
                   "LIBS = -lpsputility -lpspmp3 -lpspdmac -lpspmpeg "
@@ -184,11 +188,15 @@
                   "-lpspnet_adhocctl -lpspnet_adhocmatching -lpspnet_adhoc "
                   "-lpspnet\n\n";
         for (const auto& overlay : psp_overlays) {
-            stream << "func_" << std::hex << std::setfill('0')
-                   << std::setw(8) << overlay.start
-                   << ".o: CXXFLAGS += -DPSPRECOMP_PSP_OVERLAY\n";
+            const auto fn_it = function_filenames.find(overlay.start);
+            const auto base_name = fn_it != function_filenames.end()
+                                       ? fn_it->second.substr(0, fn_it->second.size() - 4)
+                                       : ("func_" + hex_address(overlay.start));
+            stream << base_name << ".o: CXXFLAGS += -DPSPRECOMP_PSP_OVERLAY\n";
         }
         stream << "\ninclude $(PSPSDK)/lib/build.mak\n\n"
+                  "user_patch_%.o: $(PSPRECOMP_PROJECT_ROOT)/patches/%.cpp\n"
+                  "\t$(CXX) $(CXXFLAGS) -c $< -o $@\n\n"
                   "guest_image.o: guest_image.bin\n"
                   "\tbin2o -n -i -a 64 $< $@ guest_image\n\n"
                   "native_guest_image.o: native_guest_image.bin\n"

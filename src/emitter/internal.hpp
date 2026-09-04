@@ -46,6 +46,14 @@ std::set<std::uint32_t> potential_block_entries(const ElfImage& image,
                                                 const CodeMap* code_map,
                                                 std::uint32_t entry,
                                                 std::uint32_t shard_size);
+struct DiscoveredFunction {
+    std::uint32_t start{};
+    std::string symbol;
+    std::string filename;
+};
+
+std::vector<DiscoveredFunction> discover_functions(
+    const ElfImage& image, const CodeMap* code_map);
 std::string emit_instruction(std::uint32_t pc, std::uint32_t instruction,
                              bool relocated = true,
                              std::uint32_t preferred_base = 0);

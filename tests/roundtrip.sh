@@ -47,68 +47,81 @@ test -s "$ROUNDTRIP_TMP/EBOOT.PBP"
 
 # Exercise project mode too.  This is the performance-oriented path used by
 # full games: a shard switch is entered once, then straight-line guest code
-# follows direct C++ labels until control flow leaves the block.
+# Direct function files: each discovered guest function gets its own well-named file.
 "$PSP_LD" -T "$SOURCE_DIR/tests/fixtures/project.ld" \
     "$ROUNDTRIP_TMP/arithmetic.o" -o "$ROUNDTRIP_TMP/project.elf"
 "$RECOMPILER" "$ROUNDTRIP_TMP/project.elf" \
     --output-dir "$ROUNDTRIP_TMP/project"
 post_delay_entry=$(${PSP_GCC%/*}/psp-nm "$ROUNDTRIP_TMP/project.elf" |
     awk '$3 == "recomp_post_delay_entry" { printf "%08x", ("0x" $1) + 8 }')
-grep -q "case 0x${post_delay_entry}U" "$ROUNDTRIP_TMP/project/"shard_*.cpp
+grep -q "case 0x${post_delay_entry}U" "$ROUNDTRIP_TMP/project/"func_*.cpp
 "$PSP_GXX" -std=c++20 -O2 -fno-exceptions -fno-rtti \
     -I"$SOURCE_DIR/include" -I"$ROUNDTRIP_TMP/project" \
     -c "$ROUNDTRIP_TMP/project/dispatch.cpp" \
     -o "$ROUNDTRIP_TMP/project-dispatch-psp.o"
-"$PSP_GXX" -std=c++20 -O2 -fno-exceptions -fno-rtti \
-    -I"$SOURCE_DIR/include" -I"$ROUNDTRIP_TMP/project" \
-    -c "$ROUNDTRIP_TMP/project/shard_0000.cpp" \
-    -o "$ROUNDTRIP_TMP/project-shard-psp.o"
+for f in "$ROUNDTRIP_TMP/project/"func_*.cpp; do
+    "$PSP_GXX" -std=c++20 -O2 -fno-exceptions -fno-rtti \
+        -I"$SOURCE_DIR/include" -I"$ROUNDTRIP_TMP/project" \
+        -c "$f" -o "$ROUNDTRIP_TMP/$(basename "$f" .cpp)-psp.o"
+done
 "$HOST_CXX" -std=c++20 -O2 -DPSPRECOMP_TEST_ENTRY=0 \
     -I"$SOURCE_DIR/include" -I"$ROUNDTRIP_TMP/project" \
     "$ROUNDTRIP_TMP/project/dispatch.cpp" \
-    "$ROUNDTRIP_TMP/project/shard_0000.cpp" \
+    "$ROUNDTRIP_TMP/project/"func_*.cpp \
     "$SOURCE_DIR/tests/generated_runner.cpp" \
     "$SOURCE_DIR/tests/fixtures/arithmetic.c" \
     -o "$ROUNDTRIP_TMP/project-runner"
 "$ROUNDTRIP_TMP/project-runner"
 
-# A function map must produce one address-named source file per discovered
-# function, rather than grouping several functions into unit_*.cpp files.
+# A function map produces one well-named source file per discovered
+# function with symbol names included in the filenames.
 printf 'entry 0\nfunction 0 recomp_test\nfunction 0x20 recomp_loop\n' \
     > "$ROUNDTRIP_TMP/project.map"
 "$RECOMPILER" "$ROUNDTRIP_TMP/project.elf" \
     --output-dir "$ROUNDTRIP_TMP/project-functions" \
     --code-map "$ROUNDTRIP_TMP/project.map"
-test -s "$ROUNDTRIP_TMP/project-functions/func_00000000.cpp"
-test -s "$ROUNDTRIP_TMP/project-functions/func_00000020.cpp"
+test -s "$ROUNDTRIP_TMP/project-functions/func_00000000_recomp_test.cpp"
+test -s "$ROUNDTRIP_TMP/project-functions/func_00000020_recomp_loop.cpp"
 function_file_count=$(find "$ROUNDTRIP_TMP/project-functions" \
     -name 'func_*.cpp' | wc -l | tr -d ' ')
 test "$function_file_count" = 2
-if find "$ROUNDTRIP_TMP/project-functions" -name 'unit_*.cpp' | grep -q .; then
-    echo "function-mode export still contains clustered unit files" >&2
+if find "$ROUNDTRIP_TMP/project-functions" -name 'unit_*.cpp' -o -name 'shard_*.cpp' | grep -q .; then
+    echo "function-mode export still contains clustered unit or shard files" >&2
     exit 1
 fi
 grep -q '// Original PSP binary range: \[0x00000000, 0x' \
-    "$ROUNDTRIP_TMP/project-functions/func_00000000.cpp"
+    "$ROUNDTRIP_TMP/project-functions/func_00000000_recomp_test.cpp"
 grep -q '// Original PSP binary range: \[0x00000020, 0x' \
-    "$ROUNDTRIP_TMP/project-functions/func_00000020.cpp"
+    "$ROUNDTRIP_TMP/project-functions/func_00000020_recomp_loop.cpp"
 "$PSP_GXX" -std=c++20 -O2 -fno-exceptions -fno-rtti \
     -I"$SOURCE_DIR/include" -I"$ROUNDTRIP_TMP/project-functions" \
-    -c "$ROUNDTRIP_TMP/project-functions/func_00000000.cpp" \
+    -c "$ROUNDTRIP_TMP/project-functions/func_00000000_recomp_test.cpp" \
     -o "$ROUNDTRIP_TMP/project-function-psp.o"
 "$PSP_GXX" -std=c++20 -O2 -fno-exceptions -fno-rtti \
     -I"$SOURCE_DIR/include" -I"$ROUNDTRIP_TMP/project-functions" \
-    -c "$ROUNDTRIP_TMP/project-functions/func_00000020.cpp" \
+    -c "$ROUNDTRIP_TMP/project-functions/func_00000020_recomp_loop.cpp" \
     -o "$ROUNDTRIP_TMP/project-function-loop-psp.o"
 "$HOST_CXX" -std=c++20 -O2 -DPSPRECOMP_TEST_ENTRY=0 \
     -I"$SOURCE_DIR/include" -I"$ROUNDTRIP_TMP/project-functions" \
     "$ROUNDTRIP_TMP/project-functions/dispatch.cpp" \
-    "$ROUNDTRIP_TMP/project-functions/func_00000000.cpp" \
-    "$ROUNDTRIP_TMP/project-functions/func_00000020.cpp" \
+    "$ROUNDTRIP_TMP/project-functions/func_00000000_recomp_test.cpp" \
+    "$ROUNDTRIP_TMP/project-functions/func_00000020_recomp_loop.cpp" \
     "$SOURCE_DIR/tests/generated_runner.cpp" \
     "$SOURCE_DIR/tests/fixtures/arithmetic.c" \
     -o "$ROUNDTRIP_TMP/project-function-runner"
 "$ROUNDTRIP_TMP/project-function-runner"
+
+# Execute a real named game-function patch. The replacement writes a typed
+# guest global and calls the translated original at the same address.
+"$HOST_CXX" -std=c++20 -O2 \
+    -I"$SOURCE_DIR/include" -I"$ROUNDTRIP_TMP/project-functions" \
+    "$ROUNDTRIP_TMP/project-functions/dispatch.cpp" \
+    "$ROUNDTRIP_TMP/project-functions/func_00000000_recomp_test.cpp" \
+    "$ROUNDTRIP_TMP/project-functions/func_00000020_recomp_loop.cpp" \
+    "$SOURCE_DIR/tests/generated_patch_runner.cpp" \
+    "$SOURCE_DIR/tests/fixtures/arithmetic.c" \
+    -o "$ROUNDTRIP_TMP/project-patch-runner"
+"$ROUNDTRIP_TMP/project-patch-runner"
 
 # Exercise the beginner-facing, self-contained codebase exporter. The exported
 # project must build without referring back to PSPRecomp's source tree.
@@ -126,13 +139,13 @@ test -s "$ROUNDTRIP_TMP/exported/platform/psp/main.cpp"
 test -s "$ROUNDTRIP_TMP/exported/platform/psp/platform.cpp"
 test -s "$ROUNDTRIP_TMP/exported/platform/macos/main.cpp"
 test -s "$ROUNDTRIP_TMP/exported/platform/macos/platform.cpp"
-test -s "$ROUNDTRIP_TMP/exported/refract/CMakeLists.txt"
+test -s "$ROUNDTRIP_TMP/exported/include/psprecomp/patch.hpp"
+test ! -e "$ROUNDTRIP_TMP/exported/patches/patch.hpp"
+test -s "$ROUNDTRIP_TMP/exported/patches/patches.cpp"
+test -s "$ROUNDTRIP_TMP/exported/patches/README.md"
 test -s "$ROUNDTRIP_TMP/exported/refract/include/refract/refract.hpp"
 test -s "$ROUNDTRIP_TMP/exported/refract/src/runtime.cpp"
-diff -qr "$SOURCE_DIR/refract" "$ROUNDTRIP_TMP/exported/refract"
-grep -q 'add_subdirectory(refract)' "$ROUNDTRIP_TMP/exported/CMakeLists.txt"
-grep -q 'INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE' \
-    "$ROUNDTRIP_TMP/exported/CMakeLists.txt"
+test ! -f "$ROUNDTRIP_TMP/exported/CMakeLists.txt"
 grep -q 'refract::Runtime::instance' \
     "$ROUNDTRIP_TMP/exported/platform/macos/platform.cpp"
 grep -q '^psp:' "$ROUNDTRIP_TMP/exported/Makefile"
@@ -157,9 +170,17 @@ if grep -E 'sce[A-Z]|pspkernel[.]h' "$ROUNDTRIP_TMP/exported/src/generated/"*.cp
     echo "portable generated core contains a direct PSP API dependency" >&2
     exit 1
 fi
+printf '%s\n' \
+    '#include <psprecomp/patch.hpp>' \
+    'extern "C" int psprism_patch_link_probe(int value) { return value + 1; }' \
+    'RECOMP_PATCH_FUNCTION(psprecomp::patch::image_offset(0x007ffffcU), psprism_patch_link_probe);' \
+    > "$ROUNDTRIP_TMP/exported/patches/link_probe.cpp"
 make -C "$ROUNDTRIP_TMP/exported" psp -j2
 test -s "$ROUNDTRIP_TMP/exported/src/generated/roundtrip_export.prx"
 test -s "$ROUNDTRIP_TMP/exported/src/generated/EBOOT.PBP"
+test -s "$ROUNDTRIP_TMP/exported/src/generated/user_patch_link_probe.o"
+"$PSP_BIN_DIR/psp-nm" "$ROUNDTRIP_TMP/exported/src/generated/roundtrip_export.elf" | \
+    grep -q 'psprism_patch_link_probe'
 if [ "$(uname -s)" = Darwin ]; then
     make -C "$ROUNDTRIP_TMP/exported" macos
     test -x "$ROUNDTRIP_TMP/exported/build/macos/roundtrip_export.app/Contents/MacOS/roundtrip_export"
@@ -228,9 +249,7 @@ printf 'overlay 0x%s\n' "$overlay_address" \
     --yes
 grep -q '^PSP_RECOMPILE_MODE := overlays$' \
     "$ROUNDTRIP_TMP/relocatable-exported/Makefile"
-grep -q '^psp: psp-binary$' \
-    "$ROUNDTRIP_TMP/relocatable-exported/Makefile"
-overlay_source="$ROUNDTRIP_TMP/relocatable-exported/src/generated/func_${overlay_address}.cpp"
+overlay_source=$(ls "$ROUNDTRIP_TMP/relocatable-exported/src/generated/func_${overlay_address}"*.cpp | head -n 1)
 test -s "$overlay_source"
 grep -q 'state[.]gpr\[2\] = state[.]gpr\[2\] + 0x00000007U;' \
     "$overlay_source"
@@ -310,7 +329,7 @@ overlay_native_end=$(printf '%x' \
 # translated 8 -> unchanged Allegrex callee (24) -> translated +100.
 if command -v PPSSPPSDL >/dev/null 2>&1; then
     ppsspp_log="$ROUNDTRIP_TMP/ppsspp-overlay.log"
-    PPSSPPSDL -i --windowed \
+    PPSSPPSDL -d -i --windowed --log="$ppsspp_log" \
         "$ROUNDTRIP_TMP/relocatable-exported/src/generated/EBOOT.PBP" \
         >"$ppsspp_log" 2>&1 &
     PPSSPP_PID=$!

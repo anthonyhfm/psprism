@@ -302,4 +302,155 @@ namespace psprecomp::detail
         return result;
     }
 
+    std::vector<DiscoveredFunction> discover_functions(
+        const ElfImage &image, const CodeMap *code_map)
+    {
+        std::set<std::uint32_t> starts;
+        std::set<std::uint32_t> import_stubs;
+        for (const auto &import : image.imports)
+        {
+            import_stubs.insert(import.stub_address);
+        }
+
+        const auto add = [&](std::uint32_t address)
+        {
+            if (is_executable_word(image, address) && !import_stubs.contains(address))
+            {
+                starts.insert(address);
+            }
+        };
+
+        if (code_map != nullptr && !code_map->function_starts.empty())
+        {
+            for (const auto addr : code_map->function_starts)
+            {
+                add(addr);
+            }
+        }
+        else
+        {
+            // 1. Entry point
+            add(image.entry);
+            if (code_map != nullptr)
+            {
+                if (code_map->entry != 0U)
+                {
+                    add(code_map->entry);
+                }
+                for (const auto &range : code_map->function_ranges)
+                {
+                    add(range.begin);
+                }
+                for (const auto &sym : code_map->function_symbols)
+                {
+                    add(sym.address);
+                }
+            }
+
+            // 2. Section starts
+            for (const auto &section : image.executable_sections)
+            {
+                add(section.address);
+            }
+
+            // 3. Scan executable sections for JAL/BAL targets, function prologues, returns
+            const auto jump_bases = jump_relocation_bases(image);
+            for (const auto &section : image.executable_sections)
+            {
+                for (std::size_t offset = 0; offset < section.bytes.size(); offset += 4)
+                {
+                    const auto pc = section.address + static_cast<std::uint32_t>(offset);
+                    const auto instruction = word_at(section, offset);
+                    const auto op = instruction >> 26U;
+
+                    // JAL
+                    if (op == 0x03U)
+                    {
+                        if (const auto target = direct_control_target(pc, instruction, jump_bases, image.preferred_base))
+                        {
+                            add(*target);
+                        }
+                    }
+                    else if (op == 0x01U)
+                    {
+                        const auto rt = (instruction >> 16U) & 31U;
+                        if (rt >= 0x10U && rt <= 0x13U)
+                        {
+                            const auto disp = static_cast<std::uint32_t>(
+                                static_cast<std::int32_t>(static_cast<std::int16_t>(instruction & 0xffffU)) * 4);
+                            add(pc + 4U + disp);
+                        }
+                    }
+
+                    // Function prologues: addiu $sp, $sp, -imm
+                    if ((instruction & 0xffff8000U) == 0x27bd8000U)
+                    {
+                        add(pc);
+                    }
+
+                    // After jr $ra (0x03e00008) + delay slot: next instruction is likely a new function
+                    if (instruction == 0x03e00008U)
+                    {
+                        const auto next_pc = pc + 8U;
+                        if (offset + 8 < section.bytes.size())
+                        {
+                            add(next_pc);
+                        }
+                    }
+                }
+            }
+
+            // Relocated function pointers
+            const auto memory = image.memory_image();
+            for (const auto &relocation : image.relocations)
+            {
+                if (relocation.type == 2U)
+                {
+                    const auto *patch = find_load_segment(image, relocation.patch_segment);
+                    const auto *target = find_load_segment(image, relocation.target_segment);
+                    if (patch != nullptr && target != nullptr)
+                    {
+                        const auto address = patch->address + relocation.offset;
+                        if (address + 4U <= memory.size())
+                        {
+                            const auto value =
+                                static_cast<std::uint32_t>(memory[address]) |
+                                (static_cast<std::uint32_t>(memory[address + 1U]) << 8U) |
+                                (static_cast<std::uint32_t>(memory[address + 2U]) << 16U) |
+                                (static_cast<std::uint32_t>(memory[address + 3U]) << 24U);
+                            add(value + target->address);
+                        }
+                    }
+                }
+            }
+        }
+
+        std::vector<DiscoveredFunction> result;
+        result.reserve(starts.size());
+        for (const auto start : starts)
+        {
+            std::string symbol;
+            if (code_map != nullptr)
+            {
+                if (const auto *s = code_map->symbol_at(start))
+                {
+                    symbol = *s;
+                }
+                else if (const auto *r = code_map->function_containing(start))
+                {
+                    symbol = r->name;
+                }
+            }
+            std::ostringstream filename;
+            filename << "func_" << std::hex << std::setfill('0') << std::setw(8) << start;
+            if (!symbol.empty())
+            {
+                filename << "_" << identifier(symbol);
+            }
+            filename << ".cpp";
+            result.push_back({start, symbol, filename.str()});
+        }
+        return result;
+    }
+
 } // namespace psprecomp::detail

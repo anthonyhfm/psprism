@@ -211,6 +211,60 @@ inline bool vfpu_prefixes_identity(const State& state) {
            state.vfpu_ctrl[2] == 0U;
 }
 
+template <int Size>
+inline void vfpu_read_vector_fast(const State& state, std::uint32_t reg,
+                                 float values[4]) {
+    const auto matrix = (reg >> 2U) & 7U;
+    const auto column = reg & 3U;
+    std::uint32_t row{};
+    if constexpr (Size == 1) {
+        row = (reg >> 5U) & 3U;
+    } else if constexpr (Size == 2 || Size == 4) {
+        row = (reg >> 5U) & 2U;
+    } else {
+        row = (reg >> 6U) & 1U;
+    }
+    const bool transpose = Size != 1 && ((reg >> 5U) & 1U) != 0U;
+    const auto base_idx = matrix * 4U;
+    if (transpose) {
+        for (int lane = 0; lane < Size; ++lane) {
+            values[lane] = vfpu_float(state, base_idx + ((row + static_cast<std::uint32_t>(lane)) & 3U) + column * 32U);
+        }
+    } else {
+        for (int lane = 0; lane < Size; ++lane) {
+            values[lane] = vfpu_float(state, base_idx + column + (((row + static_cast<std::uint32_t>(lane)) & 3U) << 5U));
+        }
+    }
+    for (int lane = Size; lane < 4; ++lane) {
+        values[lane] = 0.0F;
+    }
+}
+
+template <int Size>
+inline void vfpu_write_vector_fast(State& state, std::uint32_t reg,
+                                  const float values[4]) {
+    const auto matrix = (reg >> 2U) & 7U;
+    const auto column = reg & 3U;
+    std::uint32_t row{};
+    if constexpr (Size == 1) {
+        row = (reg >> 5U) & 3U;
+    } else if constexpr (Size == 2 || Size == 4) {
+        row = (reg >> 5U) & 2U;
+    } else {
+        row = (reg >> 6U) & 1U;
+    }
+    const bool transpose = Size != 1 && ((reg >> 5U) & 1U) != 0U;
+    const auto base_idx = matrix * 4U;
+    for (int lane = 0; lane < Size; ++lane) {
+        if ((state.vfpu_ctrl[2] & (1U << (8 + lane))) == 0U) {
+            const auto index = transpose
+                ? (base_idx + ((row + static_cast<std::uint32_t>(lane)) & 3U) + column * 32U)
+                : (base_idx + column + (((row + static_cast<std::uint32_t>(lane)) & 3U) << 5U));
+            state.vfpu[index & 127U] = std::bit_cast<std::uint32_t>(values[lane]);
+        }
+    }
+}
+
 template <VfpuStaticOperation Operation, int Size>
 inline void execute_vfpu_prefix_free(State& state, std::uint32_t vd,
                                      std::uint32_t vs, std::uint32_t vt) {
@@ -219,15 +273,15 @@ inline void execute_vfpu_prefix_free(State& state, std::uint32_t vd,
     float source[4]{};
     float target[4]{};
     float result[4]{};
-    vfpu_read_vector(state, vs, Size, source);
+    vfpu_read_vector_fast<Size>(state, vs, source);
     if constexpr (Operation != VfpuStaticOperation::move) {
-        vfpu_read_vector(state, vt, Size, target);
+        vfpu_read_vector_fast<Size>(state, vt, target);
     }
     if constexpr (Operation == VfpuStaticOperation::dot) {
         for (int lane = 0; lane < Size; ++lane) {
             result[0] += source[lane] * target[lane];
         }
-        vfpu_write_vector(state, vd, 1, result);
+        vfpu_write_vector_fast<1>(state, vd, result);
     } else {
         for (int lane = 0; lane < Size; ++lane) {
             if constexpr (Operation == VfpuStaticOperation::add) {
@@ -240,7 +294,7 @@ inline void execute_vfpu_prefix_free(State& state, std::uint32_t vd,
                 result[lane] = source[lane];
             }
         }
-        vfpu_write_vector(state, vd, Size, result);
+        vfpu_write_vector_fast<Size>(state, vd, result);
     }
     vfpu_eat_prefixes(state);
 }

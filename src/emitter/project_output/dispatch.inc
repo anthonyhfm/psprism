@@ -10,8 +10,20 @@
                "#include \"generated.hpp\"\n"
                "#include <platform/platform.h>\n"
                "#include <psprecomp/interpreter.hpp>\n"
+               "#include <psprecomp/patch.hpp>\n"
                "\n"
-               "namespace psprecomp::generated {\n"
+               "namespace psprecomp::generated {\n";
+        stream << "const char* function_symbol(std::uint32_t image_offset) {\n"
+                  "  switch (image_offset) {\n";
+        for (const auto& [address, symbol] : function_symbols) {
+            if (!symbol.empty()) {
+                stream << "  case " << hex(address) << ": return \""
+                       << cpp_string(symbol) << "\";\n";
+            }
+        }
+        stream << "  default: return nullptr;\n"
+                  "  }\n"
+                  "}\n"
                "#ifdef PSPRECOMP_PROFILE_DISPATCH\n"
                "namespace {\n"
                "void profile_report(const State& state, std::uint32_t pc) {\n"
@@ -60,6 +72,16 @@
                        << "},\n";
             }
             stream << "};\n"
+                      "struct DispatchCacheEntry {\n"
+                      "  std::uint32_t pc{};\n"
+                      "  FunctionRunner runner{nullptr};\n"
+                      "};\n"
+                      "constexpr std::size_t DISPATCH_CACHE_SIZE = 1024;\n"
+                      "#if defined(__PSP__)\n"
+                      "static DispatchCacheEntry dispatch_cache[DISPATCH_CACHE_SIZE];\n"
+                      "#else\n"
+                      "thread_local DispatchCacheEntry dispatch_cache[DISPATCH_CACHE_SIZE];\n"
+                      "#endif\n"
                       "} // namespace\n";
         } else {
             for (const auto& [shard, instructions] : shards) {
@@ -69,11 +91,11 @@
             }
         }
         stream << "bool dispatch_block(State& state, std::uint32_t current_pc) "
-                  "{\n";
-        if (!platform_imports.empty() || function_mode) {
-            stream << "  const auto dispatch_offset = current_pc - "
-                      "state.memory_base;\n";
-        }
+                  "{\n"
+                  "  const auto dispatch_offset = current_pc - state.memory_base;\n";
+        stream << "  if (const auto* patch = psprecomp::patch::find_patch(state, current_pc, function_symbol(dispatch_offset))) [[unlikely]] {\n"
+                  "    return psprecomp::patch::invoke_patch(*patch, state, current_pc);\n"
+                  "  }\n";
         if (!platform_imports.empty()) {
             const auto [first_import, last_import] = std::minmax_element(
                 platform_imports.begin(), platform_imports.end(),
@@ -90,6 +112,10 @@
         }
         if (function_mode) {
             stream << "  const auto offset = dispatch_offset;\n"
+                      "  const auto cache_idx = (offset >> 2U) & (DISPATCH_CACHE_SIZE - 1U);\n"
+                      "  if (dispatch_cache[cache_idx].pc == current_pc && dispatch_cache[cache_idx].runner != nullptr) [[likely]] {\n"
+                      "    return dispatch_cache[cache_idx].runner(state, current_pc);\n"
+                      "  }\n"
                       "  constexpr std::size_t route_count = "
                       "sizeof(function_routes) / sizeof(function_routes[0]);\n"
                       "  const auto hint = "
@@ -98,6 +124,7 @@
                       "function_routes[hint].start <= offset && "
                       "(hint + 1U == route_count || "
                       "offset < function_routes[hint + 1U].start)) {\n"
+                      "    dispatch_cache[cache_idx] = {current_pc, function_routes[hint].runner};\n"
                       "    return function_routes[hint].runner(state, "
                       "current_pc);\n"
                       "  }\n"
@@ -113,6 +140,7 @@
                       "static_cast<std::uint32_t>(first - 1U);\n"
                       "  const auto& route = "
                       "function_routes[state.dispatch_route_hint];\n"
+                      "  dispatch_cache[cache_idx] = {current_pc, route.runner};\n"
                       "  return route.runner(state, current_pc);\n";
         } else {
             stream << "  switch ((current_pc - state.memory_base) / "
@@ -160,5 +188,26 @@
                "  }\n"
                "  state.stop_reason = StopReason::step_limit;\n"
                "}\n"
-               "} // namespace psprecomp::generated\n";
+               "} // namespace psprecomp::generated\n\n"
+               "namespace psprecomp::patch::bridge {\n"
+               "bool execute_function_at(State& state, std::uint32_t address, std::uint64_t max_blocks) {\n"
+               "  state.pc = address;\n"
+               "  for (std::uint64_t block = 0; block < max_blocks; ++block) {\n"
+               "    if (state.pc == CALL_RETURN_SENTINEL && !state.branch_pending) return true;\n"
+               "    const std::uint32_t current_pc = state.pc;\n"
+               "    const bool translated = generated::dispatch_block(state, current_pc);\n"
+               "    if (!translated && !interpret_allegrex(state, current_pc)) {\n"
+               "      if (state.stop_reason == StopReason::running) {\n"
+               "        state.stop_reason = StopReason::invalid_pc;\n"
+               "        state.fault_address = current_pc;\n"
+               "        state.fault_pc = current_pc;\n"
+               "      }\n"
+               "      return false;\n"
+               "    }\n"
+               "    if (state.stop_reason != StopReason::running) return false;\n"
+               "  }\n"
+               "  state.stop_reason = StopReason::step_limit;\n"
+               "  return false;\n"
+               "}\n"
+               "} // namespace psprecomp::patch::bridge\n";
     }
