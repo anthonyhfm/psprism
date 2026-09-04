@@ -88,6 +88,8 @@ bool hydration_outputs_exist(const std::filesystem::path& project,
                                           "src/generated/guest_image.bin") &&
          std::filesystem::is_regular_file(project /
                                           "platform/macos/platform.cpp") &&
+         std::filesystem::is_regular_file(project /
+                                          "platform/windows/platform.cpp") &&
          std::filesystem::is_directory(project / "include/psprecomp") &&
          std::filesystem::is_directory(project / "refract") &&
          (!needs_disc || std::filesystem::is_directory(project / "disc"));

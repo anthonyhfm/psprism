@@ -48,6 +48,7 @@ namespace psprecomp
 #include "project_output/dispatch.inc"
 #include "project_output/images_and_psp_main.inc"
 #include "project_output/macos.inc"
+#include "project_output/windows.inc"
 #include "project_output/overlays.inc"
 #include "project_output/manifests.inc"
 

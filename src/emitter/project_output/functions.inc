@@ -91,7 +91,7 @@
                     << hex_address(function_end)
                     << ")\n"
                     << "bool " << function_name(cur_start)
-                    << "(State& __restrict__ state, std::uint32_t entry_pc) {\n"
+                    << "(State& PSPRECOMP_RESTRICT state, std::uint32_t entry_pc) {\n"
                        "  using namespace psprecomp;\n"
                        "  if (const auto* patch = patch::find_patch(state, entry_pc, ";
                 if (sym_it != function_symbols.end() && !sym_it->second.empty()) {
@@ -269,7 +269,7 @@
                       "namespace psprecomp::generated {\n"
                       "bool run_shard_"
                    << shard
-                   << "(State& __restrict__ state, std::uint32_t entry_pc) {\n"
+                   << "(State& PSPRECOMP_RESTRICT state, std::uint32_t entry_pc) {\n"
                       "  using namespace psprecomp;\n"
                       "  bool apply_delayed_branch = state.branch_pending;\n"
                       "  std::uint32_t delayed_target = state.branch_target;\n"

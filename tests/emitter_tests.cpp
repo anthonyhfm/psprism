@@ -111,6 +111,16 @@ int main() {
     const std::string platform(
         (std::istreambuf_iterator<char>(platform_stream)),
         std::istreambuf_iterator<char>());
+    std::ifstream windows_platform_stream(project / "platform" / "windows" /
+                                          "platform.cpp");
+    const std::string windows_platform(
+        (std::istreambuf_iterator<char>(windows_platform_stream)),
+        std::istreambuf_iterator<char>());
+    std::ifstream windows_main_stream(project / "platform" / "windows" /
+                                      "main.cpp");
+    const std::string windows_main(
+        (std::istreambuf_iterator<char>(windows_main_stream)),
+        std::istreambuf_iterator<char>());
     std::ifstream func_stream(project / "generated" / "func_00001000_player_main.cpp");
     const std::string func_src(
         (std::istreambuf_iterator<char>(func_stream)),
@@ -148,5 +158,9 @@ int main() {
     CHECK(platform.find("note_cpu_import_dispatch(state)") !=
           std::string::npos);
     CHECK(platform.find("generated::run(state, 0xfffffff0U, 4096ULL)") !=
+          std::string::npos);
+    CHECK(windows_platform == platform);
+    CHECK(windows_main.find("#if defined(_WIN32)") != std::string::npos);
+    CHECK(windows_main.find("_putenv_s(name, text.c_str())") !=
           std::string::npos);
 }

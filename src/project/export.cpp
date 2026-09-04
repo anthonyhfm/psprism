@@ -306,6 +306,7 @@ namespace psprecomp
 									 ? "original/disc.iso"
 									 : std::filesystem::relative(executable, staging)
 										   .generic_string()));
+			write_text(staging / "CMakeLists.txt", native_cmake(config));
 			std::filesystem::create_directories(staging / "patches");
 			write_text(staging / "patches" / "patches.cpp", patch_template_source());
 			write_text(staging / "patches" / "README.md", patch_tutorial_readme());

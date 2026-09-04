@@ -19,6 +19,7 @@ void write_text(const std::filesystem::path& path, std::string_view value);
 std::string toml_string(std::string_view value);
 std::string generated_readme(const ExportConfig& config, InputKind kind,
                              std::string_view executable_source);
+std::string native_cmake(const ExportConfig& config);
 std::string root_makefile(const ExportConfig& config, bool has_disc,
                           std::string_view disc_executable,
                           std::string_view sfo_path,

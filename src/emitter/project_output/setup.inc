@@ -20,6 +20,7 @@
                                         : options.platform_directory;
     std::filesystem::create_directories(platform_directory / "psp");
     std::filesystem::create_directories(platform_directory / "macos");
+    std::filesystem::create_directories(platform_directory / "windows");
 
     struct PlatformImport {
         const Import* source;
