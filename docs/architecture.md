@@ -14,7 +14,7 @@ ISO 9660 or ELF/PRX
     -> address and function metadata
     -> portable C++ emitter
     -> CPU runtime and generated platform contract
-    -> platform/psp (PSPSDK PRX/ISO) or psprism + platform/macos (native app)
+    -> platform/psp (PSPSDK PRX/ISO) or refract + a native host backend
 ```
 
 ## Loader and relocated image
@@ -106,22 +106,25 @@ function directly.
 
 `platform/psp` owns module metadata, the MIPS ABI bridge, native thread
 trampolines and bindings for every resolved SCE import. On native targets,
-`platform/macos` is deliberately thin: the generated switch maps the game's
-import addresses to names, then delegates behavior to `psprism`.
+`platform/macos` and `platform/windows` deliberately share the same thin ABI
+adapter: the generated switch maps the game's import addresses to names, then
+delegates behavior to `refract`.
 
-`psprism` is the PSP-to-host syscall engine. Its common runtime owns guest
-pointer validation, PSP path translation, file handles and fallback reporting;
-the first host module supplies macOS clocks and sleeping. Every exported
+`refract` is the PSP-to-host syscall engine. Its common runtime owns guest
+pointer validation, PSP path translation, portable file access, clocks,
+sleeping and fallback reporting. Selected host backends provide graphics,
+audio, input, windows and dialogs. Every exported
 codebase receives the complete engine source in its root and links it as a
 static library. This is an intentional compatibility boundary: a game may
 carry local quirks while the repository copy remains the default for future
-exports. Unimplemented calls are logged once and return a PSP error. Linux and
-Windows host modules can later implement the same small host interface.
+exports. Unimplemented calls are logged once and return a PSP error. A new
+target implements the same small host interface and selects its source set in
+`refract/CMakeLists.txt`; translated code and PSP services remain unchanged.
 
 ## Export boundary
 
-The low-level emitter creates translated sources plus PSP and macOS platform
-glue.
+The low-level emitter creates translated sources plus PSP and native desktop
+platform glue.
 The project exporter wraps that output in a stable, beginner-facing codebase.
 It records input identity and choices in `project.toml`, copies the optional
 code map, and writes tracked build and patching files. Generated code, platform
@@ -132,7 +135,9 @@ ID and cryptographic hashes, rebuilds those private trees in a sibling staging
 directory, and publishes them atomically. The generated Makefile invokes this
 step before PSP and macOS builds and caches the result using the manifest, code
 map, input identity and toolchain revision. Failed validation or translation
-therefore cannot leave a plausible-looking partial hydration.
+therefore cannot leave a plausible-looking partial hydration. Native projects
+use a portable top-level CMake build which selects macOS or Windows adapters at
+configure time.
 
 ## Verification strategy
 
@@ -140,7 +145,7 @@ therefore cannot leave a plausible-looking partial hydration.
 - Compile synthetic C with PSPSDK, recompile it to C++, and compare it with the
   native reference implementation.
 - Compile the same generated C++ back to a PSP PRX and package an EBOOT.
-- Hydrate a clean export and build it as a native optimized macOS application.
+- Hydrate a clean export and build it as a native macOS and Windows application.
 - Compare register, memory and import traces between original and recompiled
   programs.
 - Treat PPSSPP and physical PSP hardware as independent validation targets.

@@ -44,7 +44,7 @@ The PSP backend can compile translated C++ functions back into a PRX using the P
 * **Memory Constraints (32 MB RAM):** Translating entire games into individual C++ translation units leads to significant binary bloat. Full-game recompilation frequently exhausts the PSP's tight user memory pool, causing complex titles to crash or fail to boot entirely.
 * **Hybrid Overlay Model:** For targeted modding and bugfixing, a code-map `overlay` mode allows compiling only selected functions to C++ while leaving unmodified functions native. Calls cross through ABI-, GP-, FPU-, and VFPU-safe trampolines. While this drastically reduces binary size, trampoline transitions still add latency when invoked in hot code paths.
 
-An automated PSP roundtrip test exercises this pipeline by lifting a fixture binary, editing a generated function, rebuilding the PRX, and observing the modified output in PPSSPP. Full-speed execution is intended for native host platforms (`refract` on macOS, Windows, Linux, and future homebrew targets).
+An automated PSP roundtrip test exercises this pipeline by lifting a fixture binary, editing a generated function, rebuilding the PRX, and observing the modified output in PPSSPP. Full-speed execution is intended for native host platforms (`refract` currently supports macOS and Windows, with more host backends planned).
 
 ---
 
@@ -77,7 +77,7 @@ An automated PSP roundtrip test exercises this pipeline by lifting a fixture bin
 |---|---|---|---|:---:|---|
 | **macOS** | ARM64 / x86_64 | Metal | CoreAudio / AudioToolbox | 🟢 **Working** | Reference native host. Full 3D rendering with Metal shaders, native gamepads, FFmpeg cutscene decoding, and Qt desktop dialogs. Daxter is fully playable (other titles WIP). |
 | **PSP Hardware / PPSSPP** | MIPS Allegrex | Native GE | Native MediaEngine / `sceAudio` | 🟡 **Diagnostics & Overlays** | Automated testbench and surgical function overlay patching. Full-game C++ recompilation on original hardware suffers from severe CPU state indirection overhead (`State` struct) and 32MB RAM limits, causing massive framerate drops or boot failures. |
-| **Windows** | x86_64 / ARM64 | DirectX 12 / Vulkan | WASAPI / XAudio2 | 🟡 **Planned** | Native Win32/UWP host implementation, Direct3D 12 and Vulkan rendering backends, MSVC and Clang toolchain support. |
+| **Windows** | x86_64 | Direct3D 11 | Win32 / XAudio2 | 🟢 **Working** | Native Win32 window and message loop, D3D11 GE rendering, XInput controllers, keyboard fallback, XAudio2 output, and MSVC/CMake builds. |
 | **Linux** | x86_64 / ARM64 | Vulkan | PulseAudio / PipeWire / SDL2 | 🟡 **Planned** | Native Vulkan graphics pipeline and Linux event loop. Targeted for Desktop Linux and Steam Deck / SteamOS. |
 | **Nintendo Switch** | ARM64 (Cortex-A57) | deko3d / Vulkan | libnx / SDL2 | ⏳ **Roadmap (Homebrew)** | Future homebrew target via devkitA64 and libnx. AOT recompilation avoids the CPU virtualization/JIT overhead of emulators. |
 | **Nintendo Wii U** | PowerPC (Espresso) | GX2 | Mocha / WUT | ⏳ **Roadmap (Homebrew)** | Planned homebrew target via devkitPPC and WUT, mapping the PSP GE pipeline to Nintendo GX2. |
@@ -93,8 +93,8 @@ For native execution on host platforms, `psprism` implements native host bridges
 | Subsystem / Module | Description | Status | Implementation Details |
 |---|---|:---:|---|
 | `sceDisplay` | Display & VBlank | 🟢 | Framebuffer presentation, double/triple buffering, VBlank interrupts, frame rate timing, and frame counters. |
-| `sceCtrl` | Controller & Input | 🟢 | Apple GameController framework integration (DualShock, DualSense, Xbox), analog stick deadzones, and keyboard fallback mapping. |
-| `sceGe` | Graphics Engine | 🟢 | Native Metal rendering pipeline. Scheduled display lists, stall address updates, full vertex decoder (3D transformed & 2D through mode), offscreen render targets (FBOs for character shadows), depth/stencil buffers, alpha blending, color doubling, and hash-based texture caching with 4/8/16/32-bit CLUT palettes. |
+| `sceCtrl` | Controller & Input | 🟢 | Apple GameController and Windows XInput integration, analog stick deadzones, and keyboard fallback mapping. |
+| `sceGe` | Graphics Engine | 🟢 | Native Metal and Direct3D 11 rendering pipelines. Scheduled display lists, stall address updates, full vertex decoder (3D transformed & 2D through mode), offscreen render targets, depth/stencil buffers, alpha blending, color doubling, and hash-based texture caching with 4/8/16/32-bit CLUT palettes. |
 | `sceKernel` | Threading, Sync & Memory | 🟢 | Cooperative and preemptive guest threading model, priority scheduling, Mutexes, Semaphores, Event Flags, and FIFO/priority Mailboxes (`Mbx`). Memory partition management, Fixed Pools (`Fpl`), Variable Pools (`Vpl`), microsecond alarms, and software interrupts. |
 | `sceIo` | Filesystem & Storage | 🟢 | ISO 9660 disc streaming, case-insensitive path normalization, virtual MemoryStick (`ms0:/`) mapping, raw LBN sector reads (`disc0:/sce_lbn*`), synchronous and non-blocking asynchronous I/O (`OpenAsync`, `ReadAsync`, `PollAsync`, `WaitAsync`), and FAT `devctl` capacity queries. |
 | `sceAudio` / `sceSas` / `sceAtrac` / `sceMp3` | Audio Subsystem | 🟢 | Low-latency multi-channel host mixer with queued blocking output (`AudioOutput2`). Complete 32-voice `sceSasCore` software synthesizer with ADSR envelopes, pitch modulation, noise, and VAG/PCM mixing. Streamed ATRAC3/ATRAC3+ decoding via standalone decoder with loop handling; basic MP3 stream decoding. |
@@ -144,6 +144,10 @@ make psp
 # Build or run the native macOS app
 make macos
 make macos-run
+
+# Or, from a Visual Studio developer shell on Windows (x86-64)
+cmake -S . -B build/windows -A x64
+cmake --build build/windows --config Release
 ```
 
 The first build runs `psprism hydrate`: it verifies the disc ID and SHA-256,
@@ -160,6 +164,13 @@ project:
 ```bash
 brew install ffmpeg
 ```
+
+On Windows, provide native libraries matching the selected CMake architecture
+through a package-manager toolchain or set `REFRACT_FFMPEG_ROOT` to an FFmpeg
+prefix containing `include`, `lib` and (for shared builds) `bin`. Qt 6.5 or
+newer is required for the in-window savedata, message and keyboard dialogs.
+`windeployqt` and FFmpeg DLLs are copied into the executable directory after a
+successful build.
 
 Set `-DREFRACT_USE_FFMPEG=OFF` only for a build that intentionally omits native
 H.264 cutscene decoding.

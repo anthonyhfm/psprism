@@ -69,6 +69,17 @@ make macos-run   # build and execute the native Release app
 make clean       # remove compiler products
 ```
 
+On Windows, configure the hydrated project with CMake from a Visual Studio
+developer shell, then build it with MSVC:
+
+```powershell
+cmake -S . -B build/windows -A x64
+cmake --build build/windows --config Release
+```
+
+The standard Windows target is x86-64. Use `-A ARM64` only for a native
+Windows-on-ARM build with matching Qt and FFmpeg libraries.
+
 `make hydrate` validates the input kind, disc ID, complete input SHA-256 and
 decrypted executable SHA-256 recorded in `project.toml`. It then extracts the
 private disc tree, statically recompiles the executable, generates platform
@@ -89,12 +100,16 @@ functions. The generated Makefile prints `PSP recompile mode: full` or
 `PSP recompile mode: overlays` before compiling. PSP C and C++ translation
 units are optimized with `-O2`.
 
-The native macOS build discovers FFmpeg from the system and common Homebrew
+The native desktop build discovers FFmpeg from the system and common Homebrew
 prefixes. Install it with `brew install ffmpeg`; the generated project links
 `avcodec`, `avformat`, `avutil` and `swscale` for PSMF/H.264 cutscenes. CMake
 fails during configuration when `REFRACT_USE_FFMPEG=ON` and those development
 libraries are unavailable, instead of producing a build with silently broken
 video. Use `-DREFRACT_USE_FFMPEG=OFF` only when cutscene decoding is not needed.
+On Windows, set `REFRACT_FFMPEG_ROOT` to a matching native FFmpeg development
+prefix when it is not supplied by the active package-manager toolchain. Qt 6.5+
+provides the same in-window savedata, message and on-screen-keyboard UI as the
+macOS build; `windeployqt` packages its runtime automatically.
 
 For ISO projects, the PSP targets create a lightweight run tree under
 `.psprecomp/run`. Game assets are symlinked from `disc/`, while the generated
@@ -107,8 +122,9 @@ Set `PPSSPP=/path/to/ppsspp` if the command is not in `PATH`.
 
 `platform/platform.h` is the hydrated contract for every imported PSP call.
 `platform/psp` satisfies it using the original SCE ABI and owns the PSP entry
-point. For `make macos-run`, the generated `platform/macos` adapter sends those
-imports to the statically linked `refract/` engine. The Makefile also points
+point. Native builds select the generated `platform/macos` or
+`platform/windows` adapter and send those imports to the statically linked
+`refract/` engine. The native entry point also points
 refract at the user's ISO and a private `.refract/ms0/` writable tree. The
 translated CPU code under `src/generated` therefore has no direct dependency
 on PSP SDK headers or SCE functions.
