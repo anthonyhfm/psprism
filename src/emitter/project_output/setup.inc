@@ -8,7 +8,8 @@
         const auto name = entry.path().filename().string();
         const auto generated_code =
             name.rfind("func_", 0) == 0 || name.rfind("unit_", 0) == 0 ||
-            name.rfind("shard_", 0) == 0;
+            name.rfind("shard_", 0) == 0 ||
+            name.rfind("native_unity_", 0) == 0;
         if (entry.is_regular_file() && entry.path().extension() == ".cpp" &&
             generated_code) {
             std::filesystem::remove(entry.path());

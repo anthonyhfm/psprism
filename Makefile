@@ -8,7 +8,8 @@ BIN_DIR ?= $(BUILD_DIR)/bin
 OBJ_DIR ?= $(BUILD_DIR)/obj
 
 CXXFLAGS ?= -O2
-COMMON_FLAGS := -std=c++20 -Wall -Wextra -Wpedantic -Werror $(CXXFLAGS)
+PSPRISM_REVISION ?= $(shell git rev-parse --short=12 HEAD 2>/dev/null || echo unknown)
+COMMON_FLAGS := -std=c++20 -Wall -Wextra -Wpedantic -Werror $(CXXFLAGS) -DPSPRECOMP_BUILD_REVISION=\"$(PSPRISM_REVISION)\"
 THIRD_PARTY_FLAGS := -std=c++20 -Wall -Wextra -O2
 
 # Autodetect Homebrew / system paths
@@ -39,6 +40,7 @@ PPSSPP  := $(shell if command -v PPSSPPSDL >/dev/null 2>&1; then command -v PPSS
 PSPRISM_SRCS := \
     src/main.cpp \
     src/decrypt.cpp \
+    src/hash.cpp \
     src/elf/loader.cpp \
     src/elf/code_map.cpp \
     src/elf/image.cpp \
@@ -55,7 +57,8 @@ PSPRISM_SRCS := \
     src/project/input.cpp \
     src/project/templates.cpp \
     src/project/iso_patch_template.cpp \
-    src/project/export.cpp
+    src/project/export.cpp \
+    src/project/hydrate.cpp
 
 PSPRISM_OBJS := $(patsubst %.cpp,$(OBJ_DIR)/%.o,$(PSPRISM_SRCS))
 
@@ -77,6 +80,7 @@ TARGET_PSPRISM := $(BIN_DIR)/psprism
 
 # Test targets
 TEST_RUNNERS := \
+    $(BIN_DIR)/hash_tests \
     $(BIN_DIR)/runtime_tests \
     $(BIN_DIR)/iso_tests \
     $(BIN_DIR)/elf_tests \
@@ -114,6 +118,8 @@ $(OBJ_DIR)/src/%.o: src/%.cpp
 	    -DREFRACT_REFRACT_DIR=\"$(CURDIR)/refract\" \
 	    -c $< -o $@
 
+$(OBJ_DIR)/src/emitter/project_output.o: $(wildcard src/emitter/project_output/*.inc)
+
 $(OBJ_DIR)/refract/third_party/at3_standalone/%.o: refract/third_party/at3_standalone/%.cpp
 	@mkdir -p $(dir $@)
 	$(CXX) $(THIRD_PARTY_FLAGS) -Irefract/third_party/at3_standalone -c $< -o $@
@@ -125,6 +131,9 @@ $(OBJ_DIR)/refract/src/%.o: refract/src/%.cpp
 # Test executables
 $(BIN_DIR)/runtime_tests: tests/runtime_tests.cpp | $(BIN_DIR)
 	$(CXX) $(COMMON_FLAGS) -Iinclude -DPSPRECOMP_PROFILE_CPU $< -o $@
+
+$(BIN_DIR)/hash_tests: tests/hash_tests.cpp src/hash.cpp | $(BIN_DIR)
+	$(CXX) $(COMMON_FLAGS) -Isrc $^ -o $@
 
 $(BIN_DIR)/iso_tests: tests/iso_tests.cpp src/iso.cpp src/decrypt.cpp | $(BIN_DIR)
 	$(CXX) $(COMMON_FLAGS) -Isrc -Iinclude $^ -ldl -o $@

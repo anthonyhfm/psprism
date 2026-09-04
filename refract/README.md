@@ -8,6 +8,10 @@ same public interface.
 The copy in a generated game belongs to that game. Add compatibility quirks
 there when a title needs behavior that should not yet become a global default.
 
+Refract is licensed under GNU GPL version 3 or later as part of psprism.
+Bundled PSPSDK headers and the standalone ATRAC decoder retain the separate
+licenses documented in the repository's `THIRD_PARTY_NOTICES.md`.
+
 Currently implemented building blocks include logging, process exit, clocks,
 delays, controller-neutral input, UMD status and synchronous/async-style file
 I/O against the exported `disc/` and `.refract/ms0/` trees. Unknown imports are

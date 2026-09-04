@@ -27,6 +27,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 add_executable(psprism
     src/main.cpp
     src/decrypt.cpp
+    src/hash.cpp
     src/elf/loader.cpp
     src/elf/code_map.cpp
     src/elf/image.cpp
@@ -44,10 +45,21 @@ add_executable(psprism
     src/project/templates.cpp
     src/project/iso_patch_template.cpp
     src/project/export.cpp
+    src/project/hydrate.cpp
 )
+execute_process(
+    COMMAND git rev-parse --short=12 HEAD
+    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+    OUTPUT_VARIABLE PSPRISM_REVISION
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET)
+if(NOT PSPRISM_REVISION)
+    set(PSPRISM_REVISION unknown)
+endif()
 target_compile_definitions(psprism PRIVATE
     PSPRECOMP_SOURCE_INCLUDE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/include"
-    REFRACT_REFRACT_DIR="${CMAKE_CURRENT_SOURCE_DIR}/refract")
+    REFRACT_REFRACT_DIR="${CMAKE_CURRENT_SOURCE_DIR}/refract"
+    PSPRECOMP_BUILD_REVISION="${PSPRISM_REVISION}")
 target_include_directories(psprism PRIVATE src include)
 target_compile_options(psprism PRIVATE -Wall -Wextra -Wpedantic -Werror)
 target_link_libraries(psprism PRIVATE ${CMAKE_DL_LIBS})
@@ -238,4 +250,9 @@ if(BUILD_TESTING)
                     ${CMAKE_CURRENT_SOURCE_DIR}
         )
     endif()
+
+    add_executable(hash_tests tests/hash_tests.cpp src/hash.cpp)
+    target_include_directories(hash_tests PRIVATE src)
+    target_compile_options(hash_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+    add_test(NAME hash_tests COMMAND hash_tests)
 endif()

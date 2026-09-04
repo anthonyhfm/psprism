@@ -45,12 +45,21 @@ namespace psprecomp::project_detail
 								 std::string_view executable_source)
 	{
 		std::ostringstream out;
+		const auto input_instruction =
+			kind == InputKind::iso
+				? "Place the supported ISO at `original/disc.iso`, or pass "
+				  "`GAME_INPUT=/path/to/game.iso`."
+				: "Place the supported executable at the `GAME_INPUT` path shown in "
+				  "the Makefile, or pass `GAME_INPUT=/path/to/game.elf`.";
 		out << "# " << config.display_name
 			<< "\n\n"
-			   "This is a complete PSPRecomp export. It contains the generated C++ "
-			   "code, a vendored runtime, project metadata and build helpers.\n\n"
+			   "This is a bring-your-own-game PSPRecomp project. Copyrighted game "
+			   "code and assets are not distributed; they are generated locally from "
+			   "your legally obtained input.\n\n"
 			   "## Build\n\n"
-			   "The generated codebase has one command per target platform:\n\n"
+			<< input_instruction << " Then use one command per target platform. "
+			   "The first build hydrates private files "
+			   "automatically; later builds use the local cache.\n\n"
 			   "```sh\n"
 			   "make psp        # build PSP output (plus ISO for disc exports)\n"
 			   "make psp-run    # build and launch through the PPSSPP CLI\n"
@@ -58,7 +67,9 @@ namespace psprecomp::project_detail
 			   "make macos-debug # build a native Debug .app\n"
 			   "make macos-run  # build and run the native Release app\n"
 			   "```\n\n"
-			   "The PSP targets require PSPSDK and `psp-config` in `PATH`. The "
+			   "Hydration needs `psprism` in `PATH`, `PSPRISM=/path/to/psprism`, or a "
+			   "checkout at `toolchain/psprism`. The PSP targets require PSPSDK and "
+			   "`psp-config` in `PATH`. The "
 			   "macOS target requires CMake, Apple Clang and Qt 6 base for desktop "
 			   "system dialogs. Homebrew users can install it with "
 			   "`brew install qtbase`.\n\n"
@@ -76,16 +87,36 @@ namespace psprecomp::project_detail
 			   "- `platform/platform.h`: complete imported-API contract\n"
 			   "- `platform/psp/`: PSP entry point, ABI bridge and real SCE calls\n"
 			   "- `platform/macos/`: native entry point and psprism adapter\n"
-			   "- `refract/`: vendored, game-editable PSP-to-host runtime engine\n"
+			   "- `refract/`: hydrated PSP-to-host runtime engine\n"
 			   "- `include/psprecomp/`: portable runtime used by generated code\n"
 			   "- `config/`: the optional code map used for this export\n"
 			   "- `disc/`: extracted original disc filesystem (ISO inputs only)\n"
-			   "- `original/`: selected input executable when no disc was extracted\n"
+			   "- `original/`: private input location\n"
 			   "- `project.toml`: reproducible project metadata\n\n"
 			   "Input type: `"
 			<< (kind == InputKind::iso ? "iso" : "executable") << "`  \n"
 			<< "Selected executable: `" << executable_source
 			<< "`\n\n"
+			   "Generated code, runtime copies, disc data and original inputs are "
+			   "Git-ignored. Keep project-specific changes in `patches/`; hydration "
+			   "may replace the private generated trees when the toolchain changes. "
+			   "Publish the Git tree rather than an archive of this hydrated working "
+			   "directory.\n\n"
+			   "## License and proprietary game content\n\n"
+			   "The original project skeleton, build integration and patches are "
+			   "licensed under GNU GPL version 3 or later. See `LICENSE`, "
+			   "`LICENSING.md` and `THIRD_PARTY_NOTICES.md`. Those terms do not "
+			   "license the original game, generated translations, disc images, "
+			   "decrypted executables, assets or built game output. Do not publish "
+			   "hydrated files or compiled game binaries.\n\n"
+			   "This project is unofficial and is not affiliated with or endorsed by "
+			   "Sony Interactive Entertainment or any game publisher or "
+			   "rightsholder.\n\n"
+			   "For the first public commit, initialize Git inside a clean export, run "
+			   "`git add .`, and inspect both `git status --short --ignored` and "
+			   "`git ls-files`. The generated ignore rules keep hydration and build "
+			   "trees out of a normal add, but they cannot undo files that were "
+			   "previously committed or added with `--force`.\n\n"
 			   "> Keep copyrighted game data private and only work with dumps you "
 			   "are legally entitled to use.\n";
 		return out.str();
@@ -94,10 +125,17 @@ namespace psprecomp::project_detail
 	std::string root_makefile(const ExportConfig &config, bool has_disc,
 							  std::string_view disc_executable,
 							  std::string_view sfo_path,
-							  std::string_view psp_recompile_mode)
+							  std::string_view psp_recompile_mode,
+							  std::string_view hydration_input)
 	{
 		std::ostringstream out;
 		out << "PPSSPP ?= ppsspp\n"
+			   "GAME_INPUT ?= " << hydration_input << "\n"
+			   "PSPRISM ?= psprism\n"
+			   "PSPRISM_SOURCE ?= toolchain/psprism\n"
+			   "PSPRISM_LOCAL := $(PSPRISM_SOURCE)/build/bin/psprism\n"
+			   "HYDRATE_FLAGS ?=\n"
+			   "JOBS ?= 8\n"
 			   "CXX ?= clang++\n"
 			   "OBJCXX ?= clang++\n"
 			   "PSP_RECOMPILE_MODE := "
@@ -146,24 +184,50 @@ namespace psprecomp::project_detail
 			   "  refract/third_party/at3_standalone/fft.cpp \\\n"
 			   "  refract/third_party/at3_standalone/mem.cpp \\\n"
 			   "  $(REFRACT_DIALOG_SRCS)\n\n"
-			   "GENERATED_SRCS := $(wildcard src/generated/func_*.cpp src/generated/shard_*.cpp) src/generated/dispatch.cpp\n"
+			   "NATIVE_UNITY_SRCS := $(wildcard src/generated/native_unity_*.cpp)\n"
+			   "ifneq ($(NATIVE_UNITY_SRCS),)\n"
+			   "  GENERATED_SRCS := $(NATIVE_UNITY_SRCS) src/generated/dispatch.cpp\n"
+			   "else\n"
+			   "  GENERATED_SRCS := $(wildcard src/generated/func_*.cpp src/generated/shard_*.cpp) src/generated/dispatch.cpp\n"
+			   "endif\n"
 			   "PATCH_SRCS := $(wildcard patches/*.cpp)\n"
 			   "PLATFORM_SRCS := platform/macos/main.cpp platform/macos/platform.cpp\n\n"
+			   "MACOS_CPP_SRCS := $(GENERATED_SRCS) $(PATCH_SRCS) $(PLATFORM_SRCS) $(REFRACT_SRCS)\n"
+			   "MACOS_CPP_OBJS := $(patsubst %.cpp,$(MACOS_OBJ_DIR)/%.o,$(MACOS_CPP_SRCS))\n"
+			   "MACOS_FRONTEND_OBJ := $(MACOS_OBJ_DIR)/refract/src/host/macos_frontend.o\n\n"
 			   "MACOS_INCLUDES := -I. -Iinclude -Isrc/generated -Ipatches -Irefract/include -Irefract/include/pspsdk -Irefract/src -Irefract/third_party/at3_standalone $(FFMPEG_CFLAGS) $(QT_CFLAGS) $(QT_DEFS)\n\n"
 			   "MACOS_LIBS := -framework AppKit -framework AudioToolbox -framework GameController -framework Metal -framework MetalKit $(FFMPEG_LIBS) $(QT_LIBS)\n\n"
-			   ".PHONY: all psp-recompile-check psp-binary psp psp-run macos macos-debug macos-run clean rebuild ppsspp disc-tree help\n\n"
+			   ".PHONY: all hydrate psp-recompile-check psp-binary psp-build psp psp-run macos-build macos macos-debug macos-run clean rebuild ppsspp disc-tree help\n\n"
 			   "all: psp\n\n"
+			   "hydrate:\n"
+			   "\t@set -e; \\\n"
+			   "\tif [ ! -f \"$(GAME_INPUT)\" ]; then \\\n"
+			   "\t  echo \"Missing game input: $(GAME_INPUT)\" >&2; \\\n"
+			   "\t  echo \"Place your legally obtained ISO at original/disc.iso or run make GAME_INPUT=/path/to/game.iso.\" >&2; \\\n"
+			   "\t  exit 1; \\\n"
+			   "\telif command -v \"$(PSPRISM)\" >/dev/null 2>&1; then \\\n"
+			   "\t  tool=\"$(PSPRISM)\"; \\\n"
+			   "\telif [ -f \"$(PSPRISM_SOURCE)/Makefile\" ]; then \\\n"
+			   "\t  $(MAKE) -C \"$(PSPRISM_SOURCE)\" psprism; \\\n"
+			   "\t  tool=\"$(PSPRISM_LOCAL)\"; \\\n"
+			   "\telse \\\n"
+			   "\t  echo \"psprism not found. Install it, set PSPRISM=/path/to/psprism, or initialize toolchain/psprism.\" >&2; \\\n"
+			   "\t  exit 1; \\\n"
+			   "\tfi; \\\n"
+			   "\t\"$$tool\" hydrate --project \"$(CURDIR)\" --input \"$(GAME_INPUT)\" $(HYDRATE_FLAGS)\n\n"
 			   "psp-recompile-check:\n"
 			   "\t@echo \"PSP recompile mode: $(PSP_RECOMPILE_MODE)\"\n\n"
 			   "psp-binary: psp-recompile-check\n"
 			   "\t$(MAKE) -C src/generated\n\n";
 		if (has_disc)
 		{
-			out << "psp: psp-binary\n"
+			out << "psp: hydrate\n"
+				   "\t@$(MAKE) --no-print-directory psp-build\n\n"
+				   "psp-build: psp-binary\n"
 				<< "\tmkdir -p dist .psprecomp\n"
 				   "\t$(CXX) -std=c++20 -O2 -o .psprecomp/iso_patch "
 				   "tools/iso_patch.cpp\n"
-				   "\t.psprecomp/iso_patch \"$(CURDIR)/original/disc.iso\" "
+				   "\t.psprecomp/iso_patch \"$(abspath $(GAME_INPUT))\" "
 				   "\"$(CURDIR)/dist/"
 				<< config.project_name << ".iso\""
 				<< " \"" + std::string(disc_executable) +
@@ -180,18 +244,21 @@ namespace psprecomp::project_detail
 		}
 		else
 		{
-			out << "psp: psp-binary\n"
+			out << "psp: hydrate\n"
+				   "\t@$(MAKE) --no-print-directory psp-build\n\n"
+				   "psp-build: psp-binary\n"
 				   "\t@echo \"Built src/generated/EBOOT.PBP (an ISO input is "
 				   "required to create a disc image).\"\n\n"
 				   "psp-run: psp\n"
 				   "\t$(PPSSPP) \"$(CURDIR)/src/generated/EBOOT.PBP\"\n\n";
 		}
-		out << "macos: $(MACOS_BIN_DIR)/" << config.project_name << "\n\n"
-			   "$(MACOS_BIN_DIR)/" << config.project_name << ": $(GENERATED_SRCS) $(PATCH_SRCS) $(PLATFORM_SRCS) $(REFRACT_SRCS) refract/src/host/macos_frontend.mm\n"
-			   "\t@mkdir -p $(MACOS_BIN_DIR) $(MACOS_RES_DIR) $(MACOS_OBJ_DIR)\n"
+		out << "macos: hydrate\n"
+			   "\t@$(MAKE) --no-print-directory -j$(JOBS) macos-build\n\n"
+			   "macos-build: $(MACOS_BIN_DIR)/" << config.project_name << "\n\n"
+			   "$(MACOS_BIN_DIR)/" << config.project_name << ": $(MACOS_CPP_OBJS) $(MACOS_FRONTEND_OBJ)\n"
+			   "\t@mkdir -p $(MACOS_BIN_DIR) $(MACOS_RES_DIR)\n"
 			   "\t@echo \"Compiling native macOS application (" << config.project_name << ")...\"\n"
-			   "\t@$(OBJCXX) $(MACOS_CXXFLAGS) -fobjc-arc $(MACOS_INCLUDES) -c refract/src/host/macos_frontend.mm -o $(MACOS_OBJ_DIR)/macos_frontend.o\n"
-			   "\t@$(CXX) $(MACOS_CXXFLAGS) $(MACOS_INCLUDES) $(GENERATED_SRCS) $(PATCH_SRCS) $(PLATFORM_SRCS) $(REFRACT_SRCS) $(MACOS_OBJ_DIR)/macos_frontend.o $(MACOS_LIBS) -o $@\n"
+			   "\t@$(CXX) $(MACOS_CXXFLAGS) $(MACOS_CPP_OBJS) $(MACOS_FRONTEND_OBJ) $(MACOS_LIBS) -o $@\n"
 			   "\t@cp -f src/generated/guest_image.bin src/generated/relocations.bin $(MACOS_RES_DIR)/ 2>/dev/null || true\n"
 			   "\t@printf '<?xml version=\"1.0\" encoding=\"UTF-8\"?>\\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\\n<plist version=\"1.0\">\\n<dict>\\n  <key>CFBundleExecutable</key>\\n  <string>"
 			<< config.project_name
@@ -201,19 +268,26 @@ namespace psprecomp::project_detail
 			<< toml_string(config.display_name)
 			<< "</string>\\n  <key>CFBundlePackageType</key>\\n  <string>APPL</string>\\n</dict>\\n</plist>\\n' > $(MACOS_APP_DIR)/Contents/Info.plist\n"
 			   "\t@echo \"Built $(MACOS_APP_DIR)\"\n\n"
+			   "$(MACOS_OBJ_DIR)/%.o: %.cpp\n"
+			   "\t@mkdir -p $(dir $@)\n"
+			   "\t@$(CXX) $(MACOS_CXXFLAGS) -MMD -MP $(MACOS_INCLUDES) -c $< -o $@\n\n"
+			   "$(MACOS_FRONTEND_OBJ): refract/src/host/macos_frontend.mm\n"
+			   "\t@mkdir -p $(dir $@)\n"
+			   "\t@$(OBJCXX) $(MACOS_CXXFLAGS) -MMD -MP -fobjc-arc $(MACOS_INCLUDES) -c $< -o $@\n\n"
+			   "-include $(MACOS_CPP_OBJS:.o=.d) $(MACOS_FRONTEND_OBJ:.o=.d)\n\n"
 			   "macos-debug:\n"
 			   "\t$(MAKE) macos MACOS_BUILD_TYPE=Debug\n\n"
 			   "macos-run: macos\n"
 			   "\tREFRACT_DISC_ROOT=\"$(CURDIR)/disc\" \\\n"
-			   "\tREFRACT_DISC_IMAGE=\"$(CURDIR)/original/disc.iso\" \\\n"
+			   "\tREFRACT_DISC_IMAGE=\"$(abspath $(GAME_INPUT))\" \\\n"
 			   "\tREFRACT_WRITABLE_ROOT=\"$(CURDIR)/.refract/ms0\" \\\n"
 			   "\t\"$(CURDIR)/$(MACOS_BIN_DIR)/"
 			<< config.project_name
 			<< "\" $(MACOS_RUN_ARGS)\n\n"
 			   "ppsspp: psp-run\n\n"
 			   "clean:\n"
-			   "\t$(MAKE) -C src/generated clean\n"
-			   "\trm -rf build/macos dist .psprecomp\n\n"
+			   "\t@if [ -f src/generated/Makefile ]; then $(MAKE) -C src/generated clean; fi\n"
+			   "\trm -rf build/macos dist .psprecomp/run .psprecomp/iso_patch\n\n"
 			   "rebuild: clean all\n\n";
 		if (has_disc)
 		{
@@ -236,6 +310,7 @@ namespace psprecomp::project_detail
 				   "\t@false\n\n";
 		}
 		out << "help:\n"
+			   "\t@echo \"make hydrate    Generate private code/assets from the user's ISO\"\n"
 			   "\t@echo \"make psp        Build the PSP PRX and EBOOT"
 			<< (has_disc ? " plus ISO" : "")
 			<< "\"\n"
@@ -250,6 +325,9 @@ namespace psprecomp::project_detail
 	std::string patch_template_source()
 	{
 		return
+			"// SPDX-FileCopyrightText: 2026 Anthony Hofmeister\n"
+			"// SPDX-License-Identifier: GPL-3.0-or-later\n"
+			"//\n"
 			"// PSP game-function patches\n"
 			"//\n"
 			"// Write C++ replacements and reverse-engineered game declarations here.\n"

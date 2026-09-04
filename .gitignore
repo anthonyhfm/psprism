@@ -10,7 +10,9 @@ compile_commands.json
 *.o
 *.a
 *.elf
+*.ELF
 *.prx
+*.PRX
 *.pbp
 *.PBP
 PARAM.SFO
@@ -24,8 +26,11 @@ PARAM.SFO
 /PSP_GAME/
 /UMD_DATA.BIN
 *.iso
+*.ISO
 *.cso
+*.CSO
 *.chd
+*.CHD
 *.gpr
 *.rep/
 *.map

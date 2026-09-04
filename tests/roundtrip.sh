@@ -7,6 +7,10 @@ PSP_LD=$3
 PSP_GXX=$4
 HOST_CXX=$5
 SOURCE_DIR=$6
+case "$RECOMPILER" in
+    /*) ;;
+    *) RECOMPILER=$(cd "$(dirname "$RECOMPILER")" && pwd)/$(basename "$RECOMPILER") ;;
+esac
 ROUNDTRIP_TMP=$(mktemp -d "${TMPDIR:-/tmp}/psprecomp-roundtrip.XXXXXX")
 PPSSPP_PID=
 cleanup() {
@@ -123,8 +127,8 @@ grep -q '// Original PSP binary range: \[0x00000020, 0x' \
     -o "$ROUNDTRIP_TMP/project-patch-runner"
 "$ROUNDTRIP_TMP/project-patch-runner"
 
-# Exercise the beginner-facing, self-contained codebase exporter. The exported
-# project must build without referring back to PSPRecomp's source tree.
+# Exercise the beginner-facing bring-your-own-game exporter. The exported
+# project must regenerate its private trees using the selected psprism tool.
 # Use the fixed-address fixture here so the beginner-facing target also covers
 # that full-C++ loader; the relocatable full loader is exercised below.
 "$RECOMPILER" init "$ROUNDTRIP_TMP/arithmetic.elf" \
@@ -133,6 +137,48 @@ grep -q '// Original PSP binary range: \[0x00000020, 0x' \
     --output "$ROUNDTRIP_TMP/exported" \
     --yes
 test -s "$ROUNDTRIP_TMP/exported/project.toml"
+test -s "$ROUNDTRIP_TMP/exported/LICENSE"
+test -s "$ROUNDTRIP_TMP/exported/LICENSING.md"
+test -s "$ROUNDTRIP_TMP/exported/THIRD_PARTY_NOTICES.md"
+grep -q 'GNU GENERAL PUBLIC LICENSE' "$ROUNDTRIP_TMP/exported/LICENSE"
+grep -q 'Generated translation output' "$ROUNDTRIP_TMP/exported/LICENSING.md"
+grep -q 'ATRAC3/ATRAC3+' "$ROUNDTRIP_TMP/exported/THIRD_PARTY_NOTICES.md"
+grep -q '^\*\.ISO$' "$ROUNDTRIP_TMP/exported/.gitignore"
+git -C "$ROUNDTRIP_TMP/exported" init -q
+for private_path in \
+    original/disc.iso \
+    original/decrypted.elf \
+    disc/PSP_GAME/SYSDIR/EBOOT.BIN \
+    src/generated/dispatch.cpp \
+    platform/macos/platform.cpp \
+    include/psprecomp/runtime.hpp \
+    refract/src/runtime.cpp \
+    build/macos/game.app \
+    dist/game.iso \
+    loose-copy.ISO \
+    loose-copy.ELF \
+    loose-copy.prx \
+    loose-copy.PRX \
+    loose-copy.PBP; do
+    git -C "$ROUNDTRIP_TMP/exported" check-ignore -q --no-index "$private_path"
+done
+for public_path in LICENSE LICENSING.md THIRD_PARTY_NOTICES.md \
+    README.md Makefile patches/patches.cpp project.toml; do
+    if git -C "$ROUNDTRIP_TMP/exported" check-ignore -q --no-index \
+        "$public_path"; then
+        echo "public project file is unexpectedly ignored: $public_path" >&2
+        exit 1
+    fi
+done
+git -C "$ROUNDTRIP_TMP/exported" add .
+tracked_private=$(git -C "$ROUNDTRIP_TMP/exported" ls-files --cached -- \
+    original disc src/generated platform include/psprecomp refract | \
+    grep -Ev '(^|/)\.gitkeep$' || true)
+if [ -n "$tracked_private" ]; then
+    echo "private hydration output would be committed:" >&2
+    echo "$tracked_private" >&2
+    exit 1
+fi
 test -s "$ROUNDTRIP_TMP/exported/include/psprecomp/runtime.hpp"
 test -s "$ROUNDTRIP_TMP/exported/platform/platform.h"
 test -s "$ROUNDTRIP_TMP/exported/platform/psp/main.cpp"
@@ -151,7 +197,8 @@ grep -q 'refract::Runtime::instance' \
 grep -q '^psp:' "$ROUNDTRIP_TMP/exported/Makefile"
 grep -q '^psp-run:' "$ROUNDTRIP_TMP/exported/Makefile"
 grep -q '^PSP_RECOMPILE_MODE := full$' "$ROUNDTRIP_TMP/exported/Makefile"
-grep -q '^psp: psp-binary$' "$ROUNDTRIP_TMP/exported/Makefile"
+grep -q '^psp: hydrate$' "$ROUNDTRIP_TMP/exported/Makefile"
+grep -q '^hydrate:$' "$ROUNDTRIP_TMP/exported/Makefile"
 grep -q '^CFLAGS = -O2 ' \
     "$ROUNDTRIP_TMP/exported/src/generated/Makefile"
 if grep -q '^CFLAGS = -Os ' \
@@ -170,19 +217,31 @@ if grep -E 'sce[A-Z]|pspkernel[.]h' "$ROUNDTRIP_TMP/exported/src/generated/"*.cp
     echo "portable generated core contains a direct PSP API dependency" >&2
     exit 1
 fi
+if "$RECOMPILER" hydrate --project "$ROUNDTRIP_TMP/exported" \
+    --input "$ROUNDTRIP_TMP/project.elf" \
+    > "$ROUNDTRIP_TMP/wrong-revision.log" 2>&1; then
+    echo "hydration accepted the wrong executable revision" >&2
+    exit 1
+fi
+grep -q 'input SHA-256 does not match' "$ROUNDTRIP_TMP/wrong-revision.log"
+rm -rf "$ROUNDTRIP_TMP/exported/src/generated" \
+    "$ROUNDTRIP_TMP/exported/platform" \
+    "$ROUNDTRIP_TMP/exported/include/psprecomp" \
+    "$ROUNDTRIP_TMP/exported/refract" \
+    "$ROUNDTRIP_TMP/exported/.psprecomp"
 printf '%s\n' \
     '#include <psprecomp/patch.hpp>' \
     'extern "C" int psprism_patch_link_probe(int value) { return value + 1; }' \
     'RECOMP_PATCH_FUNCTION(psprecomp::patch::image_offset(0x007ffffcU), psprism_patch_link_probe);' \
     > "$ROUNDTRIP_TMP/exported/patches/link_probe.cpp"
-make -C "$ROUNDTRIP_TMP/exported" psp -j2
+make -C "$ROUNDTRIP_TMP/exported" psp -j2 PSPRISM="$RECOMPILER"
 test -s "$ROUNDTRIP_TMP/exported/src/generated/roundtrip_export.prx"
 test -s "$ROUNDTRIP_TMP/exported/src/generated/EBOOT.PBP"
 test -s "$ROUNDTRIP_TMP/exported/src/generated/user_patch_link_probe.o"
 "$PSP_BIN_DIR/psp-nm" "$ROUNDTRIP_TMP/exported/src/generated/roundtrip_export.elf" | \
     grep -q 'psprism_patch_link_probe'
 if [ "$(uname -s)" = Darwin ]; then
-    make -C "$ROUNDTRIP_TMP/exported" macos
+    make -C "$ROUNDTRIP_TMP/exported" macos PSPRISM="$RECOMPILER"
     test -x "$ROUNDTRIP_TMP/exported/build/macos/roundtrip_export.app/Contents/MacOS/roundtrip_export"
 fi
 
@@ -238,7 +297,8 @@ grep -q '^PSP_RECOMPILE_MODE := full$' \
     "$ROUNDTRIP_TMP/relocatable-original-guard/Makefile"
 grep -q '^OBJS = main[.]o platform[.]o imports[.]o dispatch[.]o' \
     "$ROUNDTRIP_TMP/relocatable-original-guard/src/generated/Makefile"
-make -C "$ROUNDTRIP_TMP/relocatable-original-guard" psp -j2
+make -C "$ROUNDTRIP_TMP/relocatable-original-guard" psp -j2 \
+    PSPRISM="$RECOMPILER"
 printf 'overlay 0x%s\n' "$overlay_address" \
     >> "$ROUNDTRIP_TMP/relocatable.map"
 "$RECOMPILER" init "$ROUNDTRIP_TMP/relocatable-fixture.prx" \
@@ -304,7 +364,8 @@ grep -q -- '-DPSPRECOMP_PSP_OVERLAY' \
     "$ROUNDTRIP_TMP/relocatable-exported/src/generated/Makefile"
 test "$(wc -c < "$ROUNDTRIP_TMP/relocatable-exported/src/generated/native_guest_image.bin")" \
     = "$(wc -c < "$ROUNDTRIP_TMP/relocatable-exported/src/generated/guest_image.bin")"
-make -C "$ROUNDTRIP_TMP/relocatable-exported" psp -j2
+make -C "$ROUNDTRIP_TMP/relocatable-exported" psp -j2 \
+    PSPRISM="$RECOMPILER"
 test -s "$ROUNDTRIP_TMP/relocatable-exported/src/generated/relocatable_fixture.prx"
 overlay_native_address=$("$PSP_BIN_DIR/psp-nm" \
     "$ROUNDTRIP_TMP/relocatable-exported/src/generated/relocatable_fixture.elf" | \

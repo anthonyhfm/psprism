@@ -3,6 +3,7 @@
 #include "iso_patch.hpp"
 #include "project.hpp"
 
+#include <cstdlib>
 #include <filesystem>
 #include <iostream>
 #include <optional>
@@ -30,7 +31,10 @@ void usage(const char *program) {
       << " <game.iso|input.elf>    Inspect input and start the wizard\n"
          "  "
       << program
-      << " init [input] [options]  Export a complete codebase\n\n"
+      << " init [input] [options]  Export a complete codebase\n"
+         "  "
+      << program
+      << " hydrate [options]       Generate private files from the user's game\n\n"
          "Init options:\n"
          "  --display-name <name>   Name shown in the PSP menu\n"
          "  --project-name <name>   Filesystem/build-safe project name\n"
@@ -39,6 +43,10 @@ void usage(const char *program) {
          "  --extract-disc          Extract all ISO files (default)\n"
          "  --no-extract-disc       Only extract the selected executable\n"
          "  -y, --yes                Accept defaults; do not prompt\n\n"
+         "Hydrate options:\n"
+         "  --project <directory>  Existing exported project (default: .)\n"
+         "  --input <game.iso>     User-owned ISO/ELF (default: original/disc.iso)\n"
+         "  --force                Regenerate even when the hydration cache matches\n\n"
          "Low-level compatibility commands:\n"
          "  "
       << program
@@ -112,6 +120,103 @@ struct InitArguments {
   bool extract_disc_set{};
   bool assume_yes{};
 };
+
+struct HydrateArguments {
+  std::filesystem::path project{"."};
+  std::filesystem::path input;
+  bool force{};
+};
+
+std::filesystem::path resolve_executable(std::string_view program) {
+  const std::filesystem::path supplied(program);
+  if (supplied.has_parent_path()) {
+    return std::filesystem::absolute(supplied).lexically_normal();
+  }
+  const auto* path_environment = std::getenv("PATH");
+  if (path_environment == nullptr) return {};
+  std::string_view paths(path_environment);
+  constexpr char path_separator =
+#if defined(_WIN32)
+      ';';
+#else
+      ':';
+#endif
+  while (!paths.empty()) {
+    const auto separator = paths.find(path_separator);
+    const auto directory = paths.substr(0U, separator);
+    const auto candidate = std::filesystem::path(directory) / supplied;
+    if (std::filesystem::is_regular_file(candidate)) {
+      return std::filesystem::absolute(candidate).lexically_normal();
+    }
+    if (separator == std::string_view::npos) break;
+    paths.remove_prefix(separator + 1U);
+  }
+  return {};
+}
+
+HydrateArguments parse_hydrate_arguments(int argc, char** argv, int first) {
+  HydrateArguments result;
+  for (int index = first; index < argc; ++index) {
+    const std::string_view argument(argv[index]);
+    const auto take_value = [&](std::string_view option) -> std::string {
+      if (index + 1 >= argc) {
+        throw std::runtime_error("missing value after " + std::string(option));
+      }
+      return argv[++index];
+    };
+    if (argument == "--project") {
+      result.project = take_value(argument);
+    } else if (argument == "--input") {
+      result.input = take_value(argument);
+    } else if (argument == "--force") {
+      result.force = true;
+    } else {
+      throw std::runtime_error("unknown hydrate option: " +
+                               std::string(argument));
+    }
+  }
+  return result;
+}
+
+int run_hydrate(HydrateArguments arguments, std::string_view executable) {
+  arguments.project =
+      std::filesystem::absolute(arguments.project).lexically_normal();
+  if (arguments.input.empty()) {
+    arguments.input = arguments.project / "original/disc.iso";
+  }
+  arguments.input =
+      std::filesystem::absolute(arguments.input).lexically_normal();
+  if (!std::filesystem::is_regular_file(arguments.input)) {
+    throw std::runtime_error(
+        "game input not found: " + arguments.input.string() +
+        "\nPlace your legally obtained ISO at original/disc.iso or pass "
+        "--input <path>.");
+  }
+
+  psprecomp::HydrateConfig config;
+  config.input = arguments.input;
+  config.project_directory = arguments.project;
+  config.runtime_include_directory = PSPRECOMP_SOURCE_INCLUDE_DIR;
+  config.refract_directory = REFRACT_REFRACT_DIR;
+  config.toolchain_executable = resolve_executable(executable);
+#ifdef PSPRECOMP_BUILD_REVISION
+  config.toolchain_revision = PSPRECOMP_BUILD_REVISION;
+#else
+  config.toolchain_revision = "unknown";
+#endif
+  config.force = arguments.force;
+  config.progress = [](std::string_view message) {
+    std::cout << "  -> " << message << " ...\n";
+  };
+  const auto summary = psprecomp::hydrate_codebase(config);
+  if (summary.cached) {
+    std::cout << "Hydration is current; using cached private files.\n";
+  } else {
+    std::cout << "Hydrated project with " << summary.generated_translation_units
+              << " generated C++ translation units.\n";
+  }
+  return 0;
+}
 
 InitArguments parse_init_arguments(int argc, char **argv, int first) {
   InitArguments result;
@@ -378,6 +483,9 @@ int main(int argc, char **argv) {
     }
     if (std::string_view(argv[1]) == "init") {
       return run_init(parse_init_arguments(argc, argv, 2));
+    }
+    if (std::string_view(argv[1]) == "hydrate") {
+      return run_hydrate(parse_hydrate_arguments(argc, argv, 2), argv[0]);
     }
     if (std::string_view(argv[1]) == "patch-iso") {
       return run_patch_iso(argc, argv);

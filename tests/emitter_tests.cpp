@@ -119,6 +119,10 @@ int main() {
     const std::string gen_header(
         (std::istreambuf_iterator<char>(gen_header_stream)),
         std::istreambuf_iterator<char>());
+    std::ifstream unity_stream(project / "generated" / "native_unity_0000.cpp");
+    const std::string unity_source(
+        (std::istreambuf_iterator<char>(unity_stream)),
+        std::istreambuf_iterator<char>());
     std::filesystem::remove_all(project);
 
     CHECK(dispatch.find("dispatch_offset >= 0x00003000U && dispatch_offset <= "
@@ -139,6 +143,8 @@ int main() {
     CHECK(func_src.find("patch::invoke_patch") != std::string::npos);
     CHECK(gen_header.find("bool run_function_00001000") != std::string::npos);
     CHECK(gen_header.find("const char* function_symbol") != std::string::npos);
+    CHECK(unity_source.find("#include \"func_00001000_player_main.cpp\"") !=
+          std::string::npos);
     CHECK(platform.find("note_cpu_import_dispatch(state)") !=
           std::string::npos);
     CHECK(platform.find("generated::run(state, 0xfffffff0U, 4096ULL)") !=

@@ -1,5 +1,6 @@
 #include "../decrypt.hpp"
 #include "../elf.hpp"
+#include "../hash.hpp"
 #include "../iso.hpp"
 #include "internal.hpp"
 
@@ -102,6 +103,7 @@ namespace psprecomp
 									 config.output_directory.string());
 		}
 		const auto runtime_source = config.runtime_include_directory / "psprecomp";
+		const auto source_root = config.runtime_include_directory.parent_path();
 		if (!std::filesystem::is_directory(runtime_source))
 		{
 			throw std::runtime_error("cannot find PSPRecomp runtime headers at: " +
@@ -111,6 +113,15 @@ namespace psprecomp
 		{
 			throw std::runtime_error("cannot find refract engine at: " +
 									 config.refract_directory.string());
+		}
+		for (const auto *name : {"LICENSE", "LICENSING.md",
+								 "THIRD_PARTY_NOTICES.md"})
+		{
+			if (!std::filesystem::is_regular_file(source_root / name))
+			{
+				throw std::runtime_error("cannot find required licensing file: " +
+									 (source_root / name).string());
+			}
 		}
 
 		const auto info = inspect_source(config.input);
@@ -130,6 +141,9 @@ namespace psprecomp
 					throw std::runtime_error("PSP executable disappeared from ISO");
 				}
 				const auto executable_data = iso.read(*iso_executable);
+				std::filesystem::create_directories(staging / "original");
+				std::filesystem::copy_file(config.input,
+									   staging / "original" / "disc.iso");
 				if (is_encrypted_psp_data(executable_data))
 				{
 					if (config.progress)
@@ -169,9 +183,6 @@ namespace psprecomp
 						config.progress("Extracting the disc filesystem");
 					}
 					iso.extract_all(staging / "disc");
-					std::filesystem::create_directories(staging / "original");
-					std::filesystem::copy_file(config.input,
-											   staging / "original" / "disc.iso");
 					std::ofstream sectors(staging / "original" / "disc-sectors.tsv",
 										  std::ios::binary | std::ios::trunc);
 					if (!sectors)
@@ -279,13 +290,22 @@ namespace psprecomp
 			{
 				config.progress("Writing project files");
 			}
+			for (const auto *name : {"LICENSE", "LICENSING.md",
+									 "THIRD_PARTY_NOTICES.md"})
+			{
+				std::filesystem::copy_file(source_root / name, staging / name);
+			}
 			const bool has_disc = info.kind == InputKind::iso && config.extract_disc;
 			const auto psp_recompile_mode =
 				map && !map->overlay_starts.empty() ? std::string_view("overlays")
 													: std::string_view("full");
 			write_text(staging / "Makefile",
 					   root_makefile(config, has_disc, info.executable_path,
-									 info.sfo_path, psp_recompile_mode));
+								 info.sfo_path, psp_recompile_mode,
+								 info.kind == InputKind::iso
+									 ? "original/disc.iso"
+									 : std::filesystem::relative(executable, staging)
+										   .generic_string()));
 			std::filesystem::create_directories(staging / "patches");
 			write_text(staging / "patches" / "patches.cpp", patch_template_source());
 			write_text(staging / "patches" / "README.md", patch_tutorial_readme());
@@ -294,17 +314,29 @@ namespace psprecomp
 				write_text(staging / "tools" / "iso_patch.cpp", iso_patch_tool_source());
 			}
 			write_text(staging / ".gitignore",
-					   "src/generated/*.o\nsrc/generated/*.elf\n"
-					   "src/generated/*.prx\nsrc/generated/*.PBP\n"
-					   "src/generated/PARAM.SFO\nsrc/generated/SND0.AT3\n"
-					   "disc/\noriginal/\ndist/\nbuild/\n.psprecomp/\n"
-					   ".refract/\n.DS_Store\n");
+					   "/src/generated/*\n!/src/generated/.gitkeep\n"
+					   "/platform/*\n!/platform/.gitkeep\n"
+					   "/include/psprecomp/*\n!/include/psprecomp/.gitkeep\n"
+					   "/refract/*\n!/refract/.gitkeep\n"
+					   "/disc/*\n!/disc/.gitkeep\n"
+					   "/original/*\n!/original/.gitkeep\n"
+					   "/dist/\n/build/\n/.psprecomp/\n/.refract/\n"
+					   "*.iso\n*.ISO\n*.cso\n*.CSO\n*.chd\n*.CHD\n"
+					   "*.elf\n*.ELF\n*.prx\n*.PRX\n*.pbp\n*.PBP\n.DS_Store\n");
+			write_text(staging / "src/generated/.gitkeep", "");
+			write_text(staging / "platform/.gitkeep", "");
+			write_text(staging / "include/psprecomp/.gitkeep", "");
+			write_text(staging / "refract/.gitkeep", "");
+			write_text(staging / "disc/.gitkeep", "");
+			write_text(staging / "original/.gitkeep", "");
 			write_text(
 				staging / "README.md",
 				generated_readme(
 					config, info.kind,
 					std::filesystem::relative(executable, staging).generic_string()));
 			std::ostringstream manifest;
+			const auto input_sha256 = sha256_file(config.input);
+			const auto executable_sha256 = sha256_file(executable);
 			manifest << "format_version = 1\n"
 						"display_name = "
 					 << toml_string(config.display_name)
@@ -313,12 +345,18 @@ namespace psprecomp
 					 << "\ninput_kind = "
 					 << toml_string(info.kind == InputKind::iso ? "iso" : "executable")
 					 << "\nexecutable = " << toml_string(info.executable_path)
+					 << "\nsfo = " << toml_string(info.sfo_path)
 					 << "\ndecryption_backend = " << toml_string(decryption_backend)
 					 << "\ncode_map = "
 					 << toml_string(config.code_map ? "config/code.map" : "")
 					 << "\npsp_recompile_mode = " << toml_string(psp_recompile_mode)
-					 << "\ndisc_extracted = " << (has_disc ? "true" : "false") << "\n";
+					 << "\ndisc_extracted = " << (has_disc ? "true" : "false")
+					 << "\ninput_sha256 = " << toml_string(input_sha256)
+					 << "\nexecutable_sha256 = " << toml_string(executable_sha256)
+					 << "\n";
 			write_text(staging / "project.toml", manifest.str());
+			write_text(staging / ".psprecomp/export-hydrated",
+					   input_sha256 + "\n" + executable_sha256 + "\n");
 
 			std::size_t translation_units = 0;
 			for (const auto &entry :

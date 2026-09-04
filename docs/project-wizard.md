@@ -1,23 +1,24 @@
 # Project wizard
 
-The project wizard is the recommended entry point for PSPRecomp. It turns one
-legally obtained PSP ISO, ELF or PRX into a complete source tree that can be
-built independently from the recompiler repository.
+The project wizard is the recommended entry point for psprism. It turns one
+legally obtained PSP ISO, ELF or PRX into a bring-your-own-game project. A
+public Git repository contains only metadata, build files and authored
+patches; copyrighted code and assets are recreated locally during hydration.
 
 ## Interactive use
 
-Build PSPRecomp, then launch it with no arguments:
+Build psprism, then launch it with no arguments:
 
 ```sh
 cmake -S . -B build
 cmake --build build -j
-./build/psprecomp
+./build/psprism
 ```
 
 You can also pass the input on the command line:
 
 ```sh
-./build/psprecomp path/to/game.iso
+./build/psprism path/to/game.iso
 ```
 
 The wizard asks for:
@@ -41,7 +42,7 @@ entire export succeeds.
 Every answer is also available as an option:
 
 ```sh
-psprecomp init game.iso \
+psprism init game.iso \
   --display-name "Example Game Recompiled" \
   --project-name example_game \
   --output ./example_game \
@@ -55,7 +56,9 @@ values. Use `--no-extract-disc` when only the executable is needed.
 
 ## Generated project
 
-The root `Makefile` is the normal entry point:
+In a fresh clone, first place the exact supported dump at
+`original/disc.iso` (or pass `GAME_INPUT=/path/to/game.iso`). The normal build
+targets invoke hydration automatically through the root `Makefile`:
 
 ```sh
 make psp         # build PRX, EBOOT.PBP and a rebuilt ISO
@@ -65,6 +68,18 @@ make macos-debug # build a native Debug .app
 make macos-run   # build and execute the native Release app
 make clean       # remove compiler products
 ```
+
+`make hydrate` validates the input kind, disc ID, complete input SHA-256 and
+decrypted executable SHA-256 recorded in `project.toml`. It then extracts the
+private disc tree, statically recompiles the executable, generates platform
+glue, and copies the runtime headers and `refract` implementation belonging to
+the selected psprism toolchain. Use `PSPRISM=/path/to/psprism`, install
+`psprism` in `PATH`, or put its source checkout at `toolchain/psprism`.
+
+Successful hydration is cached using the input path, size and modification
+time together with the manifest, code map and toolchain revision. Repeated
+builds therefore avoid hashing a multi-gigabyte ISO. Set
+`HYDRATE_FLAGS=--force` to regenerate all private output.
 
 `make psp` and `make psp-run` never fall back to packaging an untouched PSP
 executable. Fixed-address executables and relocatable PRX files both use the
@@ -81,7 +96,7 @@ fails during configuration when `REFRACT_USE_FFMPEG=ON` and those development
 libraries are unavailable, instead of producing a build with silently broken
 video. Use `-DREFRACT_USE_FFMPEG=OFF` only when cutscene decoding is not needed.
 
-For ISO exports, the PSP targets create a lightweight run tree under
+For ISO projects, the PSP targets create a lightweight run tree under
 `.psprecomp/run`. Game assets are symlinked from `disc/`, while the generated
 PRX and `PARAM.SFO` are copied into place. This avoids duplicating the full
 disc for every launch and enables the PSP high-memory layout required by large
@@ -90,13 +105,13 @@ recompiled executables. `make psp` additionally authors `dist/<project>.iso`;
 assets with permissive flags that an immutable ISO cannot provide in PPSSPP.
 Set `PPSSPP=/path/to/ppsspp` if the command is not in `PATH`.
 
-`platform/platform.h` is the generated contract for every imported PSP call.
+`platform/platform.h` is the hydrated contract for every imported PSP call.
 `platform/psp` satisfies it using the original SCE ABI and owns the PSP entry
 point. For `make macos-run`, the generated `platform/macos` adapter sends those
-imports to the statically linked `psprism/` engine. The Makefile also points
-psprism at `disc/` and a private `.refract/ms0/` writable tree. The translated
-CPU code under `src/generated` therefore has no direct dependency on PSP SDK
-headers or SCE functions.
+imports to the statically linked `refract/` engine. The Makefile also points
+refract at the user's ISO and a private `.refract/ms0/` writable tree. The
+translated CPU code under `src/generated` therefore has no direct dependency
+on PSP SDK headers or SCE functions.
 
 Generated C++ lives in `src/generated`. With a code map, Guest functions are
 written one per address-named `func_*.cpp` file, with the original binary range
@@ -110,18 +125,42 @@ Generated continuation trampolines let an overlay call an unchanged direct or
 indirect Guest function and resume the edited body afterward. Unsupported
 dynamic non-return jumps are reported during export.
 
-The portable runtime is copied into `include/psprecomp`, and the complete
-psprism source is copied into `psprism/`, so moving or archiving the export does
-not break its build. That psprism copy is meant to be edited when a game needs
-a host compatibility quirk.
+`src/generated/`, `platform/`, `include/psprecomp/`, `refract/`, `disc/` and
+`original/` are deliberately ignored by the generated `.gitignore`. A clean
+clone retains only `.gitkeep` placeholders and recreates those trees from the
+verified input. Keep game-specific source changes in tracked `patches/`; make
+shared compatibility fixes in psprism/refract itself so a later hydration can
+safely refresh the runtime. Publish the Git tree, not an archive of your
+hydrated working directory.
 
-`disc/` and `original/` are deliberately ignored by the generated `.gitignore`
-to make accidental publication of copyrighted data less likely. Generated C++,
-configuration, runtime headers and documentation remain trackable.
+## Publishing a clean repository
+
+Every export includes `LICENSE`, `LICENSING.md` and
+`THIRD_PARTY_NOTICES.md`. Keep all three files in the public repository. They
+license the authored project skeleton and patches under GPL version 3 or
+later, while explicitly excluding the original game and generated translation
+output.
+
+The generated `.gitignore` is sufficient for the normal workflow. Before the
+first push, stage and inspect the repository from the exported project root:
+
+```sh
+git init
+git add .
+git status --short --ignored
+git ls-files
+```
+
+Only the skeleton, patch sources, metadata, documentation and `.gitkeep`
+placeholders should be tracked. In particular, `git ls-files` must not show an
+ISO, ELF, PRX, PBP, extracted disc file, translated source file, or hydrated
+runtime file. `.gitignore` does not remove a file from existing history and
+can be bypassed with `git add --force`, so publish from the clean skeleton
+history rather than reusing a repository that ever tracked private output.
 
 ## ISO notes
 
-PSPRecomp currently reads uncompressed ISO 9660 images. CSO and CHD containers
+psprism currently reads uncompressed ISO 9660 images. CSO and CHD containers
 must first be converted to ISO. Retail `EBOOT.BIN` files beginning with `~PSP`
 are decrypted automatically using a compatible local PPSSPP installation. The
 wizard performs decryption before extracting the complete disc, so a missing or
@@ -131,7 +170,7 @@ PPSSPP is discovered through `PATH`, common macOS application/Homebrew paths,
 or an explicit environment variable:
 
 ```sh
-PSPRECOMP_PPSSPP=/path/to/PPSSPPSDL psprecomp game.iso
+PSPRECOMP_PPSSPP=/path/to/PPSSPPSDL psprism game.iso
 ```
 
 `make psp` masters the rebuilt tree with `xorriso`, `mkisofs`, or macOS

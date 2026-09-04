@@ -22,7 +22,8 @@ std::string generated_readme(const ExportConfig& config, InputKind kind,
 std::string root_makefile(const ExportConfig& config, bool has_disc,
                           std::string_view disc_executable,
                           std::string_view sfo_path,
-                          std::string_view psp_recompile_mode);
+                          std::string_view psp_recompile_mode,
+                          std::string_view hydration_input);
 std::string iso_patch_tool_source();
 std::string patch_template_source();
 std::string patch_tutorial_readme();

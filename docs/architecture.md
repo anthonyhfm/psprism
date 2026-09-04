@@ -122,12 +122,17 @@ Windows host modules can later implement the same small host interface.
 
 The low-level emitter creates translated sources plus PSP and macOS platform
 glue.
-The project exporter wraps that output in a stable, beginner-facing codebase:
-it vendors the portable headers and psprism source, records inputs and choices in `project.toml`,
-copies the optional code map, writes build documentation, and includes the disc
-filesystem when requested. Generation happens in a sibling staging directory
-and is renamed into place only after every step succeeds, so failed translation
-does not leave a plausible-looking partial project.
+The project exporter wraps that output in a stable, beginner-facing codebase.
+It records input identity and choices in `project.toml`, copies the optional
+code map, and writes tracked build and patching files. Generated code, platform
+glue, runtime copies, original input and disc files are Git-ignored.
+
+In a clean clone, `psprism hydrate` verifies the user's dump against its disc
+ID and cryptographic hashes, rebuilds those private trees in a sibling staging
+directory, and publishes them atomically. The generated Makefile invokes this
+step before PSP and macOS builds and caches the result using the manifest, code
+map, input identity and toolchain revision. Failed validation or translation
+therefore cannot leave a plausible-looking partial hydration.
 
 ## Verification strategy
 
@@ -135,7 +140,7 @@ does not leave a plausible-looking partial project.
 - Compile synthetic C with PSPSDK, recompile it to C++, and compare it with the
   native reference implementation.
 - Compile the same generated C++ back to a PSP PRX and package an EBOOT.
-- Build the self-contained export as a native optimized macOS application.
+- Hydrate a clean export and build it as a native optimized macOS application.
 - Compare register, memory and import traces between original and recompiled
   programs.
 - Treat PPSSPP and physical PSP hardware as independent validation targets.

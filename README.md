@@ -9,7 +9,7 @@
 
 ## 🚀 Overview
 
-**psprism** converts PlayStation Portable executables (ISOs, ELFs, or PRXs) into readable, self-contained C++20 projects.
+**psprism** converts PlayStation Portable executables (ISOs, ELFs, or PRXs) into readable C++20 projects. Exported repositories can use a bring-your-own-game workflow: original code and assets remain untracked and are recreated locally from each user's legally obtained dump.
 
 Rather than interpreting instructions at runtime like a traditional emulator, `psprism` statically recompiles MIPS Allegrex machine code, VFPU vector operations, relocations, and imports ahead of time. The resulting C++20 project can run through the native `refract` compatibility layer or be rebuilt as a hybrid PSP executable for validation on PPSSPP and real hardware.
 
@@ -124,6 +124,9 @@ framework. See [Game-function patching](docs/game-patching.md).
 ```bash
 cd game_recompiled
 
+# In a clean public clone, supply your own matching dump first.
+cp /path/to/game.iso original/disc.iso
+
 # Build for PSP Hardware / PPSSPP
 make psp
 
@@ -131,6 +134,13 @@ make psp
 make macos
 make macos-run
 ```
+
+The first build runs `psprism hydrate`: it verifies the disc ID and SHA-256,
+then generates the translated sources, disc assets, platform glue and matching
+`refract` runtime locally. Those files and the original dump are ignored by
+Git. Later builds use a fast local hydration cache. Select a toolchain with
+`PSPRISM=/path/to/psprism`; a checkout at `toolchain/psprism` is also
+supported.
 
 Native PMF cutscenes use the system FFmpeg libraries (`avcodec`, `avformat`,
 `avutil` and `swscale`). On macOS, install them before configuring a generated
@@ -148,7 +158,7 @@ H.264 cutscene decoding.
 ## ⚡ Key Features
 
 * 🧬 **Allegrex MIPS & VFPU Lifting:** Translates integer, FPU, and vector operations into standard C++20.
-* 📦 **Self-Contained Output:** Generated C++ projects build independently without requiring `psprism` source trees.
+* 📦 **Bring-Your-Own-Game Output:** Public project repositories contain metadata and patches; verified code and assets are hydrated locally from the user's own dump.
 * 🗺️ **Ghidra Map Integration:** Imports function symbol boundaries and names for readable code structure.
 * 🧷 **Hybrid PSP Overlays:** Keeps unchanged Allegrex functions native while compiling edited generated functions back into the PSP build.
 * 🎯 **Hardware Roundtrip Verification:** Exercises generated changes through automated PSP tests and real-hardware gameplay validation.
@@ -160,3 +170,22 @@ H.264 cutscene decoding.
 A significant portion of the `psprism` codebase and translation runtime was built with the assistance of AI technology, developed under close human guidance, architectural review, and testing.
 
 This project uses AI as a force multiplier for software preservation—accelerating complex MIPS/VFPU instruction lifting, subsystem stubbing, and host translation layers that would otherwise require thousands of hours of manual labor. Every component is audited and verified against real PSP hardware to ensure correctness, stability, and open-source longevity.
+
+---
+
+## 📜 License and game-content policy
+
+psprism and Refract are licensed under
+[GNU GPL version 3 or later](LICENSE). Bundled third-party components retain
+their own compatible licenses; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
+The license covers only material the project has the right to license. It does
+not cover PSP games, translated game code, disc images, decrypted executables,
+assets, screenshots, logos, or trademarks. Exported repositories use a
+bring-your-own-game workflow and must not publish hydrated or compiled game
+output. See [LICENSING.md](LICENSING.md) for the exact boundary and publication
+guidance.
+
+psprism is unofficial and is not affiliated with or endorsed by Sony
+Interactive Entertainment, Ready at Dawn, or any game publisher or
+rightsholder.
