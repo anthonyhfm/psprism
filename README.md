@@ -59,18 +59,7 @@ An automated PSP roundtrip test modifies a generated function, rebuilds the PRX 
 > [!NOTE]
 > **Work in Progress:** `psprism` is an active open-source project working to revive PSP games and bring them to modern operating systems and other platforms including older devices where PSP emulators like PPSSPP cannot run.
 
-Compatibility is no longer limited to a single startup path. Current manual validation covers a complete playthrough on real PSP hardware and several games from different engines running natively on macOS:
-
-| Title | PSP Output | Native macOS (`refract`) |
-|---|:---:|:---:|
-| **Daxter** *(Ready at Dawn)* | ✅ **Fully Playable** — 100% completion verified on real hardware | ✅ In-game |
-| **LEGO Batman: The Videogame** | ⚪ Not yet publicly validated | ✅ In-game, combat and audio |
-| **Tetris** *(EA)* | ⚪ Not yet publicly validated | ✅ Playable with graphics, input and audio |
-| **God of War: Chains of Olympus** | ⚪ Not yet publicly validated | 🟡 Startup and menu flow |
-
-* 🕹️ **Hardware Roundtrip:** Daxter executes from start to finish in the rebuilt PSP package with graphics, audio, game logic and VFPU behavior intact. Generated overlay changes are covered independently by the automated PSP roundtrip test.
-* 🖥️ **Host Translation Layer:** `refract` now reaches interactive gameplay in multiple titles from different engines. The compatibility work is implemented in shared PSP subsystems rather than title- or address-specific patches.
-* 🧪 **Validation scope:** The table records observed milestones, not a claim that every scene or subsystem is complete. Results can still vary by title, region and execution path while development continues.
+### Daxter (2006) running in PSPRISM with refract compared to PPSSPP:
 
 | PPSSPP Reference | Native macOS (`psprism` + `refract`) |
 |:---:|:---:|
