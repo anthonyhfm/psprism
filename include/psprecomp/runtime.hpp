@@ -1,5 +1,11 @@
 #pragma once
 
+#if defined(_MSC_VER)
+#define PSPRECOMP_RESTRICT __restrict
+#else
+#define PSPRECOMP_RESTRICT __restrict__
+#endif
+
 #include <bit>
 #include <cmath>
 #include <cstddef>

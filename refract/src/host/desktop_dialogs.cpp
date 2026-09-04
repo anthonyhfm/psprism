@@ -47,7 +47,11 @@ constexpr std::array<std::string_view, 40> osk_keys{
 
 QApplication* ensure_application() {
   if (qApp != nullptr) return qApp;
+#if defined(_WIN32)
+  qputenv("QT_QPA_PLATFORM", QByteArray("windows"));
+#elif defined(__APPLE__)
   qputenv("QT_QPA_PLATFORM", QByteArray("cocoa"));
+#endif
   const auto deployed = QLibraryInfo::path(QLibraryInfo::PluginsPath) +
                         "/platforms";
   const auto plugins = QDir(deployed).exists()

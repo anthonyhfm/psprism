@@ -32,7 +32,7 @@ void sceIoRead(Implementation& implementation, psprecomp::State& state) {
     size = *byte_count;
   }
   if (file_view) {
-    const auto position = ::lseek(descriptor, 0, SEEK_CUR);
+    const auto position = host_file::seek(descriptor, 0, SEEK_CUR);
     if (position < 0) {
       state.gpr[2] = io_error;
       return;
@@ -49,7 +49,7 @@ void sceIoRead(Implementation& implementation, psprecomp::State& state) {
     return;
   }
   auto* buffer = psprecomp::mapped_address(state, state.gpr[5], size);
-  const auto result = ::read(descriptor, buffer, size);
+  const auto result = host_file::read(descriptor, buffer, size);
   state.gpr[2] =
       result < 0
           ? io_error

@@ -32,7 +32,7 @@ void sceIoReadAsync(Implementation& implementation, psprecomp::State& state) {
     size = *byte_count;
   }
   if (file_view) {
-    const auto position = ::lseek(descriptor, 0, SEEK_CUR);
+    const auto position = host_file::seek(descriptor, 0, SEEK_CUR);
     if (position < 0) {
       state.gpr[2] = io_error;
       return;
@@ -51,7 +51,7 @@ void sceIoReadAsync(Implementation& implementation, psprecomp::State& state) {
     return;
   }
   auto* buffer = psprecomp::mapped_address(state, state.gpr[5], size);
-  const auto result = ::read(descriptor, buffer, size);
+  const auto result = host_file::read(descriptor, buffer, size);
   {
     std::lock_guard lock(implementation.io_mutex);
     implementation.async_results[psp_descriptor] =

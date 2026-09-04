@@ -13,7 +13,7 @@ void sceIoClose(Implementation& implementation, psprecomp::State& state) {
     implementation.sector_files.erase(psp_descriptor);
     implementation.async_results.erase(psp_descriptor);
   }
-  state.gpr[2] = ::close(host_descriptor) == 0 ? 0U : io_error;
+  state.gpr[2] = host_file::close(host_descriptor) == 0 ? 0U : io_error;
   return;
 #else
   (void)implementation;

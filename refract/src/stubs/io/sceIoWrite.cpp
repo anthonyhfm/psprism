@@ -8,7 +8,7 @@ void sceIoWrite(Implementation& implementation, psprecomp::State& state) {
     return;
   }
   const auto* buffer = psprecomp::mapped_address(state, state.gpr[5], size);
-  const auto result = ::write(descriptor, buffer, size);
+  const auto result = host_file::write(descriptor, buffer, size);
   state.gpr[2] = result < 0 ? io_error : static_cast<std::uint32_t>(result);
   return;
 #else

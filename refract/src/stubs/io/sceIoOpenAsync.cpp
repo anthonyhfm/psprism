@@ -19,19 +19,20 @@ void sceIoOpenAsync(Implementation& implementation, psprecomp::State& state) {
         std::filesystem::create_directories(resolved.parent_path(), ignored);
       }
       auto descriptor =
-          ::open(resolved.c_str(), host_open_flags(state.gpr[5]),
-                 static_cast<mode_t>(state.gpr[6]));
+          host_file::open(resolved, host_open_flags(state.gpr[5]),
+                          static_cast<int>(state.gpr[6]));
       if (descriptor >= 0 && raw_disc) {
-        const auto end = ::lseek(descriptor, 0, SEEK_END);
+        const auto end = host_file::seek(descriptor, 0, SEEK_END);
         raw_disc_view = end < 0
                             ? std::nullopt
                             : io_state::complete_file_view(
                                   *raw_disc_view,
                                   static_cast<std::uint64_t>(end));
         if (!raw_disc_view ||
-            ::lseek(descriptor, static_cast<off_t>(raw_disc_view->base),
-                    SEEK_SET) < 0) {
-          ::close(descriptor);
+            host_file::seek(descriptor,
+                            static_cast<host_file::Offset>(raw_disc_view->base),
+                            SEEK_SET) < 0) {
+          host_file::close(descriptor);
           descriptor = -1;
         }
       }

@@ -30,18 +30,18 @@ void sceIoLseekAsync(Implementation& implementation, psprecomp::State& state) {
       const auto offset =
           io_state::signed_from_words(state.gpr[6], state.gpr[7]);
       const auto whence = state.gpr[8];
-      off_t result{-1};
+      host_file::Offset result{-1};
       if (sector_file) {
         std::optional<std::uint64_t> origin;
         if (whence == SEEK_SET) {
           origin = 0U;
         } else if (whence == SEEK_CUR) {
-          const auto current = ::lseek(descriptor, 0, SEEK_CUR);
+          const auto current = host_file::seek(descriptor, 0, SEEK_CUR);
           if (current >= 0)
             origin = io_state::complete_sector_count(
                 static_cast<std::uint64_t>(current));
         } else if (whence == SEEK_END) {
-          const auto end = ::lseek(descriptor, 0, SEEK_END);
+          const auto end = host_file::seek(descriptor, 0, SEEK_END);
           if (end >= 0)
             origin = io_state::complete_sector_count(
                 static_cast<std::uint64_t>(end));
@@ -52,12 +52,13 @@ void sceIoLseekAsync(Implementation& implementation, psprecomp::State& state) {
             logical ? io_state::sector_byte_offset(*logical) : std::nullopt;
         if (logical && byte_offset &&
             *byte_offset <= static_cast<std::uint64_t>(
-                                std::numeric_limits<off_t>::max()) &&
-            ::lseek(descriptor, static_cast<off_t>(*byte_offset), SEEK_SET) >=
-                0)
-          result = static_cast<off_t>(*logical);
+                                std::numeric_limits<host_file::Offset>::max()) &&
+            host_file::seek(descriptor,
+                            static_cast<host_file::Offset>(*byte_offset),
+                            SEEK_SET) >= 0)
+          result = static_cast<host_file::Offset>(*logical);
       } else if (!has_view) {
-        result = ::lseek(descriptor, offset, static_cast<int>(whence));
+        result = host_file::seek(descriptor, offset, static_cast<int>(whence));
       } else {
         std::optional<std::uint64_t> origin;
         if (whence == SEEK_SET) {
@@ -65,7 +66,7 @@ void sceIoLseekAsync(Implementation& implementation, psprecomp::State& state) {
         } else if (whence == SEEK_END) {
           origin = file_view.size;
         } else if (whence == SEEK_CUR) {
-          const auto current = ::lseek(descriptor, 0, SEEK_CUR);
+          const auto current = host_file::seek(descriptor, 0, SEEK_CUR);
           if (current >= 0 &&
               static_cast<std::uint64_t>(current) >= file_view.base)
             origin = static_cast<std::uint64_t>(current) - file_view.base;
@@ -76,11 +77,13 @@ void sceIoLseekAsync(Implementation& implementation, psprecomp::State& state) {
             *logical <= std::numeric_limits<std::uint64_t>::max() -
                             file_view.base &&
             file_view.base + *logical <=
-                static_cast<std::uint64_t>(std::numeric_limits<off_t>::max()) &&
-            ::lseek(descriptor,
-                    static_cast<off_t>(file_view.base + *logical),
-                    SEEK_SET) >= 0)
-          result = static_cast<off_t>(*logical);
+                static_cast<std::uint64_t>(
+                    std::numeric_limits<host_file::Offset>::max()) &&
+            host_file::seek(descriptor,
+                            static_cast<host_file::Offset>(file_view.base +
+                                                           *logical),
+                            SEEK_SET) >= 0)
+          result = static_cast<host_file::Offset>(*logical);
       }
       {
         std::lock_guard lock(implementation.io_mutex);

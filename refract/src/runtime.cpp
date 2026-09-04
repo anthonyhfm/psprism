@@ -2,6 +2,7 @@
 #include <refract/psp_sdk_stubs.hpp>
 
 #include "host/host.hpp"
+#include "host/filesystem.hpp"
 #include "ge/ge_backend.hpp"
 #include "ge/ge_interpreter.hpp"
 #include "ge/ge_scheduler.hpp"
@@ -26,7 +27,6 @@
 #include <cstring>
 #include <ctime>
 #include <deque>
-#include <fcntl.h>
 #include <filesystem>
 #include <fstream>
 #include <memory>
@@ -34,7 +34,6 @@
 #include <optional>
 #include <string>
 #include <thread>
-#include <unistd.h>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -519,7 +518,11 @@ std::string file_timestamp(const std::filesystem::path& path) {
       std::chrono::system_clock::now());
   const auto time = std::chrono::system_clock::to_time_t(system_time);
   std::tm local{};
+#if defined(_WIN32)
+  if (localtime_s(&local, &time) != 0) return {};
+#else
   if (localtime_r(&time, &local) == nullptr) return {};
+#endif
   char formatted[32]{};
   return std::strftime(formatted, sizeof(formatted), "%Y-%m-%d %H:%M", &local)
              ? formatted
@@ -1243,7 +1246,7 @@ Runtime::~Runtime() {
     std::lock_guard lock(implementation_->io_mutex);
     for (const auto& [psp_descriptor, host_descriptor] : implementation_->files) {
       static_cast<void>(psp_descriptor);
-      ::close(host_descriptor);
+      host_file::close(host_descriptor);
     }
   }
   delete implementation_;
@@ -1326,9 +1329,11 @@ void Runtime::configure(std::uint8_t* memory, std::size_t size,
   }
   host::initialize_frontend();
   if (implementation_->verbose) {
-    std::fprintf(stderr, "[psprism:macos] disc=%s writable=%s\n",
-                 implementation_->configuration.disc_root.c_str(),
-                 implementation_->configuration.writable_root.c_str());
+    const auto disc = implementation_->configuration.disc_root.string();
+    const auto writable =
+        implementation_->configuration.writable_root.string();
+    std::fprintf(stderr, "[psprism:host] disc=%s writable=%s\n",
+                 disc.c_str(), writable.c_str());
   }
 }
 
@@ -1385,7 +1390,7 @@ void Runtime::warn_unimplemented(psprecomp::State& state,
                                 std::string_view name) {
   state.gpr[2] = unimplemented;
   if (implementation_->verbose && implementation_->warned.emplace(name).second) {
-    std::fprintf(stderr, "[psprism:macos] unimplemented: %.*s\n",
+    std::fprintf(stderr, "[psprism:host] unimplemented: %.*s\n",
                  static_cast<int>(name.size()), name.data());
   }
 }

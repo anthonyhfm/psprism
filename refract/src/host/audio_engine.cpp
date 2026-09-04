@@ -33,7 +33,7 @@ AudioEngine::SubmitResult AudioEngine::submit(
       // window without introducing a real-time priority inversion.
       const auto remaining = deadline - now;
       const auto poll_interval =
-          std::chrono::duration_cast<decltype(remaining)>(
+          std::chrono::duration_cast<std::chrono::steady_clock::duration>(
               std::chrono::milliseconds(1));
       target.space_available.wait_for(
           lock, std::min(remaining, poll_interval));

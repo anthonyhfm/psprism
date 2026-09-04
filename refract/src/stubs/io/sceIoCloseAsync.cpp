@@ -12,7 +12,7 @@ void sceIoCloseAsync(Implementation& implementation, psprecomp::State& state) {
     implementation.file_views.erase(psp_descriptor);
     implementation.sector_files.erase(psp_descriptor);
   }
-  const auto result = ::close(host_descriptor) == 0 ? 0U : io_error;
+  const auto result = host_file::close(host_descriptor) == 0 ? 0U : io_error;
   {
     std::lock_guard lock(implementation.io_mutex);
     implementation.async_results[psp_descriptor] =
